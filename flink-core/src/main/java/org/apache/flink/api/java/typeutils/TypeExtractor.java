@@ -953,6 +953,11 @@ public class TypeExtractor {
 				break;
 			}
 		}
+
+		if (inputTypeHierarchy.size() == 0) {
+			return null;
+		}
+
 		ParameterizedType baseClass = (ParameterizedType) inputTypeHierarchy.get(inputTypeHierarchy.size() - 1);
 
 		TypeInformation<?> info = null;
@@ -1802,8 +1807,8 @@ public class TypeExtractor {
 				if((methodNameLow.equals("set"+fieldNameLow) || methodNameLow.equals(fieldNameLow+"_$eq")) &&
 					m.getParameterTypes().length == 1 && // one parameter of the field's type
 					(m.getGenericParameterTypes()[0].equals( fieldType ) || (fieldTypeWrapper != null && m.getParameterTypes()[0].equals( fieldTypeWrapper )) || (fieldTypeGeneric != null && m.getGenericParameterTypes()[0].equals(fieldTypeGeneric) ) )&&
-					// return type is void.
-					m.getReturnType().equals(Void.TYPE)
+					// return type is void (or the class self).
+					(m.getReturnType().equals(Void.TYPE) || m.getReturnType().equals(clazz))
 				) {
 					hasSetter = true;
 				}
@@ -1811,10 +1816,10 @@ public class TypeExtractor {
 			if(hasGetter && hasSetter) {
 				return true;
 			} else {
-				if(!hasGetter) {
+				if(!hasGetter && clazz != Row.class) {
 					LOG.info(clazz+" does not contain a getter for field "+f.getName() );
 				}
-				if(!hasSetter) {
+				if(!hasSetter && clazz != Row.class) {
 					LOG.info(clazz+" does not contain a setter for field "+f.getName() );
 				}
 				return false;
@@ -1853,7 +1858,7 @@ public class TypeExtractor {
 		List<PojoField> pojoFields = new ArrayList<PojoField>();
 		for (Field field : fields) {
 			Type fieldType = field.getGenericType();
-			if(!isValidPojoField(field, clazz, typeHierarchy)) {
+			if(!isValidPojoField(field, clazz, typeHierarchy) && clazz != Row.class) {
 				LOG.info("Class " + clazz + " cannot be used as a POJO type because not all fields are valid POJO fields, " +
 					"and must be processed as GenericType. Please read the Flink documentation " +
 					"on \"Data Types & Serialization\" for details of the effect on performance.");
@@ -2076,7 +2081,7 @@ public class TypeExtractor {
 
 		Class<?> typeInfoClass;
 		try {
-			typeInfoClass = Class.forName(HADOOP_WRITABLE_TYPEINFO_CLASS, false, TypeExtractor.class.getClassLoader());
+			typeInfoClass = Class.forName(HADOOP_WRITABLE_TYPEINFO_CLASS, false, Thread.currentThread().getContextClassLoader());
 		}
 		catch (ClassNotFoundException e) {
 			throw new RuntimeException("Could not load the TypeInformation for the class '"

@@ -64,6 +64,7 @@ public class DynamoDBStreamsDataFetcher<T> extends KinesisDataFetcher<T> {
 			deserializationSchema,
 			shardAssigner,
 			null,
+			null,
 			new AtomicReference<>(),
 			new ArrayList<>(),
 			createInitialSubscribedStreamsToLastDiscoveredShardsState(streams),
@@ -92,11 +93,12 @@ public class DynamoDBStreamsDataFetcher<T> extends KinesisDataFetcher<T> {
 	 * @return
 	 */
 	@Override
-	protected ShardConsumer createShardConsumer(
+	protected ShardConsumer<T> createShardConsumer(
 		Integer subscribedShardStateIndex,
 		StreamShardHandle handle,
 		SequenceNumber lastSeqNum,
-		ShardMetricsReporter shardMetricsReporter) {
+		ShardMetricsReporter shardMetricsReporter,
+		KinesisDeserializationSchema<T> shardDeserializer) {
 
 		return new ShardConsumer(
 			this,
@@ -104,6 +106,7 @@ public class DynamoDBStreamsDataFetcher<T> extends KinesisDataFetcher<T> {
 			handle,
 			lastSeqNum,
 			DynamoDBStreamsProxy.create(getConsumerConfiguration()),
-			shardMetricsReporter);
+			shardMetricsReporter,
+			shardDeserializer);
 	}
 }

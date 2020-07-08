@@ -62,12 +62,14 @@ public class ShardConsumerTest {
 
 		TestSourceContext<String> sourceContext = new TestSourceContext<>();
 
+		KinesisDeserializationSchemaWrapper<String> deserializationSchema = new KinesisDeserializationSchemaWrapper<>(
+			new SimpleStringSchema());
 		TestableKinesisDataFetcher<String> fetcher =
 			new TestableKinesisDataFetcher<>(
 				Collections.singletonList("fakeStream"),
 				sourceContext,
 				new Properties(),
-				new KinesisDeserializationSchemaWrapper<>(new SimpleStringSchema()),
+				deserializationSchema,
 				10,
 				2,
 				new AtomicReference<>(),
@@ -83,7 +85,9 @@ public class ShardConsumerTest {
 			subscribedShardsStateUnderTest.get(0).getStreamShardHandle(),
 			subscribedShardsStateUnderTest.get(0).getLastProcessedSequenceNum(),
 			FakeKinesisBehavioursFactory.totalNumOfRecordsAfterNumOfGetRecordsCalls(1000, 9, millisBehindLatest),
-			shardMetricsReporter).run();
+			shardMetricsReporter,
+			deserializationSchema)
+			.run();
 
 		// the millisBehindLatest metric should have been reported
 		assertEquals(millisBehindLatest, shardMetricsReporter.getMillisBehindLatest());
@@ -100,12 +104,14 @@ public class ShardConsumerTest {
 
 		TestSourceContext<String> sourceContext = new TestSourceContext<>();
 
+		KinesisDeserializationSchemaWrapper<String> deserializationSchema = new KinesisDeserializationSchemaWrapper<>(
+			new SimpleStringSchema());
 		TestableKinesisDataFetcher<String> fetcher =
 			new TestableKinesisDataFetcher<>(
 				Collections.singletonList("fakeStream"),
 				sourceContext,
 				new Properties(),
-				new KinesisDeserializationSchemaWrapper<>(new SimpleStringSchema()),
+				deserializationSchema,
 				10,
 				2,
 				new AtomicReference<>(),
@@ -113,13 +119,16 @@ public class ShardConsumerTest {
 				KinesisDataFetcher.createInitialSubscribedStreamsToLastDiscoveredShardsState(Collections.singletonList("fakeStream")),
 				Mockito.mock(KinesisProxyInterface.class));
 
+		int shardIndex = fetcher.registerNewSubscribedShardState(subscribedShardsStateUnderTest.get(0));
 		new ShardConsumer<>(
 			fetcher,
-			0,
+			shardIndex,
 			subscribedShardsStateUnderTest.get(0).getStreamShardHandle(),
 			subscribedShardsStateUnderTest.get(0).getLastProcessedSequenceNum(),
 			FakeKinesisBehavioursFactory.totalNumOfRecordsAfterNumOfGetRecordsCalls(1000, 9, 500L),
-			new ShardMetricsReporter()).run();
+			new ShardMetricsReporter(),
+			deserializationSchema)
+			.run();
 
 		assertEquals(1000, sourceContext.getCollectedOutputs().size());
 		assertEquals(
@@ -138,12 +147,14 @@ public class ShardConsumerTest {
 
 		TestSourceContext<String> sourceContext = new TestSourceContext<>();
 
+		KinesisDeserializationSchemaWrapper<String> deserializationSchema = new KinesisDeserializationSchemaWrapper<>(
+			new SimpleStringSchema());
 		TestableKinesisDataFetcher<String> fetcher =
 			new TestableKinesisDataFetcher<>(
 				Collections.singletonList("fakeStream"),
 				sourceContext,
 				new Properties(),
-				new KinesisDeserializationSchemaWrapper<>(new SimpleStringSchema()),
+				deserializationSchema,
 				10,
 				2,
 				new AtomicReference<>(),
@@ -151,16 +162,19 @@ public class ShardConsumerTest {
 				KinesisDataFetcher.createInitialSubscribedStreamsToLastDiscoveredShardsState(Collections.singletonList("fakeStream")),
 				Mockito.mock(KinesisProxyInterface.class));
 
+		int shardIndex = fetcher.registerNewSubscribedShardState(subscribedShardsStateUnderTest.get(0));
 		new ShardConsumer<>(
 			fetcher,
-			0,
+			shardIndex,
 			subscribedShardsStateUnderTest.get(0).getStreamShardHandle(),
 			subscribedShardsStateUnderTest.get(0).getLastProcessedSequenceNum(),
 			// Get a total of 1000 records with 9 getRecords() calls,
 			// and the 7th getRecords() call will encounter an unexpected expired shard iterator
 			FakeKinesisBehavioursFactory.totalNumOfRecordsAfterNumOfGetRecordsCallsWithUnexpectedExpiredIterator(
 				1000, 9, 7, 500L),
-			new ShardMetricsReporter()).run();
+			new ShardMetricsReporter(),
+			deserializationSchema)
+			.run();
 
 		assertEquals(1000, sourceContext.getCollectedOutputs().size());
 		assertEquals(
@@ -182,12 +196,14 @@ public class ShardConsumerTest {
 
 		TestSourceContext<String> sourceContext = new TestSourceContext<>();
 
+		KinesisDeserializationSchemaWrapper<String> deserializationSchema = new KinesisDeserializationSchemaWrapper<>(
+			new SimpleStringSchema());
 		TestableKinesisDataFetcher<String> fetcher =
 			new TestableKinesisDataFetcher<>(
 				Collections.singletonList("fakeStream"),
 				sourceContext,
 				consumerProperties,
-				new KinesisDeserializationSchemaWrapper<>(new SimpleStringSchema()),
+				deserializationSchema,
 				10,
 				2,
 				new AtomicReference<>(),
@@ -195,14 +211,17 @@ public class ShardConsumerTest {
 				KinesisDataFetcher.createInitialSubscribedStreamsToLastDiscoveredShardsState(Collections.singletonList("fakeStream")),
 				Mockito.mock(KinesisProxyInterface.class));
 
+		int shardIndex = fetcher.registerNewSubscribedShardState(subscribedShardsStateUnderTest.get(0));
 		new ShardConsumer<>(
 			fetcher,
-			0,
+			shardIndex,
 			subscribedShardsStateUnderTest.get(0).getStreamShardHandle(),
 			subscribedShardsStateUnderTest.get(0).getLastProcessedSequenceNum(),
 			// Initial number of records to fetch --> 10
 			FakeKinesisBehavioursFactory.initialNumOfRecordsAfterNumOfGetRecordsCallsWithAdaptiveReads(10, 2, 500L),
-			new ShardMetricsReporter()).run();
+			new ShardMetricsReporter(),
+			deserializationSchema)
+			.run();
 
 		// Avg record size for first batch --> 10 * 10 Kb/10 = 10 Kb
 		// Number of records fetched in second batch --> 2 Mb/10Kb * 5 = 40

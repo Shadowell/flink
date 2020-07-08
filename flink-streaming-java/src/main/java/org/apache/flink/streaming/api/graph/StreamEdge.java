@@ -18,11 +18,15 @@
 package org.apache.flink.streaming.api.graph;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.streaming.api.transformations.ShuffleMode;
 import org.apache.flink.streaming.runtime.partitioner.StreamPartitioner;
 import org.apache.flink.util.OutputTag;
 
 import java.io.Serializable;
 import java.util.List;
+import java.util.Objects;
+
+import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /**
  * An edge in the streaming topology. One edge like this does not necessarily
@@ -70,8 +74,22 @@ public class StreamEdge implements Serializable {
 	 */
 	private final String targetOperatorName;
 
+	private final ShuffleMode shuffleMode;
+
 	public StreamEdge(StreamNode sourceVertex, StreamNode targetVertex, int typeNumber,
 			List<String> selectedNames, StreamPartitioner<?> outputPartitioner, OutputTag outputTag) {
+		this(sourceVertex,
+				targetVertex,
+				typeNumber,
+				selectedNames,
+				outputPartitioner,
+				outputTag,
+				ShuffleMode.UNDEFINED);
+	}
+
+	public StreamEdge(StreamNode sourceVertex, StreamNode targetVertex, int typeNumber,
+			List<String> selectedNames, StreamPartitioner<?> outputPartitioner, OutputTag outputTag,
+			ShuffleMode shuffleMode) {
 		this.sourceId = sourceVertex.getId();
 		this.targetId = targetVertex.getId();
 		this.typeNumber = typeNumber;
@@ -80,6 +98,7 @@ public class StreamEdge implements Serializable {
 		this.outputTag = outputTag;
 		this.sourceOperatorName = sourceVertex.getOperatorName();
 		this.targetOperatorName = targetVertex.getOperatorName();
+		this.shuffleMode = checkNotNull(shuffleMode);
 
 		this.edgeId = sourceVertex + "_" + targetVertex + "_" + typeNumber + "_" + selectedNames
 				+ "_" + outputPartitioner;
@@ -109,13 +128,17 @@ public class StreamEdge implements Serializable {
 		return outputPartitioner;
 	}
 
+	public ShuffleMode getShuffleMode() {
+		return shuffleMode;
+	}
+
 	public void setPartitioner(StreamPartitioner<?> partitioner) {
 		this.outputPartitioner = partitioner;
 	}
 
 	@Override
 	public int hashCode() {
-		return edgeId.hashCode();
+		return Objects.hash(edgeId, outputTag);
 	}
 
 	@Override
@@ -128,8 +151,8 @@ public class StreamEdge implements Serializable {
 		}
 
 		StreamEdge that = (StreamEdge) o;
-
-		return edgeId.equals(that.edgeId);
+		return Objects.equals(edgeId, that.edgeId) &&
+			Objects.equals(outputTag, that.outputTag);
 	}
 
 	@Override
