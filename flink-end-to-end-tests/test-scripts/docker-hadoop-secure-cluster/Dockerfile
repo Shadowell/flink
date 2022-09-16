@@ -24,7 +24,7 @@
 #
 # Creates multi-node, kerberized Hadoop cluster on Docker
 
-FROM sequenceiq/pam:ubuntu-14.04
+FROM openjdk:8
 
 RUN set -x \
     && addgroup hadoop \
@@ -35,8 +35,8 @@ RUN set -x \
 
 # install dev tools
 RUN set -x \
-    && apt-get update && apt-get install -y \
-    curl tar sudo openssh-server openssh-client rsync unzip krb5-user
+    && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    curl tar sudo openssh-server openssh-client rsync unzip krb5-user net-tools build-essential
 
 # Kerberos client
 RUN set -x \
@@ -51,22 +51,13 @@ RUN set -x \
     && ssh-keygen -q -N "" -t rsa -f /root/.ssh/id_rsa \
     && cp /root/.ssh/id_rsa.pub /root/.ssh/authorized_keys
 
-# java
-RUN set -x \
-    && mkdir -p /usr/java/default \
-    && curl -Ls 'https://download.oracle.com/otn-pub/java/jdk/8u251-b08/3d5a2bb8f8d4428bbe94aed7ec7ae784/jdk-8u251-linux-x64.tar.gz' -H 'Cookie: oraclelicense=accept-securebackup-cookie' | \
-        tar --strip-components=1 -xz -C /usr/java/default/
-
-ENV JAVA_HOME /usr/java/default
-ENV PATH $PATH:$JAVA_HOME/bin
-
 RUN sed -i 's/^#crypto.policy=unlimited/crypto.policy=unlimited/' $JAVA_HOME/jre/lib/security/java.security
 
-ARG HADOOP_VERSION=2.8.4
+ARG HADOOP_VERSION=2.8.5
 
-ENV HADOOP_URL http://archive.apache.org/dist/hadoop/common/hadoop-$HADOOP_VERSION/hadoop-$HADOOP_VERSION.tar.gz
+COPY hadoop-${HADOOP_VERSION}.tar.gz /tmp/hadoop.tar.gz
+
 RUN set -x \
-    && curl -fSL "$HADOOP_URL" -o /tmp/hadoop.tar.gz \
     && tar -xf /tmp/hadoop.tar.gz -C /usr/local/ \
     && rm /tmp/hadoop.tar.gz*
 
@@ -137,7 +128,7 @@ RUN set -x \
     && echo "Port 2122" >> /etc/ssh/sshd_config
 
 # Hdfs ports
-EXPOSE 50470 9000 50010 50020 50070 50075 50090 50475 50091 8020
+EXPOSE 9000 50010 50020 50075 50090 50475 50091 8020
 # Mapred ports
 EXPOSE 19888
 # Yarn ports

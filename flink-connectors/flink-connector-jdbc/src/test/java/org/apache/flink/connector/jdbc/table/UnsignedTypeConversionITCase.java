@@ -21,164 +21,179 @@ package org.apache.flink.connector.jdbc.table;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.Table;
+import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
-import org.apache.flink.table.planner.runtime.utils.TableEnvUtil;
 import org.apache.flink.test.util.AbstractTestBase;
 import org.apache.flink.types.Row;
+import org.apache.flink.types.RowKind;
+import org.apache.flink.util.CloseableIterator;
+import org.apache.flink.util.CollectionUtil;
 
-import org.apache.flink.shaded.guava18.com.google.common.collect.Lists;
-
-import ch.vorburger.mariadb4j.DBConfigurationBuilder;
-import ch.vorburger.mariadb4j.junit.MariaDB4jRule;
-import org.junit.After;
-import org.junit.Before;
 import org.junit.ClassRule;
 import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.testcontainers.containers.MySQLContainer;
+import org.testcontainers.containers.output.Slf4jLogConsumer;
+import org.testcontainers.utility.DockerImageName;
 
 import java.math.BigDecimal;
-import java.math.BigInteger;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.util.Collections;
-import java.util.Iterator;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
-import java.util.stream.Collectors;
+import java.util.Map;
 
-import static org.apache.flink.table.api.Expressions.row;
-import static org.junit.Assert.assertEquals;
+import static java.lang.String.format;
+import static java.lang.String.join;
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Test unsigned type conversion between Flink and JDBC driver mysql, the test underlying use
- * MariaDB to mock a DB which use mysql driver too.
+ * Test unsigned type conversion between Flink and JDBC driver mysql, the test underlying use MySQL
+ * to mock a DB.
  */
 public class UnsignedTypeConversionITCase extends AbstractTestBase {
 
-	private static final String DEFAULT_DB_NAME = "test";
-	private static final String TABLE_NAME = "unsigned_test";
+    private static final Logger LOGGER =
+            LoggerFactory.getLogger(UnsignedTypeConversionITCase.class);
 
-	private StreamTableEnvironment tEnv;
-	private String dbUrl;
-	private Connection connection;
+    private static final DockerImageName MYSQL_57_IMAGE = DockerImageName.parse("mysql:5.7.34");
+    private static final String DEFAULT_DB_NAME = "test";
+    private static final String TABLE_NAME = "unsigned_test";
+    private static final String USER = "root";
+    private static final String PASSWORD = "";
+    private static final List<String> COLUMNS =
+            Arrays.asList(
+                    "tiny_c",
+                    "tiny_un_c",
+                    "small_c",
+                    "small_un_c",
+                    "int_c",
+                    "int_un_c",
+                    "big_c",
+                    "big_un_c");
 
-	@ClassRule
-	public static MariaDB4jRule db4jRule = new MariaDB4jRule(
-		DBConfigurationBuilder.newBuilder().build(),
-		DEFAULT_DB_NAME,
-		null);
+    private static final Map<String, String> DEFAULT_CONTAINER_ENV_MAP =
+            new HashMap<String, String>() {
+                {
+                    put("MYSQL_ROOT_HOST", "%");
+                }
+            };
 
-	@Before
-	public void setUp() throws SQLException, ClassNotFoundException {
-		StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-		tEnv = StreamTableEnvironment.create(env);
-		//dbUrl: jdbc:mysql://localhost:3306/test
-		dbUrl = db4jRule.getURL();
-		connection = DriverManager.getConnection(dbUrl);
-		createMysqlTable();
-		createFlinkTable();
-		prepareData();
-	}
+    private static final Object[] ROW =
+            new Object[] {
+                (byte) 127,
+                (short) 255,
+                (short) 32767,
+                65535,
+                2147483647,
+                4294967295L,
+                9223372036854775807L,
+                new BigDecimal("18446744073709551615")
+            };
 
-	@Test
-	public void testUnsignedType() throws Exception {
-		// write data to db
-		TableEnvUtil.execInsertSqlAndWaitResult(tEnv, "insert into jdbc_sink select" +
-			" tiny_c," +
-			" tiny_un_c," +
-			" small_c," +
-			" small_un_c ," +
-			" int_c," +
-			" int_un_c," +
-			" big_c ," +
-			" big_un_c from data");
+    @ClassRule
+    public static final MySQLContainer<?> MYSQL_CONTAINER =
+            new MySQLContainer<>(MYSQL_57_IMAGE)
+                    .withEnv(DEFAULT_CONTAINER_ENV_MAP)
+                    .withUsername(USER)
+                    .withPassword(PASSWORD)
+                    .withDatabaseName(DEFAULT_DB_NAME)
+                    .withLogConsumer(new Slf4jLogConsumer(LOGGER));
 
-		// read data from db using jdbc connection and compare
-		PreparedStatement query = connection.prepareStatement(String.format("select tiny_c, tiny_un_c, small_c, small_un_c," +
-			" int_c, int_un_c, big_c, big_un_c from %s", TABLE_NAME));
-		ResultSet resultSet = query.executeQuery();
-		while (resultSet.next()) {
-			assertEquals(Integer.valueOf(127), resultSet.getObject("tiny_c"));
-			assertEquals(Integer.valueOf(255), resultSet.getObject("tiny_un_c"));
-			assertEquals(Integer.valueOf(32767), resultSet.getObject("small_c"));
-			assertEquals(Integer.valueOf(65535), resultSet.getObject("small_un_c"));
-			assertEquals(Integer.valueOf(2147483647), resultSet.getObject("int_c"));
-			assertEquals(Long.valueOf(4294967295L), resultSet.getObject("int_un_c"));
-			assertEquals(Long.valueOf(9223372036854775807L), resultSet.getObject("big_c"));
-			assertEquals(new BigInteger("18446744073709551615"), resultSet.getObject("big_un_c"));
-		}
+    @Test
+    public void testUnsignedType() throws Exception {
+        try (Connection con =
+                DriverManager.getConnection(MYSQL_CONTAINER.getJdbcUrl(), USER, PASSWORD)) {
+            StreamExecutionEnvironment sEnv = StreamExecutionEnvironment.getExecutionEnvironment();
+            TableEnvironment tableEnv = StreamTableEnvironment.create(sEnv);
+            createMysqlTable(con);
+            createFlinkTable(tableEnv);
+            prepareData(tableEnv);
 
-		// read data from db using flink and compare
-		Iterator<Row> collected = tEnv.executeSql("select tiny_c, tiny_un_c, small_c, small_un_c," +
-			" int_c, int_un_c, big_c, big_un_c from jdbc_source")
-			.collect();
-		List<String> result = Lists.newArrayList(collected).stream()
-			.map(Row::toString)
-			.sorted()
-			.collect(Collectors.toList());
-		List<String> expected = Collections.singletonList(
-			"127,255,32767,65535,2147483647,4294967295,9223372036854775807,18446744073709551615");
-		assertEquals(expected, result);
-	}
+            // write data to db
+            tableEnv.executeSql(
+                            format("insert into jdbc_sink select %s from data", join(",", COLUMNS)))
+                    .await();
 
-	private void createMysqlTable() throws SQLException {
-		PreparedStatement ddlStatement = connection.prepareStatement("create table " + TABLE_NAME + " (" +
-			" tiny_c TINYINT," +
-			" tiny_un_c TINYINT UNSIGNED," +
-			" small_c SMALLINT," +
-			" small_un_c SMALLINT UNSIGNED," +
-			" int_c INTEGER ," +
-			" int_un_c INTEGER UNSIGNED," +
-			" big_c BIGINT," +
-			" big_un_c BIGINT UNSIGNED);");
-		ddlStatement.execute();
-	}
+            // read data from db using jdbc connection and compare
+            try (PreparedStatement ps =
+                    con.prepareStatement(
+                            format("select %s from %s", join(",", COLUMNS), TABLE_NAME))) {
+                ResultSet resultSet = ps.executeQuery();
+                while (resultSet.next()) {
+                    for (int i = 0; i < ROW.length; i++) {
+                        assertThat(resultSet.getObject(i + 1, ROW[i].getClass())).isEqualTo(ROW[i]);
+                    }
+                }
+            }
 
-	private void createFlinkTable() {
-		String commonDDL = "create table %s (" +
-			"tiny_c TINYINT," +
-			"tiny_un_c SMALLINT," +
-			"small_c SMALLINT," +
-			"small_un_c INT," +
-			"int_c INT," +
-			"int_un_c BIGINT," +
-			"big_c BIGINT," +
-			"big_un_c DECIMAL(20, 0)) with(" +
-			" 'connector' = 'jdbc'," +
-			" 'url' = '" + dbUrl + "'," +
-			" 'table-name' = '" + TABLE_NAME + "'" +
-			")";
-		tEnv.executeSql(String.format(commonDDL, "jdbc_source"));
-		tEnv.executeSql(String.format(commonDDL, "jdbc_sink"));
-	}
+            // read data from db using flink and compare
+            String sql = format("select %s from jdbc_source", join(",", COLUMNS));
+            CloseableIterator<Row> collected = tableEnv.executeSql(sql).collect();
+            List<Row> result = CollectionUtil.iteratorToList(collected);
+            assertThat(result).containsOnly(Row.ofKind(RowKind.INSERT, ROW));
+        }
+    }
 
-	private void prepareData() {
-		Table dataTable = tEnv.fromValues(
-			DataTypes.ROW(
-				DataTypes.FIELD("tiny_c", DataTypes.TINYINT().notNull()),
-				DataTypes.FIELD("tiny_un_c", DataTypes.SMALLINT().notNull()),
-				DataTypes.FIELD("small_c", DataTypes.SMALLINT().notNull()),
-				DataTypes.FIELD("small_un_c", DataTypes.INT().notNull()),
-				DataTypes.FIELD("int_c", DataTypes.INT().notNull()),
-				DataTypes.FIELD("int_un_c", DataTypes.BIGINT().notNull()),
-				DataTypes.FIELD("big_c", DataTypes.BIGINT().notNull()),
-				DataTypes.FIELD("big_un_c", DataTypes.DECIMAL(20, 0).notNull())),
-			row(
-				new Integer(127).byteValue(),
-				new Integer(255).shortValue(),
-				new Integer(32767).shortValue(),
-				Integer.valueOf(65535),
-				Integer.valueOf(2147483647),
-				Long.valueOf(4294967295L),
-				Long.valueOf(9223372036854775807L),
-				new BigDecimal(new BigInteger("18446744073709551615"), 0)));
-		tEnv.createTemporaryView("data", dataTable);
-	}
+    private void createMysqlTable(Connection con) throws SQLException {
+        try (PreparedStatement ps =
+                con.prepareStatement(
+                        "create table "
+                                + TABLE_NAME
+                                + " ("
+                                + " tiny_c TINYINT,"
+                                + " tiny_un_c TINYINT UNSIGNED,"
+                                + " small_c SMALLINT,"
+                                + " small_un_c SMALLINT UNSIGNED,"
+                                + " int_c INTEGER ,"
+                                + " int_un_c INTEGER UNSIGNED,"
+                                + " big_c BIGINT,"
+                                + " big_un_c BIGINT UNSIGNED);")) {
+            ps.execute();
+        }
+    }
 
-	@After
-	public void cleanup() throws Exception {
-		PreparedStatement preparedStatement = connection.prepareStatement(String.format("drop table %s", TABLE_NAME));
-		preparedStatement.execute();
-	}
+    private void createFlinkTable(TableEnvironment tableEnv) {
+        String commonDDL =
+                "create table %s ("
+                        + "tiny_c TINYINT,"
+                        + "tiny_un_c SMALLINT,"
+                        + "small_c SMALLINT,"
+                        + "small_un_c INT,"
+                        + "int_c INT,"
+                        + "int_un_c BIGINT,"
+                        + "big_c BIGINT,"
+                        + "big_un_c DECIMAL(20, 0)) with("
+                        + " 'connector' = 'jdbc',"
+                        + " 'url' = '"
+                        + format("%s?user=%s&password=&", MYSQL_CONTAINER.getJdbcUrl(), USER)
+                        + "',"
+                        + " 'table-name' = '"
+                        + TABLE_NAME
+                        + "'"
+                        + ")";
+        tableEnv.executeSql(format(commonDDL, "jdbc_source"));
+        tableEnv.executeSql(format(commonDDL, "jdbc_sink"));
+    }
+
+    private void prepareData(TableEnvironment tableEnv) {
+        Table dataTable =
+                tableEnv.fromValues(
+                        DataTypes.ROW(
+                                DataTypes.FIELD("tiny_c", DataTypes.TINYINT().notNull()),
+                                DataTypes.FIELD("tiny_un_c", DataTypes.SMALLINT().notNull()),
+                                DataTypes.FIELD("small_c", DataTypes.SMALLINT().notNull()),
+                                DataTypes.FIELD("small_un_c", DataTypes.INT().notNull()),
+                                DataTypes.FIELD("int_c", DataTypes.INT().notNull()),
+                                DataTypes.FIELD("int_un_c", DataTypes.BIGINT().notNull()),
+                                DataTypes.FIELD("big_c", DataTypes.BIGINT().notNull()),
+                                DataTypes.FIELD("big_un_c", DataTypes.DECIMAL(20, 0).notNull())),
+                        Row.of(ROW));
+        tableEnv.createTemporaryView("data", dataTable);
+    }
 }
