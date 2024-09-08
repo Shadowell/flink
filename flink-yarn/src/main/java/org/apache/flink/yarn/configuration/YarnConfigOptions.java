@@ -18,6 +18,7 @@
 
 package org.apache.flink.yarn.configuration;
 
+import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.DescribedEnum;
 import org.apache.flink.configuration.ExternalResourceOptions;
@@ -25,6 +26,7 @@ import org.apache.flink.configuration.SecurityOptions;
 import org.apache.flink.configuration.description.Description;
 import org.apache.flink.configuration.description.InlineElement;
 
+import java.time.Duration;
 import java.util.List;
 
 import static org.apache.flink.configuration.ConfigOptions.key;
@@ -38,6 +40,7 @@ import static org.apache.flink.yarn.configuration.YarnConfigOptions.UserJarInclu
  *
  * <p>These options are not expected to be ever configured by users explicitly.
  */
+@PublicEvolving
 public class YarnConfigOptions {
 
     /** The vcores used by YARN application master. */
@@ -87,9 +90,9 @@ public class YarnConfigOptions {
      * <p>>Note: This option returns a String since Integer options must have a static default
      * value.
      */
-    public static final ConfigOption<String> APPLICATION_ATTEMPTS =
+    public static final ConfigOption<Integer> APPLICATION_ATTEMPTS =
             key("yarn.application-attempts")
-                    .stringType()
+                    .intType()
                     .noDefaultValue()
                     .withDescription(
                             Description.builder()
@@ -97,7 +100,7 @@ public class YarnConfigOptions {
                                             "Number of ApplicationMaster restarts. By default, the value will be set to 1. "
                                                     + "If high availability is enabled, then the default value will be 2. "
                                                     + "The restart number is also limited by YARN (configured via %s). "
-                                                    + "Note that that the entire Flink cluster will restart and the YARN Client will lose the connection.",
+                                                    + "Note that the entire Flink cluster will restart and the YARN Client will lose the connection.",
                                             link(
                                                     "https://hadoop.apache.org/docs/stable/hadoop-yarn/hadoop-yarn-common/yarn-default.xml",
                                                     "yarn.resourcemanager.am.max-attempts"))
@@ -133,14 +136,14 @@ public class YarnConfigOptions {
      * The heartbeat interval between the Application Master and the YARN Resource Manager if Flink
      * is requesting containers.
      */
-    public static final ConfigOption<Integer> CONTAINER_REQUEST_HEARTBEAT_INTERVAL_MILLISECONDS =
+    public static final ConfigOption<Duration> CONTAINER_REQUEST_HEARTBEAT_INTERVAL_MILLISECONDS =
             key("yarn.heartbeat.container-request-interval")
-                    .intType()
-                    .defaultValue(500)
+                    .durationType()
+                    .defaultValue(Duration.ofMillis(500))
                     .withDescription(
                             new Description.DescriptionBuilder()
                                     .text(
-                                            "Time between heartbeats with the ResourceManager in milliseconds if Flink requests containers:")
+                                            "Time between heartbeats with the ResourceManager if Flink requests containers:")
                                     .list(
                                             text(
                                                     "The lower this value is, the faster Flink will get notified about container allocations since requests and allocations are transmitted via heartbeats."),
@@ -170,7 +173,7 @@ public class YarnConfigOptions {
                                     + " (for example for environments sharing a Flink installation between users).");
 
     /**
-     * The config parameter defining the Akka actor system port for the ApplicationMaster and
+     * The config parameter defining the Pekko actor system port for the ApplicationMaster and
      * JobManager. The port can either be a port, such as "9123", a range of ports: "50100-50200" or
      * a list of ranges and or points: "50100-50200,50300-50400,51234". Setting the port to 0 will
      * let the OS choose an available port.
@@ -194,7 +197,7 @@ public class YarnConfigOptions {
      * unset yarn priority setting and use cluster default priority.
      *
      * @see <a
-     *     href="https://hadoop.apache.org/docs/r2.8.5/hadoop-yarn/hadoop-yarn-site/CapacityScheduler.html">YARN
+     *     href="https://hadoop.apache.org/docs/r2.10.2/hadoop-yarn/hadoop-yarn-site/CapacityScheduler.html">YARN
      *     Capacity Scheduling Doc</a>
      */
     public static final ConfigOption<Integer> APPLICATION_PRIORITY =
@@ -231,6 +234,31 @@ public class YarnConfigOptions {
                     .withDescription(
                             "A comma-separated list of tags to apply to the Flink YARN application.");
 
+    /**
+     * Users and groups to give VIEW access.
+     * https://www.cloudera.com/documentation/enterprise/latest/topics/cm_mc_yarn_acl.html
+     */
+    public static final ConfigOption<String> APPLICATION_VIEW_ACLS =
+            key("yarn.view.acls")
+                    .stringType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "Users and groups to give VIEW access. The ACLs are of for"
+                                    + " comma-separated-users&lt;space&gt;comma-separated-groups."
+                                    + " Wildcard ACL is also supported. The only valid wildcard ACL"
+                                    + " is *, which grants permission to all users and groups.");
+
+    /** Users and groups to give MODIFY access. */
+    public static final ConfigOption<String> APPLICATION_MODIFY_ACLS =
+            key("yarn.modify.acls")
+                    .stringType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "Users and groups to give MODIFY access. The ACLs are of for"
+                                    + " comma-separated-users&lt;space&gt;comma-separated-groups."
+                                    + " Wildcard ACL is also supported. The only valid wildcard ACL"
+                                    + " is *, which grants permission to all users and groups.");
+
     // ----------------------- YARN CLI OPTIONS ------------------------------------
 
     public static final ConfigOption<String> STAGING_DIRECTORY =
@@ -247,7 +275,12 @@ public class YarnConfigOptions {
                     .noDefaultValue()
                     .withDeprecatedKeys("yarn.ship-directories")
                     .withDescription(
-                            "A semicolon-separated list of files and/or directories to be shipped to the YARN cluster.");
+                            "A semicolon-separated list of files and/or directories to be shipped to the YARN "
+                                    + "cluster. These files/directories can come from the local path of flink client "
+                                    + "or HDFS. For example, "
+                                    + "\"/path/to/local/file;/path/to/local/directory;"
+                                    + "hdfs://$namenode_address/path/of/file;"
+                                    + "hdfs://$namenode_address/path/of/directory\"");
 
     public static final ConfigOption<List<String>> SHIP_ARCHIVES =
             key("yarn.ship-archives")
@@ -255,9 +288,12 @@ public class YarnConfigOptions {
                     .asList()
                     .noDefaultValue()
                     .withDescription(
-                            "A semicolon-separated list of archives to be shipped to the YARN cluster."
-                                    + " These archives will be un-packed when localizing and they can be any of the following types: "
-                                    + "\".tar.gz\", \".tar\", \".tgz\", \".dst\", \".jar\", \".zip\".");
+                            "A semicolon-separated list of archives to be shipped to the YARN cluster. "
+                                    + "These archives can come from the local path of flink client or HDFS. "
+                                    + "They will be un-packed when localizing and they can be any of the following "
+                                    + "types: \".tar.gz\", \".tar\", \".tgz\", \".dst\", \".jar\", \".zip\". "
+                                    + "For example, \"/path/to/local/archive.jar;"
+                                    + "hdfs://$namenode_address/path/to/archive.jar\"");
 
     public static final ConfigOption<String> FLINK_DIST_JAR =
             key("yarn.flink-dist-jar")
@@ -323,10 +359,20 @@ public class YarnConfigOptions {
                                     + " localized to. If "
                                     + SHIP_LOCAL_KEYTAB.key()
                                     + " set to "
-                                    + "true, Flink willl ship the keytab file as a YARN local "
+                                    + "true, Flink will ship the keytab file as a YARN local "
                                     + "resource. In this case, the path is relative to the local "
                                     + "resource directory. If set to false, Flink"
                                     + " will try to directly locate the keytab from the path itself.");
+
+    public static final ConfigOption<List<String>> APP_MASTER_TOKEN_SERVICES =
+            key("yarn.security.appmaster.delegation.token.services")
+                    .stringType()
+                    .asList()
+                    .defaultValues("hadoopfs")
+                    .withDescription(
+                            "The delegation token provider services are allowed to pass obtained tokens to YARN application master."
+                                    + " For backward compatibility to make log aggregation to work, we add tokens obtained"
+                                    + " by `hadoopfs` provider to AM by default.");
 
     public static final ConfigOption<List<String>> PROVIDED_LIB_DIRS =
             key("yarn.provided.lib.dirs")
@@ -386,6 +432,25 @@ public class YarnConfigOptions {
                                             link(
                                                     "https://hadoop.apache.org/docs/stable/hadoop-yarn/hadoop-yarn-common/yarn-default.xml",
                                                     "yarn-default.xml"))
+                                    .build());
+
+    public static final ConfigOption<String> YARN_CONTAINER_START_COMMAND_TEMPLATE =
+            key("yarn.container-start-command-template")
+                    .stringType()
+                    .defaultValue("%java% %jvmmem% %jvmopts% %logging% %class% %args% %redirects%")
+                    .withDescription(
+                            Description.builder()
+                                    .text(
+                                            "This configuration parameter allows users to pass custom settings (such as JVM paths, arguments etc.) to start the YARN. The following placeholders will be replaced: ")
+                                    .list(
+                                            text("%java%: Path to the Java executable"),
+                                            text("%jvmmem%: JVM memory limits and tweaks"),
+                                            text("%jvmopts%: Options for the Java VM"),
+                                            text(
+                                                    "%logging%: Logging-related configuration settings"),
+                                            text("%class%: Main class to execute"),
+                                            text("%args%: Arguments for the main class"),
+                                            text("%redirects%: Output redirects"))
                                     .build());
 
     /**

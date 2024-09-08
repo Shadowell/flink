@@ -83,7 +83,7 @@ object FlinkLogicalRelFactories {
         input: RelNode,
         hints: util.List[RelHint],
         childExprs: util.List[_ <: RexNode],
-        fieldNames: util.List[String]): RelNode = {
+        fieldNames: util.List[_ <: String]): RelNode = {
       val rexBuilder = input.getCluster.getRexBuilder
       val inputRowType = input.getRowType
       val programBuilder = new RexProgramBuilder(inputRowType, rexBuilder)
@@ -133,7 +133,7 @@ object FlinkLogicalRelFactories {
         groupSet: ImmutableBitSet,
         groupSets: ImmutableList[ImmutableBitSet],
         aggCalls: util.List[AggregateCall]): RelNode = {
-      FlinkLogicalAggregate.create(input, groupSet, groupSets, aggCalls)
+      FlinkLogicalAggregate.create(input, groupSet, groupSets, aggCalls, hints)
     }
   }
 
@@ -174,6 +174,7 @@ object FlinkLogicalRelFactories {
     def createCorrelate(
         left: RelNode,
         right: RelNode,
+        hints: util.List[RelHint],
         correlationId: CorrelationId,
         requiredColumns: ImmutableBitSet,
         joinType: JoinRelType): RelNode = {

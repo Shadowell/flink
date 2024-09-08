@@ -32,6 +32,7 @@ import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponseSt
 
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -59,7 +60,7 @@ class JarDeleteHandlerTest {
     private Path jarDir;
 
     @BeforeEach
-    private void setUp(@TempDir File tempDir) throws Exception {
+    void setUp(@TempDir File tempDir) throws Exception {
         jarDir = tempDir.toPath();
         restfulGateway = new TestingRestfulGateway.Builder().build();
         jarDeleteHandler =
@@ -103,6 +104,7 @@ class JarDeleteHandlerTest {
                         });
     }
 
+    @Tag("org.apache.flink.testutils.junit.FailsInGHAContainerWithRootUser")
     @Test
     void testFailedDelete() throws Exception {
         makeJarDirReadOnly();

@@ -18,11 +18,24 @@
 
 package org.apache.flink.table.operations;
 
+import org.apache.flink.annotation.Internal;
+import org.apache.flink.table.api.internal.TableResultInternal;
+
+import static org.apache.flink.table.api.internal.TableResultUtils.buildStringArrayResult;
+
 /** Operation to describe a SHOW CATALOGS statement. */
+@Internal
 public class ShowCatalogsOperation implements ShowOperation {
 
     @Override
     public String asSummaryString() {
         return "SHOW CATALOGS";
+    }
+
+    @Override
+    public TableResultInternal execute(Context ctx) {
+        String[] catalogs =
+                ctx.getCatalogManager().listCatalogs().stream().sorted().toArray(String[]::new);
+        return buildStringArrayResult("catalog name", catalogs);
     }
 }

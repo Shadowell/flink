@@ -48,7 +48,7 @@ import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import org.apache.flink.table.runtime.util.TimeWindowUtil;
 import org.apache.flink.table.types.logical.RowType;
 
-import org.apache.flink.shaded.guava30.com.google.common.collect.Lists;
+import org.apache.flink.shaded.guava32.com.google.common.collect.Lists;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonCreator;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
 
@@ -192,7 +192,8 @@ public class StreamExecWindowJoin extends ExecNodeBase<RowData>
                         createTransformationMeta(WINDOW_JOIN_TRANSFORMATION, config),
                         operator,
                         InternalTypeInfo.of(returnType),
-                        leftTransform.getParallelism());
+                        leftTransform.getParallelism(),
+                        false);
 
         // set KeyType and Selector for state
         RowDataKeySelector leftSelect =

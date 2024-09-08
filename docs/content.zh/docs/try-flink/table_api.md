@@ -38,13 +38,13 @@ Flink 的 Table API 可以简化数据分析、构建数据流水线以及 ETL �
 
 ## 准备条件
 
-我们默认你对 Java 或者 Scala 有一定了解，当然如果你使用的是其他编程语言，也可以继续学习。 
+我们默认你对 Java 有一定了解，当然如果你使用的是其他编程语言，也可以继续学习。 
 同时也默认你了解基本的关系型概念，例如 SELECT 、GROUP BY 等语句。
 
 ## 困难求助
 
 如果遇到问题，可以参考 [社区支持资源](https://flink.apache.org/community.html)。
-Flink 的 [用户邮件列表](https://flink.apache.org/community.html#mailing-lists) 是 Apahe 项目中最活跃的一个，这也是快速寻求帮助的重要途径。
+Flink 的 [用户邮件列表](https://flink.apache.org/community.html#mailing-lists) 是 Apache 项目中最活跃的一个，这也是快速寻求帮助的重要途径。
 
 {{< hint info >}}
 在 Windows 环境下，如果用来生成数据的 docker 容器启动失败，请检查使用的脚本是否正确。

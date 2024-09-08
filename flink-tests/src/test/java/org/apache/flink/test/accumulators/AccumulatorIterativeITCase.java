@@ -19,18 +19,18 @@
 package org.apache.flink.test.accumulators;
 
 import org.apache.flink.api.common.accumulators.IntCounter;
+import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.functions.RichGroupReduceFunction;
 import org.apache.flink.api.java.ExecutionEnvironment;
 import org.apache.flink.api.java.io.DiscardingOutputFormat;
 import org.apache.flink.api.java.operators.IterativeDataSet;
-import org.apache.flink.configuration.Configuration;
-import org.apache.flink.test.util.JavaProgramTestBase;
+import org.apache.flink.test.util.JavaProgramTestBaseJUnit4;
 import org.apache.flink.util.Collector;
 
 import org.junit.Assert;
 
 /** Test accumulator within iteration. */
-public class AccumulatorIterativeITCase extends JavaProgramTestBase {
+public class AccumulatorIterativeITCase extends JavaProgramTestBaseJUnit4 {
     private static final int NUM_ITERATIONS = 3;
     private static final int NUM_SUBTASKS = 1;
     private static final String ACC_NAME = "test";
@@ -61,7 +61,7 @@ public class AccumulatorIterativeITCase extends JavaProgramTestBase {
         private IntCounter testCounter = new IntCounter();
 
         @Override
-        public void open(Configuration config) throws Exception {
+        public void open(OpenContext openContext) throws Exception {
             getRuntimeContext().addAccumulator(ACC_NAME, this.testCounter);
         }
 

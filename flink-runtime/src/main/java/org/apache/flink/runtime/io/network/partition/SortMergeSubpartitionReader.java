@@ -144,7 +144,7 @@ class SortMergeSubpartitionReader
 
     @Override
     public void notifyDataAvailable() {
-        availabilityListener.notifyDataAvailable();
+        availabilityListener.notifyDataAvailable(this);
     }
 
     @Override
@@ -217,7 +217,7 @@ class SortMergeSubpartitionReader
     }
 
     @Override
-    public AvailabilityWithBacklog getAvailabilityAndBacklog(int numCreditsAvailable) {
+    public AvailabilityWithBacklog getAvailabilityAndBacklog(boolean isCreditAvailable) {
         synchronized (lock) {
             boolean isAvailable;
             if (isReleased) {
@@ -225,15 +225,17 @@ class SortMergeSubpartitionReader
             } else if (buffersRead.isEmpty()) {
                 isAvailable = false;
             } else {
-                isAvailable = numCreditsAvailable > 0 || !buffersRead.peek().isBuffer();
+                isAvailable = isCreditAvailable || !buffersRead.peek().isBuffer();
             }
             return new AvailabilityWithBacklog(isAvailable, dataBufferBacklog);
         }
     }
 
+    // suppress warning as this method is only for unsafe purpose.
+    @SuppressWarnings("FieldAccessNotGuarded")
     @Override
     public int unsynchronizedGetNumberOfQueuedBuffers() {
-        return Math.max(0, buffersRead.size());
+        return buffersRead.size();
     }
 
     @Override
@@ -245,4 +247,9 @@ class SortMergeSubpartitionReader
 
     @Override
     public void notifyNewBufferSize(int newBufferSize) {}
+
+    @Override
+    public int peekNextBufferSubpartitionId() {
+        throw new UnsupportedOperationException();
+    }
 }

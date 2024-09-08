@@ -73,6 +73,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Phaser;
 import java.util.stream.Collectors;
@@ -82,7 +83,7 @@ public class YarnResourceManagerDriver extends AbstractResourceManagerDriver<Yar
 
     /**
      * Environment variable name of the hostname given by YARN. In task executor we use the
-     * hostnames given by YARN consistently throughout akka
+     * hostnames given by YARN consistently throughout pekko
      */
     static final String ENV_FLINK_NODE_ID = "_FLINK_NODE_ID";
 
@@ -126,6 +127,8 @@ public class YarnResourceManagerDriver extends AbstractResourceManagerDriver<Yar
 
     private final Set<String> lastBlockedNodes = new HashSet<>();
 
+    private volatile boolean isRunning = false;
+
     public YarnResourceManagerDriver(
             Configuration flinkConfig,
             YarnResourceManagerDriverConfiguration configuration,
@@ -138,7 +141,7 @@ public class YarnResourceManagerDriver extends AbstractResourceManagerDriver<Yar
         this.configuration = configuration;
 
         final int yarnHeartbeatIntervalMS =
-                flinkConfig.getInteger(YarnConfigOptions.HEARTBEAT_DELAY_SECONDS) * 1000;
+                flinkConfig.get(YarnConfigOptions.HEARTBEAT_DELAY_SECONDS) * 1000;
 
         final long yarnExpiryIntervalMS =
                 yarnConfig.getLong(
@@ -154,11 +157,14 @@ public class YarnResourceManagerDriver extends AbstractResourceManagerDriver<Yar
         }
         yarnHeartbeatIntervalMillis = yarnHeartbeatIntervalMS;
         containerRequestHeartbeatIntervalMillis =
-                flinkConfig.getInteger(
-                        YarnConfigOptions.CONTAINER_REQUEST_HEARTBEAT_INTERVAL_MILLISECONDS);
+                Math.toIntExact(
+                        flinkConfig
+                                .get(
+                                        YarnConfigOptions
+                                                .CONTAINER_REQUEST_HEARTBEAT_INTERVAL_MILLISECONDS)
+                                .toMillis());
 
-        this.taskManagerNodeLabel =
-                flinkConfig.getString(YarnConfigOptions.TASK_MANAGER_NODE_LABEL);
+        this.taskManagerNodeLabel = flinkConfig.get(YarnConfigOptions.TASK_MANAGER_NODE_LABEL);
 
         this.registerApplicationMasterResponseReflector =
                 new RegisterApplicationMasterResponseReflector(log);
@@ -174,6 +180,7 @@ public class YarnResourceManagerDriver extends AbstractResourceManagerDriver<Yar
 
     @Override
     protected void initializeInternal() throws Exception {
+        isRunning = true;
         final YarnContainerEventHandler yarnContainerEventHandler = new YarnContainerEventHandler();
         try {
             resourceManagerClient =
@@ -203,6 +210,7 @@ public class YarnResourceManagerDriver extends AbstractResourceManagerDriver<Yar
 
     @Override
     public void terminate() throws Exception {
+        isRunning = false;
         // wait for all containers to stop
         trackerOfReleasedResources.register();
         trackerOfReleasedResources.arriveAndAwaitAdvance();
@@ -276,6 +284,59 @@ public class YarnResourceManagerDriver extends AbstractResourceManagerDriver<Yar
         } else {
             final Priority priority = priorityAndResourceOpt.get().getPriority();
             final Resource resource = priorityAndResourceOpt.get().getResource();
+
+            FutureUtils.assertNoException(
+                    requestResourceFuture.handle(
+                            (ignore, t) -> {
+                                if (t == null) {
+                                    return null;
+                                }
+                                if (t instanceof CancellationException) {
+
+                                    final Queue<CompletableFuture<YarnWorkerNode>>
+                                            pendingRequestResourceFutures =
+                                                    requestResourceFutures.getOrDefault(
+                                                            taskExecutorProcessSpec,
+                                                            new LinkedList<>());
+                                    Preconditions.checkState(
+                                            pendingRequestResourceFutures.remove(
+                                                    requestResourceFuture));
+                                    log.info(
+                                            "cancelling pending request with priority {}, remaining {} pending container requests.",
+                                            priority,
+                                            pendingRequestResourceFutures.size());
+                                    int pendingRequestsSizeBeforeCancel =
+                                            pendingRequestResourceFutures.size() + 1;
+                                    final Iterator<AMRMClient.ContainerRequest>
+                                            pendingContainerRequestIterator =
+                                                    getPendingRequestsAndCheckConsistency(
+                                                                    priority,
+                                                                    resource,
+                                                                    pendingRequestsSizeBeforeCancel)
+                                                            .iterator();
+
+                                    Preconditions.checkState(
+                                            pendingContainerRequestIterator.hasNext());
+
+                                    final AMRMClient.ContainerRequest pendingRequest =
+                                            pendingContainerRequestIterator.next();
+                                    removeContainerRequest(pendingRequest);
+
+                                    if (pendingRequestResourceFutures.isEmpty()) {
+                                        requestResourceFutures.remove(taskExecutorProcessSpec);
+                                    }
+
+                                    if (getNumRequestedNotAllocatedWorkers() <= 0) {
+                                        resourceManagerClient.setHeartbeatInterval(
+                                                yarnHeartbeatIntervalMillis);
+                                    }
+                                } else {
+                                    log.error("Error completing resource request.", t);
+                                    ExceptionUtils.rethrow(t);
+                                }
+                                return null;
+                            }));
+
             addContainerRequest(resource, priority);
 
             // make sure we transmit the request fast and receive fast news of granted allocations
@@ -373,8 +434,8 @@ public class YarnResourceManagerDriver extends AbstractResourceManagerDriver<Yar
                 requestResourceFutures.remove(taskExecutorProcessSpec);
             }
 
-            startTaskExecutorInContainerAsync(
-                    container, taskExecutorProcessSpec, resourceId, requestResourceFuture);
+            requestResourceFuture.complete(new YarnWorkerNode(container, resourceId));
+            startTaskExecutorInContainerAsync(container, taskExecutorProcessSpec, resourceId);
             removeContainerRequest(pendingRequest);
 
             numAccepted++;
@@ -420,8 +481,7 @@ public class YarnResourceManagerDriver extends AbstractResourceManagerDriver<Yar
     private void startTaskExecutorInContainerAsync(
             Container container,
             TaskExecutorProcessSpec taskExecutorProcessSpec,
-            ResourceID resourceId,
-            CompletableFuture<YarnWorkerNode> requestResourceFuture) {
+            ResourceID resourceId) {
         final CompletableFuture<ContainerLaunchContext> containerLaunchContextFuture =
                 FutureUtils.supplyAsync(
                         () ->
@@ -436,10 +496,9 @@ public class YarnResourceManagerDriver extends AbstractResourceManagerDriver<Yar
                         (context, exception) -> {
                             if (exception == null) {
                                 nodeManagerClient.startContainerAsync(container, context);
-                                requestResourceFuture.complete(
-                                        new YarnWorkerNode(container, resourceId));
                             } else {
-                                requestResourceFuture.completeExceptionally(exception);
+                                getResourceEventHandler()
+                                        .onWorkerTerminated(resourceId, exception.getMessage());
                             }
                             return null;
                         },
@@ -669,7 +728,9 @@ public class YarnResourceManagerDriver extends AbstractResourceManagerDriver<Yar
 
         @Override
         public void onError(Throwable throwable) {
-            getResourceEventHandler().onError(throwable);
+            if (isRunning) {
+                getResourceEventHandler().onError(throwable);
+            }
         }
 
         @Override

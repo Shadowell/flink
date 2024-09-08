@@ -54,9 +54,12 @@ public class ClasspathProviderExtension implements BeforeEachCallback, AfterEach
     private static final Path TEST_JOB_JAR_PATH = Paths.get("target", "maven-test-jar.jar");
 
     private static final Path JOB_JAR_PATH =
-            Paths.get("target", "maven-test-user-classloader-job-jar.jar");
+            Paths.get("target", "flink-clients-test-utils-job-jar.jar");
     private static final Path JOB_LIB_JAR_PATH =
-            Paths.get("target", "maven-test-user-classloader-job-lib-jar.jar");
+            Paths.get("target", "flink-clients-test-utils-job-lib-jar.jar");
+
+    private static final Path ADDITIONAL_ARTIFACT_JAR_PATH =
+            Paths.get("target", "flink-clients-test-utils-additional-artifact-jar.jar");
 
     protected File temporaryFolder = org.assertj.core.util.Files.newTemporaryFolder();
 
@@ -108,6 +111,14 @@ public class ClasspathProviderExtension implements BeforeEachCallback, AfterEach
                 "_user_dir_with_testjob_entry_class_only",
                 directory -> copyJar(TEST_JOB_JAR_PATH, directory),
                 TEST_JOB_JAR_PATH.toFile());
+    }
+
+    public static ClasspathProviderExtension createWithAdditionalArtifact() {
+        return new ClasspathProviderExtension(
+                "_user_dir_with_additional_artifact",
+                directory -> copyJar(ADDITIONAL_ARTIFACT_JAR_PATH, directory),
+                ADDITIONAL_ARTIFACT_JAR_PATH.toFile(),
+                null);
     }
 
     public static String[] parametersForTestJob(String strValue) {

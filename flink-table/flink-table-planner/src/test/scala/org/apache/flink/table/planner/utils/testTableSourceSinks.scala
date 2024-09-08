@@ -19,6 +19,7 @@ package org.apache.flink.table.planner.utils
 
 import org.apache.flink.api.common.ExecutionConfig
 import org.apache.flink.api.common.io.InputFormat
+import org.apache.flink.api.common.serialization.SerializerConfigImpl
 import org.apache.flink.api.common.typeinfo.{BasicTypeInfo, TypeInformation}
 import org.apache.flink.api.common.typeutils.TypeSerializer
 import org.apache.flink.api.java.io.{CollectionInputFormat, RowCsvInputFormat}
@@ -26,10 +27,9 @@ import org.apache.flink.api.java.typeutils.RowTypeInfo
 import org.apache.flink.core.io.InputSplit
 import org.apache.flink.streaming.api.datastream.{DataStream, DataStreamSink}
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment
-import org.apache.flink.table.api
 import org.apache.flink.table.api.{DataTypes, TableEnvironment, TableSchema}
 import org.apache.flink.table.api.internal.TableEnvironmentInternal
-import org.apache.flink.table.catalog.{CatalogPartitionImpl, CatalogPartitionSpec, CatalogTableImpl, ObjectPath}
+import org.apache.flink.table.catalog._
 import org.apache.flink.table.descriptors._
 import org.apache.flink.table.descriptors.ConnectorDescriptorValidator.{CONNECTOR, CONNECTOR_TYPE}
 import org.apache.flink.table.expressions.{CallExpression, Expression, FieldReferenceExpression, ValueLiteralExpression}
@@ -42,7 +42,7 @@ import org.apache.flink.table.planner.plan.hint.OptionsHintTest.IS_BOUNDED
 import org.apache.flink.table.planner.runtime.utils.BatchTestBase.row
 import org.apache.flink.table.planner.runtime.utils.TimeTestUtil.EventTimeSourceFunction
 import org.apache.flink.table.runtime.types.TypeInfoDataTypeConverter.fromDataTypeToTypeInfo
-import org.apache.flink.table.sinks.{CsvAppendTableSinkFactory, CsvBatchTableSinkFactory, StreamTableSink, TableSink}
+import org.apache.flink.table.sinks.{CsvBatchTableSinkFactory, StreamTableSink, TableSink}
 import org.apache.flink.table.sources._
 import org.apache.flink.table.sources.tsextractors.ExistingField
 import org.apache.flink.table.sources.wmstrategies.{AscendingTimestamps, PreserveWatermarks}
@@ -203,7 +203,7 @@ class TestTableSourceWithTime[T](
   with DefinedFieldMapping {
 
   override def getDataStream(execEnv: StreamExecutionEnvironment): DataStream[T] = {
-    val dataStream = execEnv.fromCollection(values, returnType)
+    val dataStream = execEnv.fromData(values.asJava, returnType)
     dataStream.getTransformation.setMaxParallelism(1)
     dataStream
   }
@@ -529,7 +529,7 @@ class TestLegacyFilterableTableSource(
     }
 
     execEnv
-      .fromCollection[Row](
+      .fromData[Row](
         applyPredicatesToRows(records).asJava,
         fromDataTypeToTypeInfo(getProducedDataType).asInstanceOf[RowTypeInfo])
       .setParallelism(1)
@@ -740,7 +740,9 @@ class TestInputFormatTableSource[T](tableSchema: TableSchema, values: Seq[T])
 
   override def getInputFormat: InputFormat[T, _ <: InputSplit] = {
     val returnType = tableSchema.toRowType.asInstanceOf[TypeInformation[T]]
-    new CollectionInputFormat[T](values.asJava, returnType.createSerializer(new ExecutionConfig))
+    new CollectionInputFormat[T](
+      values.asJava,
+      returnType.createSerializer(new SerializerConfigImpl))
   }
 
   override def getReturnType: TypeInformation[T] =
@@ -796,7 +798,7 @@ class TestDataTypeTableSource(tableSchema: TableSchema, values: Seq[Row])
     new CollectionInputFormat[Row](
       values.asJava,
       fromDataTypeToTypeInfo(getProducedDataType)
-        .createSerializer(new ExecutionConfig)
+        .createSerializer(new SerializerConfigImpl)
         .asInstanceOf[TypeSerializer[Row]])
   }
 
@@ -858,7 +860,7 @@ class TestDataTypeTableSourceWithTime(
     new CollectionInputFormat[Row](
       values.asJava,
       fromDataTypeToTypeInfo(getProducedDataType)
-        .createSerializer(new ExecutionConfig)
+        .createSerializer(new SerializerConfigImpl)
         .asInstanceOf[TypeSerializer[Row]])
   }
 
@@ -930,7 +932,7 @@ class TestStreamTableSource(tableSchema: TableSchema, values: Seq[Row])
   extends StreamTableSource[Row] {
 
   override def getDataStream(execEnv: StreamExecutionEnvironment): DataStream[Row] = {
-    execEnv.fromCollection(values, tableSchema.toRowType)
+    execEnv.fromData(values.asJava, tableSchema.toRowType)
   }
 
   override def getProducedDataType: DataType = tableSchema.toRowDataType
@@ -1088,7 +1090,7 @@ class TestPartitionableTableSource(
       data.values.flatten
     }
 
-    execEnv.fromCollection[Row](remainingData, getReturnType).setParallelism(1).setMaxParallelism(1)
+    execEnv.fromData[Row](remainingData, getReturnType).setParallelism(1).setMaxParallelism(1)
   }
 
   override def explainSource(): String = {
@@ -1143,12 +1145,14 @@ class TestPartitionableSourceFactory extends TableSourceFactory[Row] {
 }
 
 object TestPartitionableSourceFactory {
-  private val tableSchema: TableSchema = TableSchema
-    .builder()
-    .field("id", DataTypes.INT())
-    .field("name", DataTypes.STRING())
-    .field("part1", DataTypes.STRING())
-    .field("part2", DataTypes.INT())
+  private val tableSchema: org.apache.flink.table.api.Schema = org.apache.flink.table.api.Schema
+    .newBuilder()
+    .fromResolvedSchema(ResolvedSchema.of(
+      Column.physical("id", DataTypes.INT()),
+      Column.physical("name", DataTypes.STRING()),
+      Column.physical("part1", DataTypes.STRING()),
+      Column.physical("part2", DataTypes.INT())
+    ))
     .build()
 
   /** For java invoking. */
@@ -1160,7 +1164,7 @@ object TestPartitionableSourceFactory {
       tEnv: TableEnvironment,
       tableName: String,
       isBounded: Boolean,
-      tableSchema: TableSchema = tableSchema,
+      tableSchema: org.apache.flink.table.api.Schema = tableSchema,
       remainingPartitions: JList[JMap[String, String]] = null,
       sourceFetchPartitions: Boolean = false): Unit = {
     val properties = new DescriptorProperties()
@@ -1177,11 +1181,11 @@ object TestPartitionableSourceFactory {
       }
     }
 
-    val table = new CatalogTableImpl(
+    val table = CatalogTable.of(
       tableSchema,
+      "",
       util.Arrays.asList[String]("part1", "part2"),
-      properties.asMap(),
-      ""
+      properties.asMap()
     )
     val catalog = tEnv.getCatalog(tEnv.getCurrentCatalog).get()
     val path = new ObjectPath(tEnv.getCurrentDatabase, tableName)
@@ -1217,7 +1221,7 @@ class WithoutTimeAttributesTableSource(bounded: Boolean) extends StreamTableSour
     )
     val dataStream =
       execEnv
-        .fromCollection(data)
+        .fromData(data.asJava)
         .returns(fromDataTypeToTypeInfo(getProducedDataType).asInstanceOf[RowTypeInfo])
     dataStream.getTransformation.setMaxParallelism(1)
     dataStream

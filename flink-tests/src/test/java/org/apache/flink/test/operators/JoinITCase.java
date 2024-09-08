@@ -22,6 +22,7 @@ import org.apache.flink.api.common.InvalidProgramException;
 import org.apache.flink.api.common.distributions.DataDistribution;
 import org.apache.flink.api.common.functions.FlatJoinFunction;
 import org.apache.flink.api.common.functions.JoinFunction;
+import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.functions.RichFlatJoinFunction;
 import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
@@ -34,13 +35,12 @@ import org.apache.flink.api.java.tuple.Tuple5;
 import org.apache.flink.api.java.tuple.Tuple6;
 import org.apache.flink.api.java.tuple.Tuple7;
 import org.apache.flink.api.java.utils.DataSetUtils;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataOutputView;
 import org.apache.flink.test.operators.util.CollectionDataSets;
 import org.apache.flink.test.operators.util.CollectionDataSets.CustomType;
 import org.apache.flink.test.operators.util.CollectionDataSets.POJO;
-import org.apache.flink.test.util.MultipleProgramsTestBase;
+import org.apache.flink.test.util.MultipleProgramsTestBaseJUnit4;
 import org.apache.flink.util.Collector;
 
 import org.junit.Assert;
@@ -57,7 +57,7 @@ import static org.apache.flink.test.util.TestBaseUtils.compareResultAsTuples;
 /** Integration tests for {@link JoinFunction} and {@link FlatJoinFunction}. */
 @SuppressWarnings("serial")
 @RunWith(Parameterized.class)
-public class JoinITCase extends MultipleProgramsTestBase {
+public class JoinITCase extends MultipleProgramsTestBaseJUnit4 {
 
     public JoinITCase(TestExecutionMode mode) {
         super(mode);
@@ -937,7 +937,7 @@ public class JoinITCase extends MultipleProgramsTestBase {
         private int broadcast;
 
         @Override
-        public void open(Configuration config) {
+        public void open(OpenContext openContext) {
 
             Collection<Integer> ints = this.getRuntimeContext().getBroadcastVariable("ints");
             int sum = 0;

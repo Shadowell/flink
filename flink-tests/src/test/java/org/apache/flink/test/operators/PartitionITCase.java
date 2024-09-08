@@ -35,7 +35,7 @@ import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.test.operators.util.CollectionDataSets;
 import org.apache.flink.test.operators.util.CollectionDataSets.POJO;
-import org.apache.flink.test.util.MultipleProgramsTestBase;
+import org.apache.flink.test.util.MultipleProgramsTestBaseJUnit4;
 import org.apache.flink.util.Collector;
 
 import org.junit.Test;
@@ -56,7 +56,7 @@ import static org.junit.Assert.assertTrue;
 /** Integration tests for {@link MapPartitionFunction}. */
 @RunWith(Parameterized.class)
 @SuppressWarnings("serial")
-public class PartitionITCase extends MultipleProgramsTestBase {
+public class PartitionITCase extends MultipleProgramsTestBaseJUnit4 {
 
     public PartitionITCase(TestExecutionMode mode) {
         super(mode);
@@ -448,7 +448,7 @@ public class PartitionITCase extends MultipleProgramsTestBase {
 
         @Override
         public Tuple2<Integer, Integer> map(Long value) throws Exception {
-            return new Tuple2<>(this.getRuntimeContext().getIndexOfThisSubtask(), 1);
+            return new Tuple2<>(this.getRuntimeContext().getTaskInfo().getIndexOfThisSubtask(), 1);
         }
     }
 
@@ -718,7 +718,8 @@ public class PartitionITCase extends MultipleProgramsTestBase {
         }
     }
 
-    private static class ComparablePojo implements Comparable<ComparablePojo> {
+    /** A comparable POJO. */
+    public static class ComparablePojo implements Comparable<ComparablePojo> {
         private Long first;
         private Long second;
 
@@ -774,6 +775,9 @@ public class PartitionITCase extends MultipleProgramsTestBase {
         @Override
         public void mapPartition(Iterable<T> values, Collector<Tuple2<T, T>> out) throws Exception {
             Iterator<T> itr = values.iterator();
+            if (!itr.hasNext()) {
+                return;
+            }
             T min = itr.next();
             T max = min;
             T value;

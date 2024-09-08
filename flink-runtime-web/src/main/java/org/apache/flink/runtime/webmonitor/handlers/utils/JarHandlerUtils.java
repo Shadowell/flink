@@ -46,6 +46,7 @@ import org.slf4j.Logger;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
+import java.net.MalformedURLException;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -58,7 +59,7 @@ import java.util.regex.Pattern;
 
 import static org.apache.flink.runtime.rest.handler.util.HandlerRequestUtils.fromRequestBodyOrQueryParameter;
 import static org.apache.flink.runtime.rest.handler.util.HandlerRequestUtils.getQueryParameter;
-import static org.apache.flink.shaded.guava30.com.google.common.base.Strings.emptyToNull;
+import static org.apache.flink.shaded.guava32.com.google.common.base.Strings.emptyToNull;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /**
@@ -97,6 +98,8 @@ public class JarHandlerUtils {
                 throws RestHandlerException {
             final JarRequestBody requestBody = request.getRequestBody();
 
+            Configuration configuration = requestBody.getFlinkConfiguration();
+
             final String pathParameter = request.getPathParameter(JarIdPathParameter.class);
             Path jarFile = jarDir.resolve(pathParameter);
 
@@ -116,7 +119,7 @@ public class JarHandlerUtils {
                     fromRequestBodyOrQueryParameter(
                             requestBody.getParallelism(),
                             () -> getQueryParameter(request, ParallelismQueryParameter.class),
-                            CoreOptions.DEFAULT_PARALLELISM.defaultValue(),
+                            configuration.get(CoreOptions.DEFAULT_PARALLELISM),
                             log);
 
             JobID jobId =
@@ -129,8 +132,14 @@ public class JarHandlerUtils {
             return new JarHandlerContext(jarFile, entryClass, programArgs, parallelism, jobId);
         }
 
-        public void applyToConfiguration(final Configuration configuration) {
+        public void applyToConfiguration(
+                final Configuration configuration,
+                final HandlerRequest<? extends JarRequestBody> request) {
             checkNotNull(configuration);
+            checkNotNull(request);
+
+            Configuration restFlinkConfig = request.getRequestBody().getFlinkConfiguration();
+            configuration.addAll(restFlinkConfig);
 
             if (jobId != null) {
                 configuration.set(
@@ -174,15 +183,55 @@ public class JarHandlerUtils {
             }
 
             try {
-                return PackagedProgram.newBuilder()
-                        .setJarFile(jarFile.toFile())
-                        .setEntryPointClassName(entryClass)
-                        .setConfiguration(configuration)
-                        .setArguments(programArgs.toArray(new String[0]))
-                        .build();
+                return initPackagedProgramBuilder(configuration).build();
             } catch (final ProgramInvocationException e) {
                 throw new CompletionException(e);
             }
+        }
+
+        @VisibleForTesting
+        PackagedProgram.Builder initPackagedProgramBuilder(Configuration configuration) {
+            return PackagedProgram.newBuilder()
+                    .setJarFile(jarFile.toFile())
+                    .setEntryPointClassName(entryClass)
+                    .setConfiguration(configuration)
+                    .setUserClassPaths(getClasspaths(configuration))
+                    .setArguments(programArgs.toArray(new String[0]));
+        }
+
+        @VisibleForTesting
+        String getEntryClass() {
+            return entryClass;
+        }
+
+        @VisibleForTesting
+        List<String> getProgramArgs() {
+            return programArgs;
+        }
+
+        @VisibleForTesting
+        int getParallelism() {
+            return parallelism;
+        }
+
+        @VisibleForTesting
+        JobID getJobId() {
+            return jobId;
+        }
+    }
+
+    private static List<URL> getClasspaths(Configuration configuration) {
+        try {
+            return ConfigUtils.decodeListFromConfig(
+                    configuration, PipelineOptions.CLASSPATHS, URL::new);
+        } catch (MalformedURLException e) {
+            throw new CompletionException(
+                    new RestHandlerException(
+                            String.format(
+                                    "Failed to extract '%s' as URLs. Provided value: %s",
+                                    PipelineOptions.CLASSPATHS.key(),
+                                    configuration.get(PipelineOptions.CLASSPATHS)),
+                            HttpResponseStatus.BAD_REQUEST));
         }
     }
 

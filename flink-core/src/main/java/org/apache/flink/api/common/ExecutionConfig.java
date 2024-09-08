@@ -18,18 +18,24 @@
 
 package org.apache.flink.api.common;
 
+import org.apache.flink.annotation.Experimental;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.annotation.Public;
 import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.api.common.restartstrategy.RestartStrategies;
-import org.apache.flink.configuration.ConfigurationUtils;
+import org.apache.flink.api.common.serialization.SerializerConfig;
+import org.apache.flink.api.common.serialization.SerializerConfigImpl;
+import org.apache.flink.configuration.ConfigOption;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.CoreOptions;
 import org.apache.flink.configuration.DescribedEnum;
 import org.apache.flink.configuration.ExecutionOptions;
 import org.apache.flink.configuration.JobManagerOptions;
+import org.apache.flink.configuration.JobManagerOptions.SchedulerType;
 import org.apache.flink.configuration.MetricOptions;
 import org.apache.flink.configuration.PipelineOptions;
 import org.apache.flink.configuration.ReadableConfig;
+import org.apache.flink.configuration.RestartStrategyOptions;
 import org.apache.flink.configuration.StateChangelogOptions;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.configuration.description.InlineElement;
@@ -40,13 +46,14 @@ import com.esotericsoftware.kryo.Serializer;
 import java.io.Serializable;
 import java.time.Duration;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.stream.Collectors;
+import java.util.Optional;
 
+import static org.apache.flink.configuration.ConfigOptions.key;
 import static org.apache.flink.configuration.description.TextElement.text;
 import static org.apache.flink.util.Preconditions.checkArgument;
 
@@ -73,6 +80,15 @@ import static org.apache.flink.util.Preconditions.checkArgument;
 @Public
 public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecutionConfig> {
 
+    // NOTE TO IMPLEMENTERS:
+    // Please do not add further fields to this class. Use the ConfigOption stack instead!
+    // It is currently very tricky to keep this kind of POJO classes in sync with instances of
+    // org.apache.flink.configuration.Configuration. Instances of Configuration are way easier to
+    // pass, layer, merge, restrict, copy, filter, etc.
+    // See ExecutionOptions.RUNTIME_MODE for a reference implementation. If the option is very
+    // crucial for the API, we can add a dedicated setter to StreamExecutionEnvironment. Otherwise,
+    // introducing a ConfigOption should be enough.
+
     private static final long serialVersionUID = 1L;
 
     /**
@@ -95,105 +111,74 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
 
     private static final long DEFAULT_RESTART_DELAY = 10000L;
 
+    /**
+     * Internal {@link ConfigOption}s, that are not exposed and it's not possible to configure them
+     * via config files. We are defining them here, so that we can store them in the {@link
+     * #configuration}.
+     *
+     * <p>If you decide to expose any of those {@link ConfigOption}s, please double-check if the
+     * key, type and descriptions are sensible, as the initial values are arbitrary.
+     */
     // --------------------------------------------------------------------------------------------
 
-    /** Defines how data exchange happens - batch or pipelined */
-    private ExecutionMode executionMode = ExecutionMode.PIPELINED;
-
-    private ClosureCleanerLevel closureCleanerLevel = ClosureCleanerLevel.RECURSIVE;
-
-    private int parallelism = CoreOptions.DEFAULT_PARALLELISM.defaultValue();
-
-    /**
-     * The program wide maximum parallelism used for operators which haven't specified a maximum
-     * parallelism. The maximum parallelism specifies the upper limit for dynamic scaling and the
-     * number of key groups used for partitioned state.
-     */
-    private int maxParallelism = -1;
+    private static final ConfigOption<ExecutionMode> EXECUTION_MODE =
+            key("hidden.execution.mode")
+                    .enumType(ExecutionMode.class)
+                    .defaultValue(ExecutionMode.PIPELINED)
+                    .withDescription("Defines how data exchange happens - batch or pipelined");
 
     /**
-     * @deprecated Should no longer be used because it is subsumed by RestartStrategyConfiguration
+     * Use {@link
+     * org.apache.flink.api.common.restartstrategy.RestartStrategies.RestartStrategyConfiguration}
      */
-    @Deprecated private int numberOfExecutionRetries = -1;
+    @Deprecated
+    private static final ConfigOption<Integer> EXECUTION_RETRIES =
+            key("hidden.execution.retries")
+                    .intType()
+                    .defaultValue(-1)
+                    .withDescription(
+                            "Should no longer be used because it is subsumed by RestartStrategyConfiguration");
+    // --------------------------------------------------------------------------------------------
 
-    private boolean forceKryo = false;
-
-    /** Flag to indicate whether generic types (through Kryo) are supported */
-    private boolean disableGenericTypes = false;
-
-    private boolean enableAutoGeneratedUids = true;
-
-    private boolean objectReuse = false;
-
-    private boolean autoTypeRegistrationEnabled = true;
-
-    private boolean forceAvro = false;
-    private long autoWatermarkInterval = 200;
-
-    // ---------- statebackend related configurations ------------------------------
     /**
-     * Interval in milliseconds for sending latency tracking marks from the sources to the sinks.
+     * In the long run, this field should be somehow merged with the {@link Configuration} from
+     * StreamExecutionEnvironment.
      */
-    private long latencyTrackingInterval = MetricOptions.LATENCY_INTERVAL.defaultValue();
+    private final Configuration configuration;
 
-    private boolean isLatencyTrackingConfigured = false;
+    private final SerializerConfig serializerConfig;
 
-    /** Interval in milliseconds to perform periodic changelog materialization. */
-    private long periodicMaterializeIntervalMillis =
-            StateChangelogOptions.PERIODIC_MATERIALIZATION_INTERVAL.defaultValue().toMillis();
-
-    /** Max allowed number of consecutive failures for changelog materialization */
-    private int materializationMaxAllowedFailures =
-            StateChangelogOptions.MATERIALIZATION_MAX_FAILURES_ALLOWED.defaultValue();
+    @Internal
+    public SerializerConfig getSerializerConfig() {
+        return serializerConfig;
+    }
 
     /**
      * @deprecated Should no longer be used because it is subsumed by RestartStrategyConfiguration
      */
     @Deprecated private long executionRetryDelay = DEFAULT_RESTART_DELAY;
 
+    /**
+     * @deprecated The field is marked as deprecated because starting from Flink 1.19, the usage of
+     *     all complex Java objects related to configuration, including their getter and setter
+     *     methods, should be replaced by ConfigOption. In a future major version of Flink, this
+     *     method will be removed entirely. It is recommended to switch to using the ConfigOptions
+     *     provided by {@link org.apache.flink.configuration.RestartStrategyOptions} for configuring
+     *     restart strategies.
+     */
+    @Deprecated
     private RestartStrategies.RestartStrategyConfiguration restartStrategyConfiguration =
             new RestartStrategies.FallbackRestartStrategyConfiguration();
 
-    private boolean isDynamicGraph = false;
+    public ExecutionConfig() {
+        this(new Configuration());
+    }
 
-    private long taskCancellationIntervalMillis = -1;
-
-    /**
-     * Timeout after which an ongoing task cancellation will lead to a fatal TaskManager error,
-     * usually killing the JVM.
-     */
-    private long taskCancellationTimeoutMillis = -1;
-
-    /**
-     * This flag defines if we use compression for the state snapshot data or not. Default: false
-     */
-    private boolean useSnapshotCompression = false;
-
-    // ------------------------------- User code values --------------------------------------------
-
-    private GlobalJobParameters globalJobParameters = new GlobalJobParameters();
-
-    // Serializers and types registered with Kryo and the PojoSerializer
-    // we store them in linked maps/sets to ensure they are registered in order in all kryo
-    // instances.
-
-    private LinkedHashMap<Class<?>, SerializableSerializer<?>> registeredTypesWithKryoSerializers =
-            new LinkedHashMap<>();
-
-    private LinkedHashMap<Class<?>, Class<? extends Serializer<?>>>
-            registeredTypesWithKryoSerializerClasses = new LinkedHashMap<>();
-
-    private LinkedHashMap<Class<?>, SerializableSerializer<?>> defaultKryoSerializers =
-            new LinkedHashMap<>();
-
-    private LinkedHashMap<Class<?>, Class<? extends Serializer<?>>> defaultKryoSerializerClasses =
-            new LinkedHashMap<>();
-
-    private LinkedHashSet<Class<?>> registeredKryoTypes = new LinkedHashSet<>();
-
-    private LinkedHashSet<Class<?>> registeredPojoTypes = new LinkedHashSet<>();
-
-    // --------------------------------------------------------------------------------------------
+    @Internal
+    public ExecutionConfig(Configuration configuration) {
+        this.configuration = configuration;
+        this.serializerConfig = new SerializerConfigImpl(configuration, this);
+    }
 
     /**
      * Enables the ClosureCleaner. This analyzes user code functions and sets fields to null that
@@ -202,8 +187,7 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      * be serializable because it needs to be sent to worker nodes.
      */
     public ExecutionConfig enableClosureCleaner() {
-        this.closureCleanerLevel = ClosureCleanerLevel.RECURSIVE;
-        return this;
+        return setClosureCleanerLevel(ClosureCleanerLevel.RECURSIVE);
     }
 
     /**
@@ -212,8 +196,7 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      * @see #enableClosureCleaner()
      */
     public ExecutionConfig disableClosureCleaner() {
-        this.closureCleanerLevel = ClosureCleanerLevel.NONE;
-        return this;
+        return setClosureCleanerLevel(ClosureCleanerLevel.NONE);
     }
 
     /**
@@ -222,7 +205,7 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      * @see #enableClosureCleaner()
      */
     public boolean isClosureCleanerEnabled() {
-        return !(closureCleanerLevel == ClosureCleanerLevel.NONE);
+        return !(getClosureCleanerLevel() == ClosureCleanerLevel.NONE);
     }
 
     /**
@@ -230,13 +213,13 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      * different settings.
      */
     public ExecutionConfig setClosureCleanerLevel(ClosureCleanerLevel level) {
-        this.closureCleanerLevel = level;
+        configuration.set(PipelineOptions.CLOSURE_CLEANER_LEVEL, level);
         return this;
     }
 
     /** Returns the configured {@link ClosureCleanerLevel}. */
     public ClosureCleanerLevel getClosureCleanerLevel() {
-        return closureCleanerLevel;
+        return configuration.get(PipelineOptions.CLOSURE_CLEANER_LEVEL);
     }
 
     /**
@@ -251,7 +234,11 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
     @PublicEvolving
     public ExecutionConfig setAutoWatermarkInterval(long interval) {
         Preconditions.checkArgument(interval >= 0, "Auto watermark interval must not be negative.");
-        this.autoWatermarkInterval = interval;
+        return setAutoWatermarkInterval(Duration.ofMillis(interval));
+    }
+
+    private ExecutionConfig setAutoWatermarkInterval(Duration autoWatermarkInterval) {
+        configuration.set(PipelineOptions.AUTO_WATERMARK_INTERVAL, autoWatermarkInterval);
         return this;
     }
 
@@ -262,7 +249,7 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      */
     @PublicEvolving
     public long getAutoWatermarkInterval() {
-        return this.autoWatermarkInterval;
+        return configuration.get(PipelineOptions.AUTO_WATERMARK_INTERVAL).toMillis();
     }
 
     /**
@@ -275,8 +262,7 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      */
     @PublicEvolving
     public ExecutionConfig setLatencyTrackingInterval(long interval) {
-        this.latencyTrackingInterval = interval;
-        this.isLatencyTrackingConfigured = true;
+        configuration.set(MetricOptions.LATENCY_INTERVAL, Duration.ofMillis(interval));
         return this;
     }
 
@@ -287,32 +273,48 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      */
     @PublicEvolving
     public long getLatencyTrackingInterval() {
-        return latencyTrackingInterval;
+        return configuration.get(MetricOptions.LATENCY_INTERVAL).toMillis();
     }
 
     @Internal
     public boolean isLatencyTrackingConfigured() {
-        return isLatencyTrackingConfigured;
+        return configuration.getOptional(MetricOptions.LATENCY_INTERVAL).isPresent();
+    }
+
+    @Internal
+    public boolean isPeriodicMaterializeEnabled() {
+        return configuration.get(StateChangelogOptions.PERIODIC_MATERIALIZATION_ENABLED);
+    }
+
+    @Internal
+    public void enablePeriodicMaterialize(boolean enabled) {
+        configuration.set(StateChangelogOptions.PERIODIC_MATERIALIZATION_ENABLED, enabled);
     }
 
     @Internal
     public long getPeriodicMaterializeIntervalMillis() {
-        return periodicMaterializeIntervalMillis;
+        return configuration
+                .get(StateChangelogOptions.PERIODIC_MATERIALIZATION_INTERVAL)
+                .toMillis();
     }
 
     @Internal
     public void setPeriodicMaterializeIntervalMillis(Duration periodicMaterializeInterval) {
-        this.periodicMaterializeIntervalMillis = periodicMaterializeInterval.toMillis();
+        configuration.set(
+                StateChangelogOptions.PERIODIC_MATERIALIZATION_INTERVAL,
+                periodicMaterializeInterval);
     }
 
     @Internal
     public int getMaterializationMaxAllowedFailures() {
-        return materializationMaxAllowedFailures;
+        return configuration.get(StateChangelogOptions.MATERIALIZATION_MAX_FAILURES_ALLOWED);
     }
 
     @Internal
     public void setMaterializationMaxAllowedFailures(int materializationMaxAllowedFailures) {
-        this.materializationMaxAllowedFailures = materializationMaxAllowedFailures;
+        configuration.set(
+                StateChangelogOptions.MATERIALIZATION_MAX_FAILURES_ALLOWED,
+                materializationMaxAllowedFailures);
     }
 
     /**
@@ -328,7 +330,7 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      *     used.
      */
     public int getParallelism() {
-        return parallelism;
+        return configuration.get(CoreOptions.DEFAULT_PARALLELISM);
     }
 
     /**
@@ -349,9 +351,14 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
                 throw new IllegalArgumentException(
                         "Parallelism must be at least one, or ExecutionConfig.PARALLELISM_DEFAULT (use system default).");
             }
-            this.parallelism = parallelism;
+            configuration.set(CoreOptions.DEFAULT_PARALLELISM, parallelism);
         }
         return this;
+    }
+
+    @Internal
+    public void resetParallelism() {
+        configuration.removeConfig(CoreOptions.DEFAULT_PARALLELISM);
     }
 
     /**
@@ -364,7 +371,7 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      */
     @PublicEvolving
     public int getMaxParallelism() {
-        return maxParallelism;
+        return configuration.get(PipelineOptions.MAX_PARALLELISM);
     }
 
     /**
@@ -378,14 +385,14 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
     @PublicEvolving
     public void setMaxParallelism(int maxParallelism) {
         checkArgument(maxParallelism > 0, "The maximum parallelism must be greater than 0.");
-        this.maxParallelism = maxParallelism;
+        configuration.set(PipelineOptions.MAX_PARALLELISM, maxParallelism);
     }
 
     /**
      * Gets the interval (in milliseconds) between consecutive attempts to cancel a running task.
      */
     public long getTaskCancellationInterval() {
-        return this.taskCancellationIntervalMillis;
+        return configuration.get(TaskManagerOptions.TASK_CANCELLATION_INTERVAL).toMillis();
     }
 
     /**
@@ -395,7 +402,8 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      * @param interval the interval (in milliseconds).
      */
     public ExecutionConfig setTaskCancellationInterval(long interval) {
-        this.taskCancellationIntervalMillis = interval;
+        configuration.set(
+                TaskManagerOptions.TASK_CANCELLATION_INTERVAL, Duration.ofMillis(interval));
         return this;
     }
 
@@ -408,7 +416,7 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      */
     @PublicEvolving
     public long getTaskCancellationTimeout() {
-        return this.taskCancellationTimeoutMillis;
+        return configuration.get(TaskManagerOptions.TASK_CANCELLATION_TIMEOUT).toMillis();
     }
 
     /**
@@ -426,7 +434,7 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
     @PublicEvolving
     public ExecutionConfig setTaskCancellationTimeout(long timeout) {
         checkArgument(timeout >= 0, "Timeout needs to be >= 0.");
-        this.taskCancellationTimeoutMillis = timeout;
+        configuration.set(TaskManagerOptions.TASK_CANCELLATION_TIMEOUT, Duration.ofMillis(timeout));
         return this;
     }
 
@@ -441,8 +449,15 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      * 	1000 // delay between retries));
      * }</pre>
      *
+     * @deprecated The method is marked as deprecated because starting from Flink 1.19, the usage of
+     *     all complex Java objects related to configuration, including their getter and setter
+     *     methods, should be replaced by ConfigOption. In a future major version of Flink, this
+     *     method will be removed entirely. It is recommended to switch to using the ConfigOptions
+     *     provided by {@link org.apache.flink.configuration.RestartStrategyOptions} for configuring
+     *     restart strategies.
      * @param restartStrategyConfiguration Configuration defining the restart strategy to use
      */
+    @Deprecated
     @PublicEvolving
     public void setRestartStrategy(
             RestartStrategies.RestartStrategyConfiguration restartStrategyConfiguration) {
@@ -453,10 +468,16 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
     /**
      * Returns the restart strategy which has been set for the current job.
      *
+     * @deprecated The method is marked as deprecated because starting from Flink 1.19, the usage of
+     *     all complex Java objects related to configuration, including their getter and setter
+     *     methods, should be replaced by ConfigOption. In a future major version of Flink, this
+     *     method will be removed entirely. It is recommended to switch to using the ConfigOptions
+     *     provided by {@link org.apache.flink.configuration.RestartStrategyOptions} for configuring
+     *     restart strategies.
      * @return The specified restart configuration
      */
+    @Deprecated
     @PublicEvolving
-    @SuppressWarnings("deprecation")
     public RestartStrategies.RestartStrategyConfiguration getRestartStrategy() {
         if (restartStrategyConfiguration
                 instanceof RestartStrategies.FallbackRestartStrategyConfiguration) {
@@ -475,13 +496,8 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
     }
 
     @Internal
-    public void setDynamicGraph(boolean dynamicGraph) {
-        isDynamicGraph = dynamicGraph;
-    }
-
-    @Internal
-    public boolean isDynamicGraph() {
-        return isDynamicGraph;
+    public Optional<SchedulerType> getSchedulerType() {
+        return configuration.getOptional(JobManagerOptions.SCHEDULER);
     }
 
     /**
@@ -493,7 +509,7 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      */
     @Deprecated
     public int getNumberOfExecutionRetries() {
-        return numberOfExecutionRetries;
+        return configuration.get(EXECUTION_RETRIES);
     }
 
     /**
@@ -525,7 +541,7 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
             throw new IllegalArgumentException(
                     "The number of execution retries must be non-negative, or -1 (use system default)");
         }
-        this.numberOfExecutionRetries = numberOfExecutionRetries;
+        configuration.set(EXECUTION_RETRIES, numberOfExecutionRetries);
         return this;
     }
 
@@ -554,9 +570,17 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      * <p>The default execution mode is {@link ExecutionMode#PIPELINED}.
      *
      * @param executionMode The execution mode to use.
+     * @deprecated The {@link ExecutionMode} is deprecated because it's only used in DataSet APIs.
+     *     All Flink DataSet APIs are deprecated since Flink 1.18 and will be removed in a future
+     *     Flink major version. You can still build your application in DataSet, but you should move
+     *     to either the DataStream and/or Table API.
+     * @see <a href="https://cwiki.apache.org/confluence/pages/viewpage.action?pageId=158866741">
+     *     FLIP-131: Consolidate the user-facing Dataflow SDKs/APIs (and deprecate the DataSet
+     *     API</a>
      */
+    @Deprecated
     public void setExecutionMode(ExecutionMode executionMode) {
-        this.executionMode = executionMode;
+        configuration.set(EXECUTION_MODE, executionMode);
     }
 
     /**
@@ -566,9 +590,17 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      * <p>The default execution mode is {@link ExecutionMode#PIPELINED}.
      *
      * @return The execution mode for the program.
+     * @deprecated The {@link ExecutionMode} is deprecated because it's only used in DataSet APIs.
+     *     All Flink DataSet APIs are deprecated since Flink 1.18 and will be removed in a future
+     *     Flink major version. You can still build your application in DataSet, but you should move
+     *     to either the DataStream and/or Table API.
+     * @see <a href="https://cwiki.apache.org/confluence/pages/viewpage.action?pageId=158866741">
+     *     FLIP-131: Consolidate the user-facing Dataflow SDKs/APIs (and deprecate the DataSet
+     *     API</a>
      */
+    @Deprecated
     public ExecutionMode getExecutionMode() {
-        return executionMode;
+        return configuration.get(EXECUTION_MODE);
     }
 
     /**
@@ -601,18 +633,38 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      * Force TypeExtractor to use Kryo serializer for POJOS even though we could analyze as POJO. In
      * some cases this might be preferable. For example, when using interfaces with subclasses that
      * cannot be analyzed as POJO.
+     *
+     * @deprecated Configure serialization behavior through hard codes is deprecated, because you
+     *     need to modify the codes when upgrading job version. You should configure this by config
+     *     option {@link PipelineOptions#FORCE_KRYO}.
+     * @see <a
+     *     href="https://cwiki.apache.org/confluence/display/FLINK/FLIP-398:+Improve+Serialization+Configuration+And+Usage+In+Flink">
+     *     FLIP-398: Improve Serialization Configuration And Usage In Flink</a>
      */
+    @Deprecated
     public void enableForceKryo() {
-        forceKryo = true;
+        serializerConfig.setForceKryo(true);
     }
 
-    /** Disable use of Kryo serializer for all POJOs. */
+    /**
+     * Disable use of Kryo serializer for all POJOs.
+     *
+     * @deprecated Configure serialization behavior through hard codes is deprecated, because you
+     *     need to modify the codes when upgrading job version. You should configure this by config
+     *     option {@link PipelineOptions#FORCE_KRYO}.
+     * @see <a
+     *     href="https://cwiki.apache.org/confluence/display/FLINK/FLIP-398:+Improve+Serialization+Configuration+And+Usage+In+Flink">
+     *     FLIP-398: Improve Serialization Configuration And Usage In Flink</a>
+     */
+    @Deprecated
     public void disableForceKryo() {
-        forceKryo = false;
+        serializerConfig.setForceKryo(false);
     }
 
+    /** @deprecated Use {@link SerializerConfig#isForceKryoEnabled}. */
+    @Deprecated
     public boolean isForceKryoEnabled() {
-        return forceKryo;
+        return serializerConfig.isForceKryoEnabled();
     }
 
     /**
@@ -620,10 +672,17 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      *
      * <p>Generic types are enabled by default.
      *
+     * @deprecated Configure serialization behavior through hard codes is deprecated, because you
+     *     need to modify the codes when upgrading job version. You should configure this by config
+     *     option {@link PipelineOptions#GENERIC_TYPES}.
+     * @see <a
+     *     href="https://cwiki.apache.org/confluence/display/FLINK/FLIP-398:+Improve+Serialization+Configuration+And+Usage+In+Flink">
+     *     FLIP-398: Improve Serialization Configuration And Usage In Flink</a>
      * @see #disableGenericTypes()
      */
+    @Deprecated
     public void enableGenericTypes() {
-        disableGenericTypes = false;
+        serializerConfig.setGenericTypes(true);
     }
 
     /**
@@ -640,10 +699,17 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      * input data may be such that new, previously unseen, types occur at some point. In that case,
      * setting this option would cause the program to fail.
      *
+     * @deprecated Configure serialization behavior through hard codes is deprecated, because you
+     *     need to modify the codes when upgrading job version. You should configure this by config
+     *     option {@link PipelineOptions#GENERIC_TYPES}.
+     * @see <a
+     *     href="https://cwiki.apache.org/confluence/display/FLINK/FLIP-398:+Improve+Serialization+Configuration+And+Usage+In+Flink">
+     *     FLIP-398: Improve Serialization Configuration And Usage In Flink</a>
      * @see #enableGenericTypes()
      */
+    @Deprecated
     public void disableGenericTypes() {
-        disableGenericTypes = true;
+        serializerConfig.setGenericTypes(false);
     }
 
     /**
@@ -652,11 +718,13 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      *
      * <p>Generic types are enabled by default.
      *
+     * @deprecated Use {@link SerializerConfig#hasGenericTypesDisabled}.
      * @see #enableGenericTypes()
      * @see #disableGenericTypes()
      */
+    @Deprecated
     public boolean hasGenericTypesDisabled() {
-        return disableGenericTypes;
+        return serializerConfig.hasGenericTypesDisabled();
     }
 
     /**
@@ -665,7 +733,7 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      * @see #disableAutoGeneratedUIDs()
      */
     public void enableAutoGeneratedUIDs() {
-        enableAutoGeneratedUids = true;
+        setAutoGeneratedUids(true);
     }
 
     /**
@@ -678,7 +746,11 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      * overtime without discarding state.
      */
     public void disableAutoGeneratedUIDs() {
-        enableAutoGeneratedUids = false;
+        setAutoGeneratedUids(false);
+    }
+
+    private void setAutoGeneratedUids(boolean autoGeneratedUids) {
+        configuration.set(PipelineOptions.AUTO_GENERATE_UIDS, autoGeneratedUids);
     }
 
     /**
@@ -690,26 +762,49 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      * @see #disableAutoGeneratedUIDs()
      */
     public boolean hasAutoGeneratedUIDsEnabled() {
-        return enableAutoGeneratedUids;
+        return configuration.get(PipelineOptions.AUTO_GENERATE_UIDS);
     }
 
     /**
      * Forces Flink to use the Apache Avro serializer for POJOs.
      *
      * <p><b>Important:</b> Make sure to include the <i>flink-avro</i> module.
+     *
+     * @deprecated Configure serialization behavior through hard codes is deprecated, because you
+     *     need to modify the codes when upgrading job version. You should configure this by config
+     *     option {@link PipelineOptions#FORCE_AVRO}.
+     * @see <a
+     *     href="https://cwiki.apache.org/confluence/display/FLINK/FLIP-398:+Improve+Serialization+Configuration+And+Usage+In+Flink">
+     *     FLIP-398: Improve Serialization Configuration And Usage In Flink</a>
      */
+    @Deprecated
     public void enableForceAvro() {
-        forceAvro = true;
+        serializerConfig.setForceAvro(true);
     }
 
-    /** Disables the Apache Avro serializer as the forced serializer for POJOs. */
+    /**
+     * Disables the Apache Avro serializer as the forced serializer for POJOs.
+     *
+     * @deprecated Configure serialization behavior through hard codes is deprecated, because you
+     *     need to modify the codes when upgrading job version. You should configure this by config
+     *     option {@link PipelineOptions#FORCE_AVRO}.
+     * @see <a
+     *     href="https://cwiki.apache.org/confluence/display/FLINK/FLIP-398:+Improve+Serialization+Configuration+And+Usage+In+Flink">
+     *     FLIP-398: Improve Serialization Configuration And Usage In Flink</a>
+     */
+    @Deprecated
     public void disableForceAvro() {
-        forceAvro = false;
+        serializerConfig.setForceAvro(false);
     }
 
-    /** Returns whether the Apache Avro is the default serializer for POJOs. */
+    /**
+     * Returns whether the Apache Avro is the default serializer for POJOs.
+     *
+     * @deprecated Use {@link SerializerConfig#isForceAvroEnabled}.
+     */
+    @Deprecated
     public boolean isForceAvroEnabled() {
-        return forceAvro;
+        return serializerConfig.isForceAvroEnabled();
     }
 
     /**
@@ -718,8 +813,7 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      * an operation is not aware of this behaviour.
      */
     public ExecutionConfig enableObjectReuse() {
-        objectReuse = true;
-        return this;
+        return setObjectReuse(true);
     }
 
     /**
@@ -727,17 +821,24 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      * user-code functions. @see #enableObjectReuse()
      */
     public ExecutionConfig disableObjectReuse() {
-        objectReuse = false;
+        return setObjectReuse(false);
+    }
+
+    private ExecutionConfig setObjectReuse(boolean objectReuse) {
+        configuration.set(PipelineOptions.OBJECT_REUSE, objectReuse);
         return this;
     }
 
     /** Returns whether object reuse has been enabled or disabled. @see #enableObjectReuse() */
     public boolean isObjectReuseEnabled() {
-        return objectReuse;
+        return configuration.get(PipelineOptions.OBJECT_REUSE);
     }
 
     public GlobalJobParameters getGlobalJobParameters() {
-        return globalJobParameters;
+        return configuration
+                .getOptional(PipelineOptions.GLOBAL_JOB_PARAMETERS)
+                .map(MapBasedJobParameters::new)
+                .orElse(new MapBasedJobParameters(Collections.emptyMap()));
     }
 
     /**
@@ -747,7 +848,11 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      */
     public void setGlobalJobParameters(GlobalJobParameters globalJobParameters) {
         Preconditions.checkNotNull(globalJobParameters, "globalJobParameters shouldn't be null");
-        this.globalJobParameters = globalJobParameters;
+        setGlobalJobParameters(globalJobParameters.toMap());
+    }
+
+    private void setGlobalJobParameters(Map<String, String> parameters) {
+        configuration.set(PipelineOptions.GLOBAL_JOB_PARAMETERS, parameters);
     }
 
     // --------------------------------------------------------------------------------------------
@@ -763,14 +868,17 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      *
      * @param type The class of the types serialized with the given serializer.
      * @param serializer The serializer to use.
+     * @deprecated Register data types and serializers through hard codes is deprecated, because you
+     *     need to modify the codes when upgrading job version. You should configure this by config
+     *     option {@link PipelineOptions#SERIALIZATION_CONFIG}.
+     * @see <a
+     *     href="https://cwiki.apache.org/confluence/display/FLINK/FLIP-398:+Improve+Serialization+Configuration+And+Usage+In+Flink">
+     *     FLIP-398: Improve Serialization Configuration And Usage In Flink</a>
      */
+    @Deprecated
     public <T extends Serializer<?> & Serializable> void addDefaultKryoSerializer(
             Class<?> type, T serializer) {
-        if (type == null || serializer == null) {
-            throw new NullPointerException("Cannot register null class or serializer.");
-        }
-
-        defaultKryoSerializers.put(type, new SerializableSerializer<>(serializer));
+        serializerConfig.addDefaultKryoSerializer(type, serializer);
     }
 
     /**
@@ -778,13 +886,17 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      *
      * @param type The class of the types serialized with the given serializer.
      * @param serializerClass The class of the serializer to use.
+     * @deprecated Register data types and serializers through hard codes is deprecated, because you
+     *     need to modify the codes when upgrading job version. You should configure this by config
+     *     option {@link PipelineOptions#SERIALIZATION_CONFIG}.
+     * @see <a
+     *     href="https://cwiki.apache.org/confluence/display/FLINK/FLIP-398:+Improve+Serialization+Configuration+And+Usage+In+Flink">
+     *     FLIP-398: Improve Serialization Configuration And Usage In Flink</a>
      */
+    @Deprecated
     public void addDefaultKryoSerializer(
             Class<?> type, Class<? extends Serializer<?>> serializerClass) {
-        if (type == null || serializerClass == null) {
-            throw new NullPointerException("Cannot register null class or serializer.");
-        }
-        defaultKryoSerializerClasses.put(type, serializerClass);
+        serializerConfig.addDefaultKryoSerializer(type, serializerClass);
     }
 
     /**
@@ -796,34 +908,37 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      *
      * @param type The class of the types serialized with the given serializer.
      * @param serializer The serializer to use.
+     * @deprecated Register data types and serializers through hard codes is deprecated, because you
+     *     need to modify the codes when upgrading job version. You should configure this by config
+     *     option {@link PipelineOptions#SERIALIZATION_CONFIG}.
+     * @see <a
+     *     href="https://cwiki.apache.org/confluence/display/FLINK/FLIP-398:+Improve+Serialization+Configuration+And+Usage+In+Flink">
+     *     FLIP-398: Improve Serialization Configuration And Usage In Flink</a>
      */
+    @Deprecated
     public <T extends Serializer<?> & Serializable> void registerTypeWithKryoSerializer(
             Class<?> type, T serializer) {
-        if (type == null || serializer == null) {
-            throw new NullPointerException("Cannot register null class or serializer.");
-        }
-
-        registeredTypesWithKryoSerializers.put(type, new SerializableSerializer<>(serializer));
+        serializerConfig.registerTypeWithKryoSerializer(type, serializer);
     }
 
     /**
      * Registers the given Serializer via its class as a serializer for the given type at the
-     * KryoSerializer
+     * KryoSerializer.
      *
      * @param type The class of the types serialized with the given serializer.
      * @param serializerClass The class of the serializer to use.
+     * @deprecated Register data types and serializers through hard codes is deprecated, because you
+     *     need to modify the codes when upgrading job version. You should configure this by config
+     *     option {@link PipelineOptions#SERIALIZATION_CONFIG}.
+     * @see <a
+     *     href="https://cwiki.apache.org/confluence/display/FLINK/FLIP-398:+Improve+Serialization+Configuration+And+Usage+In+Flink">
+     *     FLIP-398: Improve Serialization Configuration And Usage In Flink</a>
      */
+    @Deprecated
     @SuppressWarnings("rawtypes")
     public void registerTypeWithKryoSerializer(
             Class<?> type, Class<? extends Serializer> serializerClass) {
-        if (type == null || serializerClass == null) {
-            throw new NullPointerException("Cannot register null class or serializer.");
-        }
-
-        @SuppressWarnings("unchecked")
-        Class<? extends Serializer<?>> castedSerializerClass =
-                (Class<? extends Serializer<?>>) serializerClass;
-        registeredTypesWithKryoSerializerClasses.put(type, castedSerializerClass);
+        serializerConfig.registerTypeWithKryoSerializer(type, serializerClass);
     }
 
     /**
@@ -833,14 +948,16 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      * written.
      *
      * @param type The class of the type to register.
+     * @deprecated Register data types and serializers through hard codes is deprecated, because you
+     *     need to modify the codes when upgrading job version. You should configure this by config
+     *     option {@link PipelineOptions#SERIALIZATION_CONFIG}.
+     * @see <a
+     *     href="https://cwiki.apache.org/confluence/display/FLINK/FLIP-398:+Improve+Serialization+Configuration+And+Usage+In+Flink">
+     *     FLIP-398: Improve Serialization Configuration And Usage In Flink</a>
      */
+    @Deprecated
     public void registerPojoType(Class<?> type) {
-        if (type == null) {
-            throw new NullPointerException("Cannot register null type class.");
-        }
-        if (!registeredPojoTypes.contains(type)) {
-            registeredPojoTypes.add(type);
-        }
+        serializerConfig.registerPojoType(type);
     }
 
     /**
@@ -850,77 +967,161 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
      * written.
      *
      * @param type The class of the type to register.
+     * @deprecated Register data types and serializers through hard codes is deprecated, because you
+     *     need to modify the codes when upgrading job version. You should configure this by config
+     *     option {@link PipelineOptions#SERIALIZATION_CONFIG}.
+     * @see <a
+     *     href="https://cwiki.apache.org/confluence/display/FLINK/FLIP-398:+Improve+Serialization+Configuration+And+Usage+In+Flink">
+     *     FLIP-398: Improve Serialization Configuration And Usage In Flink</a>
      */
+    @Deprecated
     public void registerKryoType(Class<?> type) {
-        if (type == null) {
-            throw new NullPointerException("Cannot register null type class.");
-        }
-        registeredKryoTypes.add(type);
+        serializerConfig.registerKryoType(type);
     }
 
-    /** Returns the registered types with Kryo Serializers. */
+    /**
+     * Returns the registered types with Kryo Serializers.
+     *
+     * @deprecated Use {@link SerializerConfig#getRegisteredTypesWithKryoSerializers}.
+     */
+    @Deprecated
     public LinkedHashMap<Class<?>, SerializableSerializer<?>>
             getRegisteredTypesWithKryoSerializers() {
-        return registeredTypesWithKryoSerializers;
+        return serializerConfig.getRegisteredTypesWithKryoSerializers();
     }
 
-    /** Returns the registered types with their Kryo Serializer classes. */
+    /**
+     * Returns the registered types with their Kryo Serializer classes.
+     *
+     * @deprecated Use {@link SerializerConfig#getRegisteredTypesWithKryoSerializerClasses}.
+     */
+    @Deprecated
     public LinkedHashMap<Class<?>, Class<? extends Serializer<?>>>
             getRegisteredTypesWithKryoSerializerClasses() {
-        return registeredTypesWithKryoSerializerClasses;
+        return serializerConfig.getRegisteredTypesWithKryoSerializerClasses();
     }
 
-    /** Returns the registered default Kryo Serializers. */
+    /**
+     * Returns the registered default Kryo Serializers.
+     *
+     * @deprecated Use {@link SerializerConfig#getDefaultKryoSerializers}.
+     */
+    @Deprecated
     public LinkedHashMap<Class<?>, SerializableSerializer<?>> getDefaultKryoSerializers() {
-        return defaultKryoSerializers;
+        return serializerConfig.getDefaultKryoSerializers();
     }
 
-    /** Returns the registered default Kryo Serializer classes. */
+    /**
+     * Returns the registered default Kryo Serializer classes.
+     *
+     * @deprecated Use {@link SerializerConfig#getDefaultKryoSerializerClasses}.
+     */
+    @Deprecated
     public LinkedHashMap<Class<?>, Class<? extends Serializer<?>>>
             getDefaultKryoSerializerClasses() {
-        return defaultKryoSerializerClasses;
+        return serializerConfig.getDefaultKryoSerializerClasses();
     }
 
-    /** Returns the registered Kryo types. */
+    /**
+     * Returns the registered Kryo types.
+     *
+     * @deprecated Use {@link SerializerConfig#getRegisteredKryoTypes}.
+     */
+    @Deprecated
     public LinkedHashSet<Class<?>> getRegisteredKryoTypes() {
-        if (isForceKryoEnabled()) {
-            // if we force kryo, we must also return all the types that
-            // were previously only registered as POJO
-            LinkedHashSet<Class<?>> result = new LinkedHashSet<>();
-            result.addAll(registeredKryoTypes);
-            for (Class<?> t : registeredPojoTypes) {
-                if (!result.contains(t)) {
-                    result.add(t);
-                }
-            }
-            return result;
-        } else {
-            return registeredKryoTypes;
-        }
+        return serializerConfig.getRegisteredKryoTypes();
     }
 
-    /** Returns the registered POJO types. */
+    /**
+     * Returns the registered POJO types.
+     *
+     * @deprecated Use {@link SerializerConfig#getRegisteredPojoTypes}.
+     */
+    @Deprecated
     public LinkedHashSet<Class<?>> getRegisteredPojoTypes() {
-        return registeredPojoTypes;
+        return serializerConfig.getRegisteredPojoTypes();
     }
 
+    /**
+     * Get if the auto type registration is disabled.
+     *
+     * @return if the auto type registration is disabled.
+     * @deprecated The method is deprecated because it's only used in DataSet API. All Flink DataSet
+     *     APIs are deprecated since Flink 1.18 and will be removed in a future Flink major version.
+     *     You can still build your application in DataSet, but you should move to either the
+     *     DataStream and/or Table API.
+     * @see <a href="https://cwiki.apache.org/confluence/pages/viewpage.action?pageId=158866741">
+     *     FLIP-131: Consolidate the user-facing Dataflow SDKs/APIs (and deprecate the DataSet
+     *     API</a>
+     */
+    @Deprecated
     public boolean isAutoTypeRegistrationDisabled() {
-        return !autoTypeRegistrationEnabled;
+        return !configuration.get(PipelineOptions.AUTO_TYPE_REGISTRATION);
     }
 
     /**
      * Control whether Flink is automatically registering all types in the user programs with Kryo.
+     *
+     * @deprecated The method is deprecated because it's only used in DataSet API. All Flink DataSet
+     *     APIs are deprecated since Flink 1.18 and will be removed in a future Flink major version.
+     *     You can still build your application in DataSet, but you should move to either the
+     *     DataStream and/or Table API.
+     * @see <a href="https://cwiki.apache.org/confluence/pages/viewpage.action?pageId=158866741">
+     *     FLIP-131: Consolidate the user-facing Dataflow SDKs/APIs (and deprecate the DataSet
+     *     API</a>
      */
+    @Deprecated
     public void disableAutoTypeRegistration() {
-        this.autoTypeRegistrationEnabled = false;
+        setAutoTypeRegistration(false);
+    }
+
+    private void setAutoTypeRegistration(Boolean autoTypeRegistration) {
+        configuration.set(PipelineOptions.AUTO_TYPE_REGISTRATION, autoTypeRegistration);
     }
 
     public boolean isUseSnapshotCompression() {
-        return useSnapshotCompression;
+        return configuration.get(ExecutionOptions.SNAPSHOT_COMPRESSION);
     }
 
     public void setUseSnapshotCompression(boolean useSnapshotCompression) {
-        this.useSnapshotCompression = useSnapshotCompression;
+        configuration.set(ExecutionOptions.SNAPSHOT_COMPRESSION, useSnapshotCompression);
+    }
+
+    // --------------------------------------------------------------------------------------------
+    //  Asynchronous execution configurations
+    // --------------------------------------------------------------------------------------------
+
+    @Experimental
+    public int getAsyncInflightRecordsLimit() {
+        return configuration.get(ExecutionOptions.ASYNC_INFLIGHT_RECORDS_LIMIT);
+    }
+
+    @Experimental
+    public ExecutionConfig setAsyncInflightRecordsLimit(int limit) {
+        configuration.set(ExecutionOptions.ASYNC_INFLIGHT_RECORDS_LIMIT, limit);
+        return this;
+    }
+
+    @Experimental
+    public int getAsyncStateBufferSize() {
+        return configuration.get(ExecutionOptions.ASYNC_STATE_BUFFER_SIZE);
+    }
+
+    @Experimental
+    public ExecutionConfig setAsyncStateBufferSize(int bufferSize) {
+        configuration.set(ExecutionOptions.ASYNC_STATE_BUFFER_SIZE, bufferSize);
+        return this;
+    }
+
+    @Experimental
+    public long getAsyncStateBufferTimeout() {
+        return configuration.get(ExecutionOptions.ASYNC_STATE_BUFFER_TIMEOUT);
+    }
+
+    @Experimental
+    public ExecutionConfig setAsyncStateBufferTimeout(long timeout) {
+        configuration.set(ExecutionOptions.ASYNC_STATE_BUFFER_TIMEOUT, timeout);
+        return this;
     }
 
     @Override
@@ -928,30 +1129,13 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
         if (obj instanceof ExecutionConfig) {
             ExecutionConfig other = (ExecutionConfig) obj;
 
-            return other.canEqual(this)
-                    && Objects.equals(executionMode, other.executionMode)
-                    && closureCleanerLevel == other.closureCleanerLevel
-                    && parallelism == other.parallelism
+            return Objects.equals(configuration, other.configuration)
+                    && Objects.equals(serializerConfig, other.serializerConfig)
                     && ((restartStrategyConfiguration == null
                                     && other.restartStrategyConfiguration == null)
                             || (null != restartStrategyConfiguration
                                     && restartStrategyConfiguration.equals(
-                                            other.restartStrategyConfiguration)))
-                    && forceKryo == other.forceKryo
-                    && disableGenericTypes == other.disableGenericTypes
-                    && objectReuse == other.objectReuse
-                    && autoTypeRegistrationEnabled == other.autoTypeRegistrationEnabled
-                    && forceAvro == other.forceAvro
-                    && Objects.equals(globalJobParameters, other.globalJobParameters)
-                    && autoWatermarkInterval == other.autoWatermarkInterval
-                    && registeredTypesWithKryoSerializerClasses.equals(
-                            other.registeredTypesWithKryoSerializerClasses)
-                    && defaultKryoSerializerClasses.equals(other.defaultKryoSerializerClasses)
-                    && registeredKryoTypes.equals(other.registeredKryoTypes)
-                    && registeredPojoTypes.equals(other.registeredPojoTypes)
-                    && taskCancellationIntervalMillis == other.taskCancellationIntervalMillis
-                    && useSnapshotCompression == other.useSnapshotCompression
-                    && isDynamicGraph == other.isDynamicGraph;
+                                            other.restartStrategyConfiguration)));
 
         } else {
             return false;
@@ -960,87 +1144,29 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
 
     @Override
     public int hashCode() {
-        return Objects.hash(
-                executionMode,
-                closureCleanerLevel,
-                parallelism,
-                restartStrategyConfiguration,
-                forceKryo,
-                disableGenericTypes,
-                objectReuse,
-                autoTypeRegistrationEnabled,
-                forceAvro,
-                globalJobParameters,
-                autoWatermarkInterval,
-                registeredTypesWithKryoSerializerClasses,
-                defaultKryoSerializerClasses,
-                registeredKryoTypes,
-                registeredPojoTypes,
-                taskCancellationIntervalMillis,
-                useSnapshotCompression,
-                isDynamicGraph);
+        return Objects.hash(configuration, serializerConfig, restartStrategyConfiguration);
     }
 
     @Override
     public String toString() {
         return "ExecutionConfig{"
-                + "executionMode="
-                + executionMode
-                + ", closureCleanerLevel="
-                + closureCleanerLevel
-                + ", parallelism="
-                + parallelism
-                + ", maxParallelism="
-                + maxParallelism
-                + ", numberOfExecutionRetries="
-                + numberOfExecutionRetries
-                + ", forceKryo="
-                + forceKryo
-                + ", disableGenericTypes="
-                + disableGenericTypes
-                + ", enableAutoGeneratedUids="
-                + enableAutoGeneratedUids
-                + ", objectReuse="
-                + objectReuse
-                + ", autoTypeRegistrationEnabled="
-                + autoTypeRegistrationEnabled
-                + ", forceAvro="
-                + forceAvro
-                + ", autoWatermarkInterval="
-                + autoWatermarkInterval
-                + ", latencyTrackingInterval="
-                + latencyTrackingInterval
-                + ", isLatencyTrackingConfigured="
-                + isLatencyTrackingConfigured
+                + "configuration="
+                + configuration
+                + ", serializerConfig="
+                + serializerConfig
                 + ", executionRetryDelay="
                 + executionRetryDelay
                 + ", restartStrategyConfiguration="
                 + restartStrategyConfiguration
-                + ", taskCancellationIntervalMillis="
-                + taskCancellationIntervalMillis
-                + ", taskCancellationTimeoutMillis="
-                + taskCancellationTimeoutMillis
-                + ", useSnapshotCompression="
-                + useSnapshotCompression
-                + ", globalJobParameters="
-                + globalJobParameters
-                + ", registeredTypesWithKryoSerializers="
-                + registeredTypesWithKryoSerializers
-                + ", registeredTypesWithKryoSerializerClasses="
-                + registeredTypesWithKryoSerializerClasses
-                + ", defaultKryoSerializers="
-                + defaultKryoSerializers
-                + ", defaultKryoSerializerClasses="
-                + defaultKryoSerializerClasses
-                + ", registeredKryoTypes="
-                + registeredKryoTypes
-                + ", registeredPojoTypes="
-                + registeredPojoTypes
-                + ", isDynamicGraph="
-                + isDynamicGraph
                 + '}';
     }
 
+    /**
+     * This method simply checks whether the object is an {@link ExecutionConfig} instance.
+     *
+     * @deprecated It is not intended to be used by users.
+     */
+    @Deprecated
     public boolean canEqual(Object obj) {
         return obj instanceof ExecutionConfig;
     }
@@ -1053,6 +1179,18 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
 
     // ------------------------------ Utilities  ----------------------------------
 
+    /**
+     * @deprecated The class is deprecated because instance-type serializer definition where
+     *     serializers are serialized and written into the snapshot and deserialized for use is
+     *     deprecated. Use class-type serializer definition instead, where only the class name is
+     *     written into the snapshot and new instance of the serializer is created for use. This is
+     *     a breaking change, and it will be removed in Flink 2.0.
+     * @see <a
+     *     href="https://cwiki.apache.org/confluence/display/FLINK/FLIP-398:+Improve+Serialization+Configuration+And+Usage+In+Flink">
+     *     FLIP-398: Improve Serialization Configuration And Usage In Flink</a>
+     */
+    @Deprecated
+    @Public
     public static class SerializableSerializer<T extends Serializer<?> & Serializable>
             implements Serializable {
         private static final long serialVersionUID = 4687893502781067189L;
@@ -1135,30 +1273,27 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
     public void configure(ReadableConfig configuration, ClassLoader classLoader) {
         configuration
                 .getOptional(PipelineOptions.AUTO_TYPE_REGISTRATION)
-                .ifPresent(b -> this.autoTypeRegistrationEnabled = b);
+                .ifPresent(this::setAutoTypeRegistration);
         configuration
                 .getOptional(PipelineOptions.AUTO_GENERATE_UIDS)
-                .ifPresent(b -> this.enableAutoGeneratedUids = b);
+                .ifPresent(this::setAutoGeneratedUids);
         configuration
                 .getOptional(PipelineOptions.AUTO_WATERMARK_INTERVAL)
-                .ifPresent(i -> this.setAutoWatermarkInterval(i.toMillis()));
+                .ifPresent(this::setAutoWatermarkInterval);
         configuration
                 .getOptional(PipelineOptions.CLOSURE_CLEANER_LEVEL)
                 .ifPresent(this::setClosureCleanerLevel);
-        configuration.getOptional(PipelineOptions.FORCE_AVRO).ifPresent(b -> this.forceAvro = b);
-        configuration
-                .getOptional(PipelineOptions.GENERIC_TYPES)
-                .ifPresent(b -> this.disableGenericTypes = !b);
-        configuration.getOptional(PipelineOptions.FORCE_KRYO).ifPresent(b -> this.forceKryo = b);
         configuration
                 .getOptional(PipelineOptions.GLOBAL_JOB_PARAMETERS)
-                .<GlobalJobParameters>map(MapBasedJobParameters::new)
                 .ifPresent(this::setGlobalJobParameters);
 
         configuration
                 .getOptional(MetricOptions.LATENCY_INTERVAL)
-                .ifPresent(this::setLatencyTrackingInterval);
+                .ifPresent(interval -> setLatencyTrackingInterval(interval.toMillis()));
 
+        configuration
+                .getOptional(StateChangelogOptions.PERIODIC_MATERIALIZATION_ENABLED)
+                .ifPresent(this::enablePeriodicMaterialize);
         configuration
                 .getOptional(StateChangelogOptions.PERIODIC_MATERIALIZATION_INTERVAL)
                 .ifPresent(this::setPeriodicMaterializeIntervalMillis);
@@ -1170,96 +1305,51 @@ public class ExecutionConfig implements Serializable, Archiveable<ArchivedExecut
                 .getOptional(PipelineOptions.MAX_PARALLELISM)
                 .ifPresent(this::setMaxParallelism);
         configuration.getOptional(CoreOptions.DEFAULT_PARALLELISM).ifPresent(this::setParallelism);
-        configuration
-                .getOptional(PipelineOptions.OBJECT_REUSE)
-                .ifPresent(o -> this.objectReuse = o);
+        configuration.getOptional(PipelineOptions.OBJECT_REUSE).ifPresent(this::setObjectReuse);
         configuration
                 .getOptional(TaskManagerOptions.TASK_CANCELLATION_INTERVAL)
-                .ifPresent(this::setTaskCancellationInterval);
+                .ifPresent(interval -> setTaskCancellationInterval(interval.toMillis()));
         configuration
                 .getOptional(TaskManagerOptions.TASK_CANCELLATION_TIMEOUT)
-                .ifPresent(this::setTaskCancellationTimeout);
+                .ifPresent(timeout -> setTaskCancellationTimeout(timeout.toMillis()));
         configuration
                 .getOptional(ExecutionOptions.SNAPSHOT_COMPRESSION)
                 .ifPresent(this::setUseSnapshotCompression);
-        RestartStrategies.fromConfiguration(configuration).ifPresent(this::setRestartStrategy);
         configuration
-                .getOptional(PipelineOptions.KRYO_DEFAULT_SERIALIZERS)
-                .map(s -> parseKryoSerializersWithExceptionHandling(classLoader, s))
-                .ifPresent(s -> this.defaultKryoSerializerClasses = s);
-
-        configuration
-                .getOptional(PipelineOptions.POJO_REGISTERED_CLASSES)
-                .map(c -> loadClasses(c, classLoader, "Could not load pojo type to be registered."))
-                .ifPresent(c -> this.registeredPojoTypes = c);
-
-        configuration
-                .getOptional(PipelineOptions.KRYO_REGISTERED_CLASSES)
-                .map(c -> loadClasses(c, classLoader, "Could not load kryo type to be registered."))
-                .ifPresent(c -> this.registeredKryoTypes = c);
+                .getOptional(RestartStrategyOptions.RESTART_STRATEGY)
+                .ifPresent(
+                        s -> {
+                            this.setRestartStrategy(configuration);
+                            // reset RestartStrategies for backward compatibility
+                            this.setRestartStrategy(
+                                    new RestartStrategies.FallbackRestartStrategyConfiguration());
+                        });
 
         configuration
                 .getOptional(JobManagerOptions.SCHEDULER)
-                .ifPresent(
-                        schedulerType ->
-                                this.setDynamicGraph(
-                                        schedulerType
-                                                == JobManagerOptions.SchedulerType.AdaptiveBatch));
+                .ifPresent(t -> this.configuration.set(JobManagerOptions.SCHEDULER, t));
+
+        serializerConfig.configure(configuration, classLoader);
     }
 
-    private LinkedHashSet<Class<?>> loadClasses(
-            List<String> classNames, ClassLoader classLoader, String errorMessage) {
-        return classNames.stream()
-                .map(name -> this.<Class<?>>loadClass(name, classLoader, errorMessage))
-                .collect(Collectors.toCollection(LinkedHashSet::new));
-    }
-
-    private LinkedHashMap<Class<?>, Class<? extends Serializer<?>>>
-            parseKryoSerializersWithExceptionHandling(
-                    ClassLoader classLoader, List<String> kryoSerializers) {
-        try {
-            return parseKryoSerializers(classLoader, kryoSerializers);
-        } catch (Exception e) {
-            throw new IllegalArgumentException(
-                    String.format(
-                            "Could not configure kryo serializers from %s. The expected format is:"
-                                    + "'class:<fully qualified class name>,serializer:<fully qualified serializer name>;...",
-                            kryoSerializers),
-                    e);
+    private void setRestartStrategy(ReadableConfig configuration) {
+        Map<String, String> map = configuration.toMap();
+        Map<String, String> restartStrategyEntries = new HashMap<>();
+        for (Map.Entry<String, String> entry : map.entrySet()) {
+            if (entry.getKey().startsWith(RestartStrategyOptions.RESTART_STRATEGY_CONFIG_PREFIX)) {
+                restartStrategyEntries.put(entry.getKey(), entry.getValue());
+            }
         }
+        this.configuration.addAll(Configuration.fromMap(restartStrategyEntries));
     }
 
-    private LinkedHashMap<Class<?>, Class<? extends Serializer<?>>> parseKryoSerializers(
-            ClassLoader classLoader, List<String> kryoSerializers) {
-        return kryoSerializers.stream()
-                .map(ConfigurationUtils::parseMap)
-                .collect(
-                        Collectors.toMap(
-                                m ->
-                                        loadClass(
-                                                m.get("class"),
-                                                classLoader,
-                                                "Could not load class for kryo serialization"),
-                                m ->
-                                        loadClass(
-                                                m.get("serializer"),
-                                                classLoader,
-                                                "Could not load serializer's class"),
-                                (m1, m2) -> {
-                                    throw new IllegalArgumentException(
-                                            "Duplicated serializer for class: " + m1);
-                                },
-                                LinkedHashMap::new));
-    }
-
-    @SuppressWarnings("unchecked")
-    private <T extends Class> T loadClass(
-            String className, ClassLoader classLoader, String errorMessage) {
-        try {
-            return (T) Class.forName(className, false, classLoader);
-        } catch (ClassNotFoundException e) {
-            throw new IllegalArgumentException(errorMessage, e);
-        }
+    /**
+     * @return A copy of internal {@link #configuration}. Note it is missing all options that are
+     *     stored as plain java fields in {@link ExecutionConfig}.
+     */
+    @Internal
+    public Configuration toConfiguration() {
+        return new Configuration(configuration);
     }
 
     private static class MapBasedJobParameters extends GlobalJobParameters {

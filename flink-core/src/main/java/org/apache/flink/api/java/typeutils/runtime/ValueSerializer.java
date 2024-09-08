@@ -21,11 +21,11 @@ package org.apache.flink.api.java.typeutils.runtime;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.common.typeutils.GenericTypeSerializerSnapshot;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.api.common.typeutils.TypeSerializerSchemaCompatibility;
 import org.apache.flink.api.common.typeutils.TypeSerializerSnapshot;
 import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataOutputView;
 import org.apache.flink.types.Value;
+import org.apache.flink.util.CollectionUtil;
 import org.apache.flink.util.InstantiationUtil;
 
 import com.esotericsoftware.kryo.Kryo;
@@ -181,34 +181,6 @@ public final class ValueSerializer<T extends Value> extends TypeSerializer<T> {
         return new ValueSerializerSnapshot<>(type);
     }
 
-    @Deprecated
-    public static class ValueSerializerConfigSnapshot<T extends Value>
-            extends KryoRegistrationSerializerConfigSnapshot<T> {
-
-        public static final long serialVersionUID = 2277251654485371327L;
-
-        private static final int VERSION = 1;
-
-        /** This empty nullary constructor is required for deserializing the configuration. */
-        public ValueSerializerConfigSnapshot() {}
-
-        public ValueSerializerConfigSnapshot(Class<T> valueTypeClass) {
-            super(valueTypeClass, asKryoRegistrations(valueTypeClass));
-        }
-
-        @Override
-        public int getVersion() {
-            return VERSION;
-        }
-
-        @Override
-        public TypeSerializerSchemaCompatibility<T> resolveSchemaCompatibility(
-                TypeSerializer<T> newSerializer) {
-            return new ValueSerializerSnapshot<>(getTypeClass())
-                    .resolveSchemaCompatibility(newSerializer);
-        }
-    }
-
     /** {@link ValueSerializer} snapshot class. */
     public static final class ValueSerializerSnapshot<T extends Value>
             extends GenericTypeSerializerSnapshot<T, ValueSerializer> {
@@ -252,7 +224,8 @@ public final class ValueSerializer<T extends Value> extends TypeSerializer<T> {
     private static LinkedHashMap<String, KryoRegistration> asKryoRegistrations(Class<?> type) {
         checkNotNull(type);
 
-        LinkedHashMap<String, KryoRegistration> registration = new LinkedHashMap<>(1);
+        LinkedHashMap<String, KryoRegistration> registration =
+                CollectionUtil.newLinkedHashMapWithExpectedSize(1);
         registration.put(type.getClass().getName(), new KryoRegistration(type));
 
         return registration;

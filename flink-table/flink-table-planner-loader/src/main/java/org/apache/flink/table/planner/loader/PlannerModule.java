@@ -27,6 +27,7 @@ import org.apache.flink.table.api.TableException;
 import org.apache.flink.table.delegation.ExecutorFactory;
 import org.apache.flink.table.delegation.PlannerFactory;
 import org.apache.flink.table.factories.FactoryUtil;
+import org.apache.flink.util.FileUtils;
 import org.apache.flink.util.IOUtils;
 
 import java.io.IOException;
@@ -68,7 +69,12 @@ class PlannerModule {
                                     "org.codehaus.janino",
                                     "org.codehaus.commons",
                                     "org.apache.commons.lang3",
-                                    "org.apache.commons.math3"))
+                                    "org.apache.commons.math3",
+                                    // with hive dialect, hadoop jar should be in classpath,
+                                    // also, we should make it loaded by owner classloader,
+                                    // otherwise, it'll throw class not found exception
+                                    // when initialize HiveParser which requires hadoop
+                                    "org.apache.hadoop"))
                     .toArray(String[]::new);
 
     private static final String[] COMPONENT_CLASSPATH = new String[] {"org.apache.flink"};
@@ -85,7 +91,7 @@ class PlannerModule {
                 "org.apache.flink.table.shaded.com.jayway", "flink-table-runtime");
     }
 
-    private final ClassLoader submoduleClassLoader;
+    private final PlannerComponentClassLoader submoduleClassLoader;
 
     private PlannerModule() {
         try {
@@ -93,7 +99,7 @@ class PlannerModule {
 
             final Path tmpDirectory =
                     Paths.get(ConfigurationUtils.parseTempDirectories(new Configuration())[0]);
-            Files.createDirectories(tmpDirectory);
+            Files.createDirectories(FileUtils.getTargetPathIfContainsSymbolicPath(tmpDirectory));
             final Path tempFile =
                     Files.createFile(
                             tmpDirectory.resolve(
@@ -111,9 +117,10 @@ class PlannerModule {
             }
 
             IOUtils.copyBytes(resourceStream, Files.newOutputStream(tempFile));
+            tempFile.toFile().deleteOnExit();
 
             this.submoduleClassLoader =
-                    new ComponentClassLoader(
+                    new PlannerComponentClassLoader(
                             new URL[] {tempFile.toUri().toURL()},
                             flinkClassLoader,
                             OWNER_CLASSPATH,
@@ -123,6 +130,11 @@ class PlannerModule {
             throw new TableException(
                     "Could not initialize the table planner components loader.", e);
         }
+    }
+
+    public void addUrlToClassLoader(URL url) {
+        // add the url to component url
+        this.submoduleClassLoader.addURL(url);
     }
 
     // Singleton lazy initialization
@@ -147,5 +159,31 @@ class PlannerModule {
     public PlannerFactory loadPlannerFactory() {
         return FactoryUtil.discoverFactory(
                 this.submoduleClassLoader, PlannerFactory.class, PlannerFactory.DEFAULT_IDENTIFIER);
+    }
+
+    /**
+     * A class loader extending {@link ComponentClassLoader} which overwrites method{@link #addURL}
+     * to enable it can add url to component classloader.
+     */
+    private static class PlannerComponentClassLoader extends ComponentClassLoader {
+
+        public PlannerComponentClassLoader(
+                URL[] classpath,
+                ClassLoader ownerClassLoader,
+                String[] ownerFirstPackages,
+                String[] componentFirstPackages,
+                Map<String, String> knownPackagePrefixesModuleAssociation) {
+            super(
+                    classpath,
+                    ownerClassLoader,
+                    ownerFirstPackages,
+                    componentFirstPackages,
+                    knownPackagePrefixesModuleAssociation);
+        }
+
+        @Override
+        public void addURL(URL url) {
+            super.addURL(url);
+        }
     }
 }

@@ -44,7 +44,7 @@ object TemporalJoinUtil {
    * mark this is a temporal table join and ensure columns these expressions depends on will not be
    * pruned.
    *
-   * The join key pair is necessary for temporal table join to ensure the the condition will not be
+   * The join key pair is necessary for temporal table join to ensure the condition will not be
    * pushed down.
    *
    * The rightTimeAttribute, rightPrimaryKeyExpression and leftTimeAttribute will be extracted from
@@ -284,7 +284,7 @@ object TemporalJoinUtil {
     val visitor = new RexVisitorImpl[Unit](true) {
       override def visitCall(call: RexCall): Unit = {
         if (
-          isRowTimeTemporalTableJoinCon(call) ||
+          TemporalTableJoinUtil.isRowTimeTemporalTableJoinCondition(call) ||
           isRowTimeTemporalFunctionJoinCon(call)
         ) {
           rowtimeJoin = true
@@ -295,11 +295,6 @@ object TemporalJoinUtil {
     }
     nonEquiJoinRex.accept(visitor)
     rowtimeJoin
-  }
-
-  def isRowTimeTemporalTableJoinCon(rexCall: RexCall): Boolean = {
-    // (LEFT_TIME_ATTRIBUTE, RIGHT_TIME_ATTRIBUTE, LEFT_KEY, RIGHT_KEY, PRIMARY_KEY)
-    rexCall.getOperator == TEMPORAL_JOIN_CONDITION && rexCall.operands.length == 5
   }
 
   def isRowTimeTemporalFunctionJoinCon(rexCall: RexCall): Boolean = {

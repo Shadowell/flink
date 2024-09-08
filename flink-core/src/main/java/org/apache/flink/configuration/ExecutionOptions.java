@@ -18,6 +18,7 @@
 
 package org.apache.flink.configuration;
 
+import org.apache.flink.annotation.Experimental;
 import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.annotation.docs.Documentation;
 import org.apache.flink.api.common.BatchShuffleMode;
@@ -92,10 +93,22 @@ public class ExecutionOptions {
                     .withDescription(
                             "Tells if we should use compression for the state snapshot data or not");
 
+    public static final ConfigOption<Boolean> BUFFER_TIMEOUT_ENABLED =
+            ConfigOptions.key("execution.buffer-timeout.enabled")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription(
+                            Description.builder()
+                                    .text(
+                                            "If disabled, the config execution.buffer-timeout.interval will not take effect and the flushing will be triggered only when the output "
+                                                    + "buffer is full thus maximizing throughput")
+                                    .build());
+
     public static final ConfigOption<Duration> BUFFER_TIMEOUT =
-            ConfigOptions.key("execution.buffer-timeout")
+            ConfigOptions.key("execution.buffer-timeout.interval")
                     .durationType()
                     .defaultValue(Duration.ofMillis(100))
+                    .withDeprecatedKeys("execution.buffer-timeout")
                     .withDescription(
                             Description.builder()
                                     .text(
@@ -109,10 +122,30 @@ public class ExecutionOptions {
                                                     FLUSH_AFTER_EVERY_RECORD
                                                             + " triggers flushing after every record thus minimizing latency"),
                                             text(
-                                                    DISABLED_NETWORK_BUFFER_TIMEOUT
-                                                            + " ms triggers flushing only when the output buffer is full thus maximizing "
+                                                    "If the config "
+                                                            + BUFFER_TIMEOUT_ENABLED.key()
+                                                            + " is false,"
+                                                            + " trigger flushing only when the output buffer is full thus maximizing "
                                                             + "throughput"))
                                     .build());
+
+    public static final ConfigOption<MemorySize> SORT_PARTITION_MEMORY =
+            ConfigOptions.key("execution.sort-partition.memory")
+                    .memoryType()
+                    .defaultValue(MemorySize.ofMebiBytes(128))
+                    .withDescription(
+                            "Sets the managed memory size for sort partition operator in NonKeyedPartitionWindowedStream."
+                                    + "The memory size is only a weight hint. Thus, it will affect the operator's memory weight within a "
+                                    + "task, but the actual memory used depends on the running environment.");
+
+    public static final ConfigOption<MemorySize> SORT_KEYED_PARTITION_MEMORY =
+            ConfigOptions.key("execution.sort-keyed-partition.memory")
+                    .memoryType()
+                    .defaultValue(MemorySize.ofMebiBytes(128))
+                    .withDescription(
+                            "Sets the managed memory size for sort partition operator on KeyedPartitionWindowedStream."
+                                    + "The memory size is only a weight hint. Thus, it will affect the operator's memory weight within a "
+                                    + "task, but the actual memory used depends on the running environment.");
 
     @Documentation.ExcludeFromDocumentation(
             "This is an expert option, that we do not want to expose in the documentation")
@@ -149,4 +182,62 @@ public class ExecutionOptions {
                                     + " operators. NOTE: It takes effect only in the BATCH runtime mode and requires sorted inputs"
                                     + SORT_INPUTS.key()
                                     + " to be enabled.");
+
+    // ------------------------- Async State Execution --------------------------
+
+    /**
+     * The max limit of in-flight records number in async state execution, 'in-flight' refers to the
+     * records that have entered the operator but have not yet been processed and emitted to the
+     * downstream. If the in-flight records number exceeds the limit, the newly records entering
+     * will be blocked until the in-flight records number drops below the limit.
+     */
+    @Experimental
+    @Documentation.ExcludeFromDocumentation(
+            "This is an experimental option, internal use only for now.")
+    public static final ConfigOption<Integer> ASYNC_INFLIGHT_RECORDS_LIMIT =
+            ConfigOptions.key("execution.async-state.in-flight-records-limit")
+                    .intType()
+                    .defaultValue(6000)
+                    .withDescription(
+                            "The max limit of in-flight records number in async state execution, 'in-flight' refers"
+                                    + " to the records that have entered the operator but have not yet been processed and"
+                                    + " emitted to the downstream. If the in-flight records number exceeds the limit,"
+                                    + " the newly records entering will be blocked until the in-flight records number drops below the limit.");
+
+    /**
+     * The size of buffer under async state execution. Async state execution provides a buffer
+     * mechanism to reduce state access. When the number of state requests in the buffer exceeds the
+     * batch size, a batched state execution would be triggered. Larger batch sizes will bring
+     * higher end-to-end latency, this option works with {@link #ASYNC_STATE_BUFFER_TIMEOUT} to
+     * control the frequency of triggering.
+     */
+    @Experimental
+    @Documentation.ExcludeFromDocumentation(
+            "This is an experimental option, internal use only for now.")
+    public static final ConfigOption<Integer> ASYNC_STATE_BUFFER_SIZE =
+            ConfigOptions.key("execution.async-state.buffer-size")
+                    .intType()
+                    .defaultValue(1000)
+                    .withDescription(
+                            "The size of buffer under async state execution. Async state execution provides a buffer mechanism to reduce state access."
+                                    + " When the number of state requests in the active buffer exceeds the batch size,"
+                                    + " a batched state execution would be triggered. Larger batch sizes will bring higher end-to-end latency,"
+                                    + " this option works with 'execution.async-state.buffer-timeout' to control the frequency of triggering.");
+
+    /**
+     * The timeout of buffer triggering in milliseconds. If the buffer has not reached the {@link
+     * #ASYNC_STATE_BUFFER_SIZE} within 'buffer-timeout' milliseconds, a trigger will perform
+     * actively.
+     */
+    @Experimental
+    @Documentation.ExcludeFromDocumentation(
+            "This is an experimental option, internal use only for now.")
+    public static final ConfigOption<Long> ASYNC_STATE_BUFFER_TIMEOUT =
+            ConfigOptions.key("execution.async-state.buffer-timeout")
+                    .longType()
+                    .defaultValue(1000L)
+                    .withDescription(
+                            "The timeout of buffer triggering in milliseconds. If the buffer has not reached the"
+                                    + " 'execution.async-state.buffer-size' within 'buffer-timeout' milliseconds,"
+                                    + " a trigger will perform actively.");
 }

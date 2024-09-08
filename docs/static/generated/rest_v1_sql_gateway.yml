@@ -1,12 +1,12 @@
 openapi: 3.0.1
 info:
-  title: Flink JobManager REST API
+  title: Flink SQL Gateway REST API
   contact:
     email: user@flink.apache.org
   license:
     name: Apache 2.0
     url: https://www.apache.org/licenses/LICENSE-2.0.html
-  version: v1/1.16-SNAPSHOT
+  version: v1/2.0-SNAPSHOT
 paths:
   /api_versions:
     get:
@@ -166,7 +166,7 @@ paths:
           $ref: '#/components/schemas/OperationHandle'
       - name: token
         in: path
-        description: The OperationHandle that identifies a operation.
+        description: The token that identifies which batch of data to fetch.
         required: true
         schema:
           type: integer
@@ -232,13 +232,85 @@ components:
       properties:
         status:
           type: string
-    WatermarkSpec:
+    Column:
       type: object
       properties:
-        rowtimeAttribute:
+        comment:
           type: string
-        watermarkExpression:
-          $ref: '#/components/schemas/ResolvedExpression'
+        dataType:
+          $ref: '#/components/schemas/DataType'
+        name:
+          type: string
+        persisted:
+          type: boolean
+        physical:
+          type: boolean
+    ColumnInfo:
+      type: object
+      properties:
+        comment:
+          type: string
+        logicalType:
+          $ref: '#/components/schemas/LogicalType'
+        name:
+          type: string
+    ConstraintType:
+      type: string
+      enum:
+      - PRIMARY_KEY
+      - UNIQUE_KEY
+    DataType:
+      type: object
+      properties:
+        children:
+          type: array
+          items:
+            $ref: '#/components/schemas/DataType'
+        logicalType:
+          $ref: '#/components/schemas/LogicalType'
+    ExecuteStatementRequestBody:
+      type: object
+      properties:
+        executionConfig:
+          type: object
+          additionalProperties:
+            type: string
+        executionTimeout:
+          type: integer
+          format: int64
+        statement:
+          type: string
+    ExecuteStatementResponseBody:
+      type: object
+      properties:
+        operationHandle:
+          type: string
+    Expression:
+      type: object
+    FetchResultsResponseBody:
+      type: object
+      properties:
+        jobID:
+          $ref: '#/components/schemas/JobID'
+        nextResultUri:
+          type: string
+        queryResult:
+          type: boolean
+        resultKind:
+          $ref: '#/components/schemas/ResultKind'
+        resultType:
+          $ref: '#/components/schemas/ResultType'
+        results:
+          $ref: '#/components/schemas/ResultInfo'
+    FieldGetter:
+      type: object
+    GetApiVersionResponseBody:
+      type: object
+      properties:
+        versions:
+          type: array
+          items:
+            type: string
     GetInfoResponseBody:
       type: object
       properties:
@@ -246,58 +318,33 @@ components:
           type: string
         version:
           type: string
+    GetSessionConfigResponseBody:
+      type: object
+      properties:
+        properties:
+          type: object
+          additionalProperties:
+            type: string
+    IntermediateDataSetID:
+      pattern: "[0-9a-f]{32}"
+      type: string
+    JobID:
+      pattern: "[0-9a-f]{32}"
+      type: string
     JobVertexID:
       pattern: "[0-9a-f]{32}"
       type: string
-    ResolvedExpression:
-      type: object
-      properties:
-        outputDataType:
-          $ref: '#/components/schemas/DataType'
-        resolvedChildren:
-          type: array
-          items:
-            $ref: '#/components/schemas/ResolvedExpression'
-        children:
-          type: array
-          items:
-            $ref: '#/components/schemas/Expression'
     LogicalType:
       type: object
       properties:
-        typeRoot:
-          $ref: '#/components/schemas/LogicalTypeRoot'
-        nullable:
-          type: boolean
         children:
           type: array
           items:
             $ref: '#/components/schemas/LogicalType'
-    UniqueConstraint:
-      type: object
-      properties:
-        name:
-          type: string
-        enforced:
+        nullable:
           type: boolean
-        columns:
-          type: array
-          items:
-            type: string
-        type:
-          $ref: '#/components/schemas/ConstraintType'
-    ExecuteStatementRequestBody:
-      type: object
-      properties:
-        statement:
-          type: string
-        executionTimeout:
-          type: integer
-          format: int64
-        executionConfig:
-          type: object
-          additionalProperties:
-            type: string
+        typeRoot:
+          $ref: '#/components/schemas/LogicalTypeRoot'
     LogicalTypeRoot:
       type: string
       enum:
@@ -330,107 +377,47 @@ components:
       - RAW
       - SYMBOL
       - UNRESOLVED
+    OpenSessionRequestBody:
+      type: object
+      properties:
+        properties:
+          type: object
+          additionalProperties:
+            type: string
+        sessionName:
+          type: string
+    OpenSessionResponseBody:
+      type: object
+      properties:
+        sessionHandle:
+          type: string
     OperationHandle:
       type: object
       properties:
         identifier:
           type: string
           format: uuid
-    ExecuteStatementResponseBody:
+    OperationStatusResponseBody:
       type: object
       properties:
-        operationHandle:
+        status:
           type: string
-    FetchResultsResponseBody:
+    ResolvedExpression:
       type: object
       properties:
-        results:
-          $ref: '#/components/schemas/ResultSet'
-        resultType:
-          type: string
-        nextResultUri:
-          type: string
-    RowData:
-      type: object
-      properties:
-        rowKind:
-          $ref: '#/components/schemas/RowKind'
-        arity:
-          type: integer
-          format: int32
-    Column:
-      type: object
-      properties:
-        name:
-          type: string
-        dataType:
-          $ref: '#/components/schemas/DataType'
-        comment:
-          type: string
-        physical:
-          type: boolean
-        persisted:
-          type: boolean
-    TriggerId:
-      pattern: "[0-9a-f]{32}"
-      type: string
-    ResourceID:
-      pattern: "[0-9a-f]{32}"
-      type: string
-    OpenSessionRequestBody:
-      type: object
-      properties:
-        sessionName:
-          type: string
-        properties:
-          type: object
-          additionalProperties:
-            type: string
-    ResultSet:
-      type: object
-      properties:
-        resultType:
-          $ref: '#/components/schemas/ResultType'
-        nextToken:
-          type: integer
-          format: int64
-        resultSchema:
-          $ref: '#/components/schemas/ResolvedSchema'
-        data:
-          type: array
-          items:
-            $ref: '#/components/schemas/RowData'
-    DataType:
-      type: object
-      properties:
-        logicalType:
-          $ref: '#/components/schemas/LogicalType'
         children:
           type: array
           items:
-            $ref: '#/components/schemas/DataType'
+            $ref: '#/components/schemas/Expression'
+        outputDataType:
+          $ref: '#/components/schemas/DataType'
+        resolvedChildren:
+          type: array
+          items:
+            $ref: '#/components/schemas/ResolvedExpression'
     ResolvedSchema:
       type: object
       properties:
-        columns:
-          type: array
-          items:
-            $ref: '#/components/schemas/Column'
-        watermarkSpecs:
-          type: array
-          items:
-            $ref: '#/components/schemas/WatermarkSpec'
-        primaryKey:
-          $ref: '#/components/schemas/UniqueConstraint'
-        columnNames:
-          type: array
-          items:
-            type: string
-        primaryKeyIndexes:
-          type: array
-          items:
-            type: integer
-            format: int32
         columnCount:
           type: integer
           format: int32
@@ -438,45 +425,71 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/DataType'
-    GetSessionConfigResponseBody:
-      type: object
-      properties:
-        properties:
-          type: object
-          additionalProperties:
-            type: string
-    SerializedThrowable:
-      type: object
-      properties:
-        serialized-throwable:
-          type: string
-          format: binary
-    GetApiVersionResponseBody:
-      type: object
-      properties:
-        versions:
+        columnNames:
           type: array
           items:
             type: string
-    OperationStatusResponseBody:
+        columns:
+          type: array
+          items:
+            $ref: '#/components/schemas/Column'
+        primaryKey:
+          $ref: '#/components/schemas/UniqueConstraint'
+        primaryKeyIndexes:
+          type: array
+          items:
+            type: integer
+            format: int32
+        watermarkSpecs:
+          type: array
+          items:
+            $ref: '#/components/schemas/WatermarkSpec'
+    ResourceID:
+      pattern: "[0-9a-f]{32}"
+      type: string
+    ResultInfo:
       type: object
       properties:
-        status:
-          type: string
-    SessionHandle:
-      type: object
-      properties:
-        identifier:
-          type: string
-          format: uuid
+        columnInfos:
+          type: array
+          items:
+            $ref: '#/components/schemas/ColumnInfo'
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/RowData'
+        fieldGetters:
+          type: array
+          items:
+            $ref: '#/components/schemas/FieldGetter'
+        resultSchema:
+          $ref: '#/components/schemas/ResolvedSchema'
+        rowFormat:
+          $ref: '#/components/schemas/RowFormat'
+    ResultKind:
+      type: string
+      enum:
+      - SUCCESS
+      - SUCCESS_WITH_CONTENT
     ResultType:
       type: string
       enum:
       - NOT_READY
       - PAYLOAD
       - EOS
-    Expression:
+    RowData:
       type: object
+      properties:
+        arity:
+          type: integer
+          format: int32
+        rowKind:
+          $ref: '#/components/schemas/RowKind'
+    RowFormat:
+      type: string
+      enum:
+      - JSON
+      - PLAIN_TEXT
     RowKind:
       type: string
       enum:
@@ -484,19 +497,38 @@ components:
       - UPDATE_BEFORE
       - UPDATE_AFTER
       - DELETE
-    OpenSessionResponseBody:
+    SerializedThrowable:
       type: object
       properties:
-        sessionHandle:
+        serialized-throwable:
           type: string
-    ConstraintType:
-      type: string
-      enum:
-      - PRIMARY_KEY
-      - UNIQUE_KEY
-    IntermediateDataSetID:
+          format: binary
+    SessionHandle:
+      type: object
+      properties:
+        identifier:
+          type: string
+          format: uuid
+    TriggerId:
       pattern: "[0-9a-f]{32}"
       type: string
-    JobID:
-      pattern: "[0-9a-f]{32}"
-      type: string
+    UniqueConstraint:
+      type: object
+      properties:
+        columns:
+          type: array
+          items:
+            type: string
+        enforced:
+          type: boolean
+        name:
+          type: string
+        type:
+          $ref: '#/components/schemas/ConstraintType'
+    WatermarkSpec:
+      type: object
+      properties:
+        rowtimeAttribute:
+          type: string
+        watermarkExpression:
+          $ref: '#/components/schemas/ResolvedExpression'

@@ -19,12 +19,8 @@
 package org.apache.flink.api.common.typeutils.base;
 
 import org.apache.flink.annotation.Internal;
-import org.apache.flink.api.common.typeutils.CompositeTypeSerializerUtil;
 import org.apache.flink.api.common.typeutils.NestedSerializersSnapshotDelegate;
-import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.api.common.typeutils.TypeSerializerSchemaCompatibility;
 import org.apache.flink.api.common.typeutils.TypeSerializerSnapshot;
-import org.apache.flink.api.java.typeutils.runtime.DataInputViewStream;
 import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataOutputView;
 import org.apache.flink.util.InstantiationUtil;
@@ -84,25 +80,15 @@ public final class GenericArraySerializerConfigSnapshot<C> implements TypeSerial
             throws IOException {
         switch (readVersion) {
             case 1:
-                readV1(in, classLoader);
-                break;
+                throw new UnsupportedOperationException(
+                        String.format(
+                                "No longer supported version [%d]. Please upgrade first to Flink 1.16. ",
+                                readVersion));
             case 2:
                 readV2(in, classLoader);
                 break;
             default:
                 throw new IllegalArgumentException("Unrecognized version: " + readVersion);
-        }
-    }
-
-    private void readV1(DataInputView in, ClassLoader classLoader) throws IOException {
-        nestedSnapshot =
-                NestedSerializersSnapshotDelegate.legacyReadNestedSerializerSnapshots(
-                        in, classLoader);
-
-        try (DataInputViewStream inViewWrapper = new DataInputViewStream(in)) {
-            componentClass = InstantiationUtil.deserializeObject(inViewWrapper, classLoader);
-        } catch (ClassNotFoundException e) {
-            throw new IOException("Could not find requested element class in classpath.", e);
         }
     }
 
@@ -119,19 +105,13 @@ public final class GenericArraySerializerConfigSnapshot<C> implements TypeSerial
                 componentClass, nestedSnapshot.getRestoredNestedSerializer(0));
     }
 
-    @Override
-    public TypeSerializerSchemaCompatibility<C[]> resolveSchemaCompatibility(
-            TypeSerializer<C[]> newSerializer) {
-        checkState(nestedSnapshot != null);
+    @Nullable
+    public TypeSerializerSnapshot<?>[] getNestedSerializerSnapshots() {
+        return nestedSnapshot == null ? null : nestedSnapshot.getNestedSerializerSnapshots();
+    }
 
-        if (!(newSerializer instanceof GenericArraySerializer)) {
-            return TypeSerializerSchemaCompatibility.incompatible();
-        }
-
-        // delegate to the new snapshot class
-        return CompositeTypeSerializerUtil.delegateCompatibilityCheckToNewSnapshot(
-                newSerializer,
-                new GenericArraySerializerSnapshot<>(componentClass),
-                nestedSnapshot.getNestedSerializerSnapshots());
+    @Nullable
+    public Class<C> getComponentClass() {
+        return componentClass;
     }
 }

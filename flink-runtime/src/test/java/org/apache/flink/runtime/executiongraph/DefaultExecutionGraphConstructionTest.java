@@ -29,12 +29,14 @@ import org.apache.flink.runtime.jobgraph.IntermediateResultPartitionID;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.JobVertex;
 import org.apache.flink.runtime.jobgraph.tasks.AbstractInvokable;
+import org.apache.flink.runtime.metrics.groups.JobManagerJobMetricGroup;
+import org.apache.flink.runtime.metrics.groups.UnregisteredMetricGroups;
 import org.apache.flink.runtime.scheduler.SchedulerBase;
 import org.apache.flink.runtime.scheduler.strategy.ConsumedPartitionGroup;
 import org.apache.flink.testutils.TestingUtils;
 import org.apache.flink.testutils.executor.TestExecutorExtension;
 
-import org.apache.flink.shaded.guava30.com.google.common.collect.Sets;
+import org.apache.flink.shaded.guava32.com.google.common.collect.Sets;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
@@ -55,13 +57,17 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * This class contains test concerning the correct conversion from {@link JobGraph} to {@link
- * ExecutionGraph} objects. It also tests that {@link EdgeManagerBuildUtil#connectVertexToResult}
- * builds {@link DistributionPattern#ALL_TO_ALL} connections correctly.
+ * ExecutionGraph} objects. It also tests that {@link
+ * VertexInputInfoComputationUtils#computeVertexInputInfoForAllToAll} builds {@link
+ * DistributionPattern#ALL_TO_ALL} connections correctly.
  */
 class DefaultExecutionGraphConstructionTest {
     @RegisterExtension
     static final TestExecutorExtension<ScheduledExecutorService> EXECUTOR_RESOURCE =
             TestingUtils.defaultExecutorExtension();
+
+    private static final JobManagerJobMetricGroup JOB_MANAGER_JOB_METRIC_GROUP =
+            UnregisteredMetricGroups.createUnregisteredJobManagerJobMetricGroup();
 
     private ExecutionGraph createDefaultExecutionGraph(List<JobVertex> vertices) throws Exception {
         return TestingDefaultExecutionGraphBuilder.newBuilder()
@@ -93,8 +99,8 @@ class DefaultExecutionGraphConstructionTest {
 
         ExecutionGraph eg1 = createDefaultExecutionGraph(ordered);
         ExecutionGraph eg2 = createDefaultExecutionGraph(ordered);
-        eg1.attachJobGraph(ordered);
-        eg2.attachJobGraph(ordered);
+        eg1.attachJobGraph(ordered, JOB_MANAGER_JOB_METRIC_GROUP);
+        eg2.attachJobGraph(ordered, JOB_MANAGER_JOB_METRIC_GROUP);
 
         assertThat(
                         Sets.intersection(
@@ -150,7 +156,7 @@ class DefaultExecutionGraphConstructionTest {
         List<JobVertex> ordered = new ArrayList<JobVertex>(Arrays.asList(v1, v2, v3, v4, v5));
 
         ExecutionGraph eg = createDefaultExecutionGraph(ordered);
-        eg.attachJobGraph(ordered);
+        eg.attachJobGraph(ordered, JOB_MANAGER_JOB_METRIC_GROUP);
         verifyTestGraph(eg, v1, v2, v3, v4, v5);
     }
 
@@ -207,7 +213,8 @@ class DefaultExecutionGraphConstructionTest {
         List<JobVertex> ordered = new ArrayList<JobVertex>(Arrays.asList(v1, v2, v3, v5, v4));
 
         ExecutionGraph eg = createDefaultExecutionGraph(ordered);
-        assertThatThrownBy(() -> eg.attachJobGraph(ordered)).isInstanceOf(JobException.class);
+        assertThatThrownBy(() -> eg.attachJobGraph(ordered, JOB_MANAGER_JOB_METRIC_GROUP))
+                .isInstanceOf(JobException.class);
     }
 
     @Test
@@ -257,7 +264,7 @@ class DefaultExecutionGraphConstructionTest {
         List<JobVertex> ordered = new ArrayList<>(Arrays.asList(v1, v2, v3, v4, v5));
 
         ExecutionGraph eg = createDefaultExecutionGraph(ordered);
-        eg.attachJobGraph(ordered);
+        eg.attachJobGraph(ordered, JOB_MANAGER_JOB_METRIC_GROUP);
 
         assertThat(eg.getAllVertices().get(v3.getID()).getSplitAssigner()).isEqualTo(assigner1);
         assertThat(eg.getAllVertices().get(v5.getID()).getSplitAssigner()).isEqualTo(assigner2);
@@ -277,7 +284,7 @@ class DefaultExecutionGraphConstructionTest {
 
         List<JobVertex> vertices = new ArrayList<>(Arrays.asList(v1, v2, v3));
         ExecutionGraph eg = createDefaultExecutionGraph(vertices);
-        eg.attachJobGraph(vertices);
+        eg.attachJobGraph(vertices, JOB_MANAGER_JOB_METRIC_GROUP);
 
         ExecutionJobVertex ejv1 = checkNotNull(eg.getJobVertex(v1.getID()));
         assertThat(ejv1.getProducedDataSets()).hasSize(1);
@@ -315,7 +322,7 @@ class DefaultExecutionGraphConstructionTest {
 
         List<JobVertex> ordered = new ArrayList<>(Arrays.asList(v1, v2));
         ExecutionGraph eg = createDefaultExecutionGraph(ordered);
-        eg.attachJobGraph(ordered);
+        eg.attachJobGraph(ordered, JOB_MANAGER_JOB_METRIC_GROUP);
 
         IntermediateResult result =
                 Objects.requireNonNull(eg.getJobVertex(v1.getID())).getProducedDataSets()[0];
@@ -338,6 +345,159 @@ class DefaultExecutionGraphConstructionTest {
     }
 
     @Test
+    void testPointWiseConsumedPartitionGroupPartitionFinished() throws Exception {
+        JobVertex v1 = new JobVertex("source");
+        JobVertex v2 = new JobVertex("sink");
+
+        v1.setParallelism(4);
+        v2.setParallelism(2);
+
+        v2.connectNewDataSetAsInput(
+                v1, DistributionPattern.POINTWISE, ResultPartitionType.BLOCKING);
+
+        List<JobVertex> ordered = new ArrayList<>(Arrays.asList(v1, v2));
+        ExecutionGraph eg = createDefaultExecutionGraph(ordered);
+        eg.attachJobGraph(ordered, JOB_MANAGER_JOB_METRIC_GROUP);
+
+        IntermediateResult result =
+                Objects.requireNonNull(eg.getJobVertex(v1.getID())).getProducedDataSets()[0];
+
+        IntermediateResultPartition partition1 = result.getPartitions()[0];
+        IntermediateResultPartition partition2 = result.getPartitions()[1];
+        IntermediateResultPartition partition3 = result.getPartitions()[2];
+        IntermediateResultPartition partition4 = result.getPartitions()[3];
+
+        ConsumedPartitionGroup consumedPartitionGroup1 =
+                partition1.getConsumedPartitionGroups().get(0);
+
+        ConsumedPartitionGroup consumedPartitionGroup2 =
+                partition4.getConsumedPartitionGroups().get(0);
+
+        assertThat(consumedPartitionGroup1.getNumberOfUnfinishedPartitions()).isEqualTo(2);
+        assertThat(consumedPartitionGroup2.getNumberOfUnfinishedPartitions()).isEqualTo(2);
+        partition1.markFinished();
+        partition2.markFinished();
+        assertThat(consumedPartitionGroup1.getNumberOfUnfinishedPartitions()).isZero();
+        partition3.markFinished();
+        partition4.markFinished();
+        assertThat(consumedPartitionGroup2.getNumberOfUnfinishedPartitions()).isZero();
+    }
+
+    @Test
+    void testAllToAllConsumedPartitionGroupPartitionFinished() throws Exception {
+        JobVertex v1 = new JobVertex("source");
+        JobVertex v2 = new JobVertex("sink");
+
+        v1.setParallelism(2);
+        v2.setParallelism(2);
+
+        v2.connectNewDataSetAsInput(
+                v1, DistributionPattern.ALL_TO_ALL, ResultPartitionType.BLOCKING);
+
+        List<JobVertex> ordered = new ArrayList<>(Arrays.asList(v1, v2));
+        ExecutionGraph eg = createDefaultExecutionGraph(ordered);
+        eg.attachJobGraph(ordered, JOB_MANAGER_JOB_METRIC_GROUP);
+
+        IntermediateResult result =
+                Objects.requireNonNull(eg.getJobVertex(v1.getID())).getProducedDataSets()[0];
+
+        IntermediateResultPartition partition1 = result.getPartitions()[0];
+        IntermediateResultPartition partition2 = result.getPartitions()[1];
+
+        ConsumedPartitionGroup consumedPartitionGroup =
+                partition1.getConsumedPartitionGroups().get(0);
+
+        assertThat(consumedPartitionGroup.getNumberOfUnfinishedPartitions()).isEqualTo(2);
+        partition1.markFinished();
+        assertThat(consumedPartitionGroup.getNumberOfUnfinishedPartitions()).isOne();
+        partition2.markFinished();
+        assertThat(consumedPartitionGroup.getNumberOfUnfinishedPartitions()).isZero();
+    }
+
+    @Test
+    void testDynamicGraphAllToAllConsumedPartitionGroupPartitionFinished() throws Exception {
+        JobVertex v1 = new JobVertex("source");
+        JobVertex v2 = new JobVertex("sink");
+
+        v1.setParallelism(2);
+        v2.setParallelism(2);
+
+        v2.connectNewDataSetAsInput(
+                v1, DistributionPattern.ALL_TO_ALL, ResultPartitionType.BLOCKING);
+
+        List<JobVertex> ordered = new ArrayList<>(Arrays.asList(v1, v2));
+        ExecutionGraph eg = createDynamicExecutionGraph(ordered);
+        eg.attachJobGraph(ordered, JOB_MANAGER_JOB_METRIC_GROUP);
+
+        ExecutionJobVertex ejv1 = eg.getJobVertex(v1.getID());
+        eg.initializeJobVertex(ejv1, 0L);
+
+        IntermediateResult result =
+                Objects.requireNonNull(eg.getJobVertex(v1.getID())).getProducedDataSets()[0];
+
+        IntermediateResultPartition partition1 = result.getPartitions()[0];
+        IntermediateResultPartition partition2 = result.getPartitions()[1];
+
+        partition1.markFinished();
+        partition2.markFinished();
+
+        assertThat(partition1.getConsumedPartitionGroups()).isEmpty();
+
+        ExecutionJobVertex ejv2 = eg.getJobVertex(v2.getID());
+        eg.initializeJobVertex(ejv2, 0L);
+
+        ConsumedPartitionGroup consumedPartitionGroup =
+                partition1.getConsumedPartitionGroups().get(0);
+
+        assertThat(consumedPartitionGroup.getNumberOfUnfinishedPartitions()).isZero();
+    }
+
+    @Test
+    void testDynamicGraphPointWiseConsumedPartitionGroupPartitionFinished() throws Exception {
+        JobVertex v1 = new JobVertex("source");
+        JobVertex v2 = new JobVertex("sink");
+
+        v1.setParallelism(4);
+        v2.setParallelism(2);
+
+        v2.connectNewDataSetAsInput(
+                v1, DistributionPattern.POINTWISE, ResultPartitionType.BLOCKING);
+
+        List<JobVertex> ordered = new ArrayList<>(Arrays.asList(v1, v2));
+        ExecutionGraph eg = createDynamicExecutionGraph(ordered);
+        eg.attachJobGraph(ordered, JOB_MANAGER_JOB_METRIC_GROUP);
+
+        ExecutionJobVertex ejv1 = eg.getJobVertex(v1.getID());
+        eg.initializeJobVertex(ejv1, 0L);
+
+        IntermediateResult result =
+                Objects.requireNonNull(eg.getJobVertex(v1.getID())).getProducedDataSets()[0];
+
+        IntermediateResultPartition partition1 = result.getPartitions()[0];
+        IntermediateResultPartition partition2 = result.getPartitions()[1];
+        IntermediateResultPartition partition3 = result.getPartitions()[2];
+        IntermediateResultPartition partition4 = result.getPartitions()[3];
+
+        partition1.markFinished();
+        partition2.markFinished();
+        partition3.markFinished();
+        partition4.markFinished();
+
+        assertThat(partition1.getConsumedPartitionGroups()).isEmpty();
+        assertThat(partition4.getConsumedPartitionGroups()).isEmpty();
+
+        ExecutionJobVertex ejv2 = eg.getJobVertex(v2.getID());
+        eg.initializeJobVertex(ejv2, 0L);
+
+        ConsumedPartitionGroup consumedPartitionGroup1 =
+                partition1.getConsumedPartitionGroups().get(0);
+        assertThat(consumedPartitionGroup1.getNumberOfUnfinishedPartitions()).isZero();
+        ConsumedPartitionGroup consumedPartitionGroup2 =
+                partition4.getConsumedPartitionGroups().get(0);
+        assertThat(consumedPartitionGroup2.getNumberOfUnfinishedPartitions()).isZero();
+    }
+
+    @Test
     void testAttachToDynamicGraph() throws Exception {
         JobVertex v1 = new JobVertex("source");
         JobVertex v2 = new JobVertex("sink");
@@ -350,7 +510,7 @@ class DefaultExecutionGraphConstructionTest {
 
         List<JobVertex> ordered = new ArrayList<>(Arrays.asList(v1, v2));
         ExecutionGraph eg = createDynamicExecutionGraph(ordered);
-        eg.attachJobGraph(ordered);
+        eg.attachJobGraph(ordered, JOB_MANAGER_JOB_METRIC_GROUP);
 
         assertThat(eg.getAllVertices()).hasSize(2);
         Iterator<ExecutionJobVertex> jobVertices = eg.getVerticesTopologically().iterator();

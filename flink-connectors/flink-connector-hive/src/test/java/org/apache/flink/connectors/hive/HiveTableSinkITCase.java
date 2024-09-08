@@ -18,13 +18,15 @@
 
 package org.apache.flink.connectors.hive;
 
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.restartstrategy.RestartStrategies;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.java.typeutils.RowTypeInfo;
+import org.apache.flink.connector.datagen.source.TestDataGenerators;
+import org.apache.flink.connector.file.table.FileSystemConnectorOptions;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.util.FiniteTestSource;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.ExplainDetail;
 import org.apache.flink.table.api.Expressions;
@@ -41,13 +43,15 @@ import org.apache.flink.table.catalog.stats.CatalogTableStatistics;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.CloseableIterator;
 import org.apache.flink.util.CollectionUtil;
+import org.apache.flink.util.TestLoggerExtension;
 
-import org.apache.flink.shaded.guava30.com.google.common.collect.Lists;
+import org.apache.flink.shaded.guava32.com.google.common.collect.Lists;
 
 import org.apache.hadoop.hive.conf.HiveConf;
-import org.junit.AfterClass;
-import org.junit.BeforeClass;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 
 import java.io.File;
 import java.io.IOException;
@@ -77,36 +81,37 @@ import static org.apache.flink.table.planner.utils.TableTestUtil.replaceNodeIdIn
 import static org.apache.flink.table.planner.utils.TableTestUtil.replaceStageId;
 import static org.apache.flink.table.planner.utils.TableTestUtil.replaceStreamNodeId;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.assertj.core.api.Assertions.fail;
 
 /** Tests {@link HiveTableSink}. */
-public class HiveTableSinkITCase {
+@ExtendWith(TestLoggerExtension.class)
+class HiveTableSinkITCase {
 
     private static HiveCatalog hiveCatalog;
 
-    @BeforeClass
-    public static void createCatalog() throws IOException {
+    @BeforeAll
+    static void createCatalog() {
         hiveCatalog = HiveTestUtils.createHiveCatalog();
         hiveCatalog.open();
     }
 
-    @AfterClass
-    public static void closeCatalog() {
+    @AfterAll
+    static void closeCatalog() {
         if (hiveCatalog != null) {
             hiveCatalog.close();
         }
     }
 
     @Test
-    public void testHiveTableSinkWithParallelismInBatch() {
+    void testHiveTableSinkWithParallelismInBatch() throws Exception {
         final TableEnvironment tEnv = HiveTestUtils.createTableEnvInBatchMode(SqlDialect.HIVE);
         testHiveTableSinkWithParallelismBase(
                 tEnv, "/explain/testHiveTableSinkWithParallelismInBatch.out");
     }
 
     @Test
-    public void testHiveTableSinkWithParallelismInStreaming() {
+    void testHiveTableSinkWithParallelismInStreaming() throws Exception {
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         final TableEnvironment tEnv =
                 HiveTestUtils.createTableEnvInStreamingMode(env, SqlDialect.HIVE);
@@ -115,60 +120,61 @@ public class HiveTableSinkITCase {
     }
 
     private void testHiveTableSinkWithParallelismBase(
-            final TableEnvironment tEnv, final String expectedResourceFileName) {
+            final TableEnvironment tEnv, final String expectedResourceFileName) throws Exception {
         tEnv.registerCatalog(hiveCatalog.getName(), hiveCatalog);
         tEnv.useCatalog(hiveCatalog.getName());
-        tEnv.executeSql("create database db1");
-        tEnv.useDatabase("db1");
+        TableEnvExecutorUtil.executeInSeparateDatabase(
+                tEnv,
+                true,
+                () -> {
+                    tEnv.executeSql(
+                            "CREATE TABLE test_table ("
+                                    + " id int,"
+                                    + " real_col int"
+                                    + ") TBLPROPERTIES ("
+                                    + " 'sink.parallelism' = '8'" // set sink parallelism = 8
+                                    + ")");
+                    tEnv.getConfig().setSqlDialect(SqlDialect.DEFAULT);
+                    final String actual =
+                            tEnv.explainSql(
+                                    "insert into test_table select 1, 1",
+                                    ExplainDetail.JSON_EXECUTION_PLAN);
+                    final String expected = readFromResource(expectedResourceFileName);
 
-        tEnv.executeSql(
-                String.format(
-                        "CREATE TABLE test_table ("
-                                + " id int,"
-                                + " real_col int"
-                                + ") TBLPROPERTIES ("
-                                + " 'sink.parallelism' = '8'" // set sink parallelism = 8
-                                + ")"));
-        tEnv.getConfig().setSqlDialect(SqlDialect.DEFAULT);
-        final String actual =
-                tEnv.explainSql(
-                        "insert into test_table select 1, 1", ExplainDetail.JSON_EXECUTION_PLAN);
-        final String expected = readFromResource(expectedResourceFileName);
-
-        assertThat(replaceNodeIdInOperator(replaceStreamNodeId(replaceStageId(actual))))
-                .isEqualTo(replaceNodeIdInOperator(replaceStreamNodeId(replaceStageId(expected))));
-
-        tEnv.executeSql("drop database db1 cascade");
+                    assertThat(replaceNodeIdInOperator(replaceStreamNodeId(replaceStageId(actual))))
+                            .isEqualTo(
+                                    replaceNodeIdInOperator(
+                                            replaceStreamNodeId(replaceStageId(expected))));
+                });
     }
 
     @Test
-    public void testBatchAppend() throws Exception {
+    void testBatchAppend() throws Exception {
         TableEnvironment tEnv = HiveTestUtils.createTableEnvInBatchMode(SqlDialect.HIVE);
         tEnv.registerCatalog(hiveCatalog.getName(), hiveCatalog);
         tEnv.useCatalog(hiveCatalog.getName());
-        tEnv.executeSql("create database db1");
-        tEnv.useDatabase("db1");
-        try {
-            tEnv.executeSql("create table append_table (i int, j int)");
-            tEnv.executeSql("insert into append_table select 1, 1").await();
-            tEnv.executeSql("insert into append_table select 2, 2").await();
-            List<Row> rows =
-                    CollectionUtil.iteratorToList(
-                            tEnv.executeSql("select * from append_table").collect());
-            rows.sort(Comparator.comparingInt(o -> (int) o.getField(0)));
-            assertThat(rows).isEqualTo(Arrays.asList(Row.of(1, 1), Row.of(2, 2)));
-        } finally {
-            tEnv.executeSql("drop database db1 cascade");
-        }
+        TableEnvExecutorUtil.executeInSeparateDatabase(
+                tEnv,
+                true,
+                () -> {
+                    tEnv.executeSql("create table append_table (i int, j int)");
+                    tEnv.executeSql("insert into append_table select 1, 1").await();
+                    tEnv.executeSql("insert into append_table select 2, 2").await();
+                    List<Row> rows =
+                            CollectionUtil.iteratorToList(
+                                    tEnv.executeSql("select * from append_table").collect());
+                    rows.sort(Comparator.comparingInt(o -> (int) o.getField(0)));
+                    assertThat(rows).isEqualTo(Arrays.asList(Row.of(1, 1), Row.of(2, 2)));
+                });
     }
 
     @Test
-    public void testDefaultSerPartStreamingWrite() throws Exception {
+    void testDefaultSerPartStreamingWrite() throws Exception {
         testStreamingWrite(true, false, "textfile", this::checkSuccessFiles);
     }
 
     @Test
-    public void testPartStreamingWrite() throws Exception {
+    void testPartStreamingWrite() throws Exception {
         testStreamingWrite(true, false, "parquet", this::checkSuccessFiles);
         // disable vector orc writer test for hive 2.x due to dependency conflict
         if (!hiveCatalog.getHiveVersion().startsWith("2.")) {
@@ -177,7 +183,7 @@ public class HiveTableSinkITCase {
     }
 
     @Test
-    public void testNonPartStreamingWrite() throws Exception {
+    void testNonPartStreamingWrite() throws Exception {
         testStreamingWrite(false, false, "parquet", (p) -> {});
         // disable vector orc writer test for hive 2.x due to dependency conflict
         if (!hiveCatalog.getHiveVersion().startsWith("2.")) {
@@ -186,7 +192,7 @@ public class HiveTableSinkITCase {
     }
 
     @Test
-    public void testPartStreamingMrWrite() throws Exception {
+    void testPartStreamingMrWrite() throws Exception {
         testStreamingWrite(true, true, "parquet", this::checkSuccessFiles);
         // doesn't support writer 2.0 orc table
         if (!hiveCatalog.getHiveVersion().startsWith("2.0")) {
@@ -195,7 +201,7 @@ public class HiveTableSinkITCase {
     }
 
     @Test
-    public void testNonPartStreamingMrWrite() throws Exception {
+    void testNonPartStreamingMrWrite() throws Exception {
         testStreamingWrite(false, true, "parquet", (p) -> {});
         // doesn't support writer 2.0 orc table
         if (!hiveCatalog.getHiveVersion().startsWith("2.0")) {
@@ -204,7 +210,7 @@ public class HiveTableSinkITCase {
     }
 
     @Test
-    public void testStreamingAppend() throws Exception {
+    void testStreamingAppend() throws Exception {
         testStreamingWrite(
                 false,
                 false,
@@ -216,13 +222,12 @@ public class HiveTableSinkITCase {
                     StreamTableEnvironment tEnv = HiveTestUtils.createTableEnvInStreamingMode(env);
                     tEnv.registerCatalog(hiveCatalog.getName(), hiveCatalog);
                     tEnv.useCatalog(hiveCatalog.getName());
-                    try {
-                        tEnv.executeSql(
-                                        "insert into db1.sink_table select 6,'a','b','2020-05-03','12'")
-                                .await();
-                    } catch (Exception e) {
-                        fail("Failed to execute sql: " + e.getMessage());
-                    }
+                    assertThatCode(
+                                    () ->
+                                            tEnv.executeSql(
+                                                            "insert into db1.sink_table select 6,'a','b','2020-05-03','12'")
+                                                    .await())
+                            .doesNotThrowAnyException();
                     assertBatch(
                             "db1.sink_table",
                             Arrays.asList(
@@ -241,7 +246,7 @@ public class HiveTableSinkITCase {
     }
 
     @Test
-    public void testStreamingSinkWithTimestampLtzWatermark() throws Exception {
+    void testStreamingSinkWithTimestampLtzWatermark() throws Exception {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         env.setParallelism(1);
         env.enableCheckpointing(100);
@@ -251,186 +256,192 @@ public class HiveTableSinkITCase {
         tEnv.registerCatalog(hiveCatalog.getName(), hiveCatalog);
         tEnv.useCatalog(hiveCatalog.getName());
         tEnv.getConfig().setSqlDialect(SqlDialect.HIVE);
-        try {
-            tEnv.executeSql("create database db1");
-            tEnv.useDatabase("db1");
+        TableEnvExecutorUtil.executeInSeparateDatabase(
+                tEnv,
+                true,
+                () -> {
+                    // source table DDL
+                    tEnv.executeSql(
+                            "create external table source_table ("
+                                    + " a int,"
+                                    + " b string,"
+                                    + " c string,"
+                                    + " epoch_ts bigint)"
+                                    + " partitioned by ("
+                                    + " pt_day string, pt_hour string) TBLPROPERTIES("
+                                    + "'partition.time-extractor.timestamp-pattern'='$pt_day $pt_hour:00:00',"
+                                    + "'streaming-source.enable'='true',"
+                                    + "'streaming-source.monitor-interval'='1s',"
+                                    + "'streaming-source.consume-order'='partition-time'"
+                                    + ")");
 
-            // source table DDL
-            tEnv.executeSql(
-                    "create external table source_table ("
-                            + " a int,"
-                            + " b string,"
-                            + " c string,"
-                            + " epoch_ts bigint)"
-                            + " partitioned by ("
-                            + " pt_day string, pt_hour string) TBLPROPERTIES("
-                            + "'partition.time-extractor.timestamp-pattern'='$pt_day $pt_hour:00:00',"
-                            + "'streaming-source.enable'='true',"
-                            + "'streaming-source.monitor-interval'='1s',"
-                            + "'streaming-source.consume-order'='partition-time'"
-                            + ")");
+                    tEnv.executeSql(
+                            "create external table sink_table ("
+                                    + " a int,"
+                                    + " b string,"
+                                    + " c string)"
+                                    + " partitioned by ("
+                                    + " d string, e string) TBLPROPERTIES("
+                                    + " 'partition.time-extractor.timestamp-pattern' = '$d $e:00:00',"
+                                    + " 'auto-compaction'='true',"
+                                    + " 'compaction.file-size' = '128MB',"
+                                    + " 'sink.partition-commit.trigger'='partition-time',"
+                                    + " 'sink.partition-commit.delay'='30min',"
+                                    + " 'sink.partition-commit.watermark-time-zone'='Asia/Shanghai',"
+                                    + " 'sink.partition-commit.policy.kind'='metastore,success-file',"
+                                    + " 'sink.partition-commit.success-file.name'='_MY_SUCCESS',"
+                                    + " 'streaming-source.enable'='true',"
+                                    + " 'streaming-source.monitor-interval'='1s',"
+                                    + " 'streaming-source.consume-order'='partition-time'"
+                                    + ")");
 
-            tEnv.executeSql(
-                    "create external table sink_table ("
-                            + " a int,"
-                            + " b string,"
-                            + " c string)"
-                            + " partitioned by ("
-                            + " d string, e string) TBLPROPERTIES("
-                            + " 'partition.time-extractor.timestamp-pattern' = '$d $e:00:00',"
-                            + " 'auto-compaction'='true',"
-                            + " 'compaction.file-size' = '128MB',"
-                            + " 'sink.partition-commit.trigger'='partition-time',"
-                            + " 'sink.partition-commit.delay'='30min',"
-                            + " 'sink.partition-commit.watermark-time-zone'='Asia/Shanghai',"
-                            + " 'sink.partition-commit.policy.kind'='metastore,success-file',"
-                            + " 'sink.partition-commit.success-file.name'='_MY_SUCCESS',"
-                            + " 'streaming-source.enable'='true',"
-                            + " 'streaming-source.monitor-interval'='1s',"
-                            + " 'streaming-source.consume-order'='partition-time'"
-                            + ")");
+                    tEnv.getConfig().setSqlDialect(SqlDialect.DEFAULT);
 
-            tEnv.getConfig().setSqlDialect(SqlDialect.DEFAULT);
+                    // Build a partitioned table source with watermark base on the streaming-hive
+                    // table
+                    DataStream<Row> dataStream =
+                            tEnv.toDataStream(
+                                    tEnv.sqlQuery(
+                                            "select a, b, c, epoch_ts, pt_day, pt_hour from source_table"));
+                    Table table =
+                            tEnv.fromDataStream(
+                                    dataStream,
+                                    Schema.newBuilder()
+                                            .column("a", DataTypes.INT())
+                                            .column("b", DataTypes.STRING())
+                                            .column("c", DataTypes.STRING())
+                                            .column("epoch_ts", DataTypes.BIGINT())
+                                            .column("pt_day", DataTypes.STRING())
+                                            .column("pt_hour", DataTypes.STRING())
+                                            .columnByExpression(
+                                                    "ts_ltz",
+                                                    Expressions.callSql(
+                                                            "TO_TIMESTAMP_LTZ(epoch_ts, 3)"))
+                                            .watermark("ts_ltz", "ts_ltz - INTERVAL '1' SECOND")
+                                            .build());
+                    tEnv.createTemporaryView("my_table", table);
+                    /*
+                     * prepare test data, we write two records into each partition in source table
+                     * the epoch mills used to define watermark, the watermark value is
+                     * the max timestamp value of all the partition data, i.e:
+                     * partition timestamp + 1 hour - 1 second in this case
+                     *
+                     * <pre>
+                     * epoch mills 1588461300000L <=>  local timestamp 2020-05-03 07:15:00 in Shanghai
+                     * epoch mills 1588463100000L <=>  local timestamp 2020-05-03 07:45:00 in Shanghai
+                     * epoch mills 1588464300000L <=>  local timestamp 2020-05-03 08:05:00 in Shanghai
+                     * epoch mills 1588466400000L <=>  local timestamp 2020-05-03 08:40:00 in Shanghai
+                     * epoch mills 1588468800000L <=>  local timestamp 2020-05-03 09:20:00 in Shanghai
+                     * epoch mills 1588470900000L <=>  local timestamp 2020-05-03 09:55:00 in Shanghai
+                     * epoch mills 1588471800000L <=>  local timestamp 2020-05-03 10:10:00 in Shanghai
+                     * epoch mills 1588473300000L <=>  local timestamp 2020-05-03 10:35:00 in Shanghai
+                     * epoch mills 1588476300000L <=>  local timestamp 2020-05-03 11:25:00 in Shanghai
+                     * epoch mills 1588477800000L <=>  local timestamp 2020-05-03 11:50:00 in Shanghai
+                     * </pre>
+                     */
+                    Map<Integer, Object[]> testData = new HashMap<>();
+                    testData.put(1, new Object[] {1, "a", "b", 1588461300000L});
+                    testData.put(2, new Object[] {1, "a", "b", 1588463100000L});
+                    testData.put(3, new Object[] {2, "p", "q", 1588464300000L});
+                    testData.put(4, new Object[] {2, "p", "q", 1588466400000L});
+                    testData.put(5, new Object[] {3, "x", "y", 1588468800000L});
+                    testData.put(6, new Object[] {3, "x", "y", 1588470900000L});
+                    testData.put(7, new Object[] {4, "x", "y", 1588471800000L});
+                    testData.put(8, new Object[] {4, "x", "y", 1588473300000L});
+                    testData.put(9, new Object[] {5, "x", "y", 1588476300000L});
+                    testData.put(10, new Object[] {5, "x", "y", 1588477800000L});
 
-            // Build a partitioned table source with watermark base on the streaming-hive table
-            DataStream<Row> dataStream =
-                    tEnv.toDataStream(
-                            tEnv.sqlQuery(
-                                    "select a, b, c, epoch_ts, pt_day, pt_hour from source_table"));
-            Table table =
-                    tEnv.fromDataStream(
-                            dataStream,
-                            Schema.newBuilder()
-                                    .column("a", DataTypes.INT())
-                                    .column("b", DataTypes.STRING())
-                                    .column("c", DataTypes.STRING())
-                                    .column("epoch_ts", DataTypes.BIGINT())
-                                    .column("pt_day", DataTypes.STRING())
-                                    .column("pt_hour", DataTypes.STRING())
-                                    .columnByExpression(
-                                            "ts_ltz",
-                                            Expressions.callSql("TO_TIMESTAMP_LTZ(epoch_ts, 3)"))
-                                    .watermark("ts_ltz", "ts_ltz - INTERVAL '1' SECOND")
-                                    .build());
-            tEnv.createTemporaryView("my_table", table);
-            /*
-             * prepare test data, we write two records into each partition in source table
-             * the epoch mills used to define watermark, the watermark value is
-             * the max timestamp value of all the partition data, i.e:
-             * partition timestamp + 1 hour - 1 second in this case
-             *
-             * <pre>
-             * epoch mills 1588461300000L <=>  local timestamp 2020-05-03 07:15:00 in Shanghai
-             * epoch mills 1588463100000L <=>  local timestamp 2020-05-03 07:45:00 in Shanghai
-             * epoch mills 1588464300000L <=>  local timestamp 2020-05-03 08:05:00 in Shanghai
-             * epoch mills 1588466400000L <=>  local timestamp 2020-05-03 08:40:00 in Shanghai
-             * epoch mills 1588468800000L <=>  local timestamp 2020-05-03 09:20:00 in Shanghai
-             * epoch mills 1588470900000L <=>  local timestamp 2020-05-03 09:55:00 in Shanghai
-             * epoch mills 1588471800000L <=>  local timestamp 2020-05-03 10:10:00 in Shanghai
-             * epoch mills 1588473300000L <=>  local timestamp 2020-05-03 10:35:00 in Shanghai
-             * epoch mills 1588476300000L <=>  local timestamp 2020-05-03 11:25:00 in Shanghai
-             * epoch mills 1588477800000L <=>  local timestamp 2020-05-03 11:50:00 in Shanghai
-             * </pre>
-             */
-            Map<Integer, Object[]> testData = new HashMap<>();
-            testData.put(1, new Object[] {1, "a", "b", 1588461300000L});
-            testData.put(2, new Object[] {1, "a", "b", 1588463100000L});
-            testData.put(3, new Object[] {2, "p", "q", 1588464300000L});
-            testData.put(4, new Object[] {2, "p", "q", 1588466400000L});
-            testData.put(5, new Object[] {3, "x", "y", 1588468800000L});
-            testData.put(6, new Object[] {3, "x", "y", 1588470900000L});
-            testData.put(7, new Object[] {4, "x", "y", 1588471800000L});
-            testData.put(8, new Object[] {4, "x", "y", 1588473300000L});
-            testData.put(9, new Object[] {5, "x", "y", 1588476300000L});
-            testData.put(10, new Object[] {5, "x", "y", 1588477800000L});
+                    Map<Integer, String> testPartition = new HashMap<>();
+                    testPartition.put(1, "pt_day='2020-05-03',pt_hour='7'");
+                    testPartition.put(2, "pt_day='2020-05-03',pt_hour='8'");
+                    testPartition.put(3, "pt_day='2020-05-03',pt_hour='9'");
+                    testPartition.put(4, "pt_day='2020-05-03',pt_hour='10'");
+                    testPartition.put(5, "pt_day='2020-05-03',pt_hour='11'");
 
-            Map<Integer, String> testPartition = new HashMap<>();
-            testPartition.put(1, "pt_day='2020-05-03',pt_hour='7'");
-            testPartition.put(2, "pt_day='2020-05-03',pt_hour='8'");
-            testPartition.put(3, "pt_day='2020-05-03',pt_hour='9'");
-            testPartition.put(4, "pt_day='2020-05-03',pt_hour='10'");
-            testPartition.put(5, "pt_day='2020-05-03',pt_hour='11'");
+                    Map<Integer, Object[]> expectedData = new HashMap<>();
+                    expectedData.put(1, new Object[] {1, "a", "b", "2020-05-03", "7"});
+                    expectedData.put(2, new Object[] {2, "p", "q", "2020-05-03", "8"});
+                    expectedData.put(3, new Object[] {3, "x", "y", "2020-05-03", "9"});
+                    expectedData.put(4, new Object[] {4, "x", "y", "2020-05-03", "10"});
+                    expectedData.put(5, new Object[] {5, "x", "y", "2020-05-03", "11"});
 
-            Map<Integer, Object[]> expectedData = new HashMap<>();
-            expectedData.put(1, new Object[] {1, "a", "b", "2020-05-03", "7"});
-            expectedData.put(2, new Object[] {2, "p", "q", "2020-05-03", "8"});
-            expectedData.put(3, new Object[] {3, "x", "y", "2020-05-03", "9"});
-            expectedData.put(4, new Object[] {4, "x", "y", "2020-05-03", "10"});
-            expectedData.put(5, new Object[] {5, "x", "y", "2020-05-03", "11"});
+                    tEnv.executeSql(
+                            "insert into sink_table select a, b, c, pt_day, pt_hour from my_table");
+                    CloseableIterator<Row> iter =
+                            tEnv.executeSql("select * from sink_table").collect();
 
-            tEnv.executeSql("insert into sink_table select a, b, c, pt_day, pt_hour from my_table");
-            CloseableIterator<Row> iter = tEnv.executeSql("select * from sink_table").collect();
-
-            HiveTestUtils.createTextTableInserter(hiveCatalog, "db1", "source_table")
-                    .addRow(testData.get(1))
-                    .addRow(testData.get(2))
-                    .commit(testPartition.get(1));
-
-            for (int i = 2; i < 7; i++) {
-                try {
-                    Thread.sleep(1_000);
-                } catch (InterruptedException e) {
-                    throw new RuntimeException(e);
-                }
-                assertThat(fetchRows(iter, 2))
-                        .isEqualTo(
-                                Arrays.asList(
-                                        Row.of(expectedData.get(i - 1)).toString(),
-                                        Row.of(expectedData.get(i - 1)).toString()));
-
-                if (i < 6) {
                     HiveTestUtils.createTextTableInserter(hiveCatalog, "db1", "source_table")
-                            .addRow(testData.get(2 * i - 1))
-                            .addRow(testData.get(2 * i))
-                            .commit(testPartition.get(i));
-                }
-            }
-            this.checkSuccessFiles(
-                    URI.create(
-                                    hiveCatalog
-                                            .getHiveTable(ObjectPath.fromString("db1.sink_table"))
-                                            .getSd()
-                                            .getLocation())
-                            .getPath());
-        } finally {
-            tEnv.executeSql("drop database db1 cascade");
-        }
+                            .addRow(testData.get(1))
+                            .addRow(testData.get(2))
+                            .commit(testPartition.get(1));
+
+                    for (int i = 2; i < 7; i++) {
+                        try {
+                            Thread.sleep(1_000);
+                        } catch (InterruptedException e) {
+                            throw new RuntimeException(e);
+                        }
+                        assertThat(fetchRows(iter, 2))
+                                .isEqualTo(
+                                        Arrays.asList(
+                                                Row.of(expectedData.get(i - 1)).toString(),
+                                                Row.of(expectedData.get(i - 1)).toString()));
+
+                        if (i < 6) {
+                            HiveTestUtils.createTextTableInserter(
+                                            hiveCatalog, "db1", "source_table")
+                                    .addRow(testData.get(2 * i - 1))
+                                    .addRow(testData.get(2 * i))
+                                    .commit(testPartition.get(i));
+                        }
+                    }
+                    checkSuccessFiles(
+                            URI.create(
+                                            hiveCatalog
+                                                    .getHiveTable(
+                                                            ObjectPath.fromString("db1.sink_table"))
+                                                    .getSd()
+                                                    .getLocation())
+                                    .getPath());
+                });
     }
 
     @Test
-    public void testStreamingSinkWithoutCommitPolicy() throws Exception {
+    void testStreamingSinkWithoutCommitPolicy() throws Exception {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         StreamTableEnvironment tableEnv = HiveTestUtils.createTableEnvInStreamingMode(env);
         tableEnv.registerCatalog(hiveCatalog.getName(), hiveCatalog);
         tableEnv.useCatalog(hiveCatalog.getName());
 
-        tableEnv.executeSql("create database db1");
-        try {
-            tableEnv.useDatabase("db1");
-            tableEnv.getConfig().setSqlDialect(SqlDialect.HIVE);
-            tableEnv.executeSql("create table dest(x int) partitioned by (p string)");
+        TableEnvExecutorUtil.executeInSeparateDatabase(
+                tableEnv,
+                true,
+                () -> {
+                    tableEnv.getConfig().setSqlDialect(SqlDialect.HIVE);
+                    tableEnv.executeSql("create table dest(x int) partitioned by (p string)");
 
-            tableEnv.getConfig().setSqlDialect(SqlDialect.DEFAULT);
-            tableEnv.executeSql(
-                    "create table src (i int, p string) with ("
-                            + "'connector'='datagen',"
-                            + "'number-of-rows'='5')");
-            tableEnv.executeSql("insert into dest select * from src").await();
-            fail("Streaming write partitioned table without commit policy should fail");
-        } catch (FlinkHiveException e) {
-            // expected
-            assertThat(e.getMessage())
-                    .contains(
-                            String.format(
-                                    "Streaming write to partitioned hive table `%s`.`%s`.`%s` without providing a commit policy",
-                                    hiveCatalog.getName(), "db1", "dest"));
-        } finally {
-            tableEnv.executeSql("drop database db1 cascade");
-        }
+                    tableEnv.getConfig().setSqlDialect(SqlDialect.DEFAULT);
+                    tableEnv.executeSql(
+                            "create table src (i int, p string) with ("
+                                    + "'connector'='datagen',"
+                                    + "'number-of-rows'='5')");
+
+                    assertThatThrownBy(
+                                    () ->
+                                            tableEnv.executeSql(
+                                                            "insert into dest select * from src")
+                                                    .await(),
+                                    "Streaming write partitioned table without commit policy should fail")
+                            .isInstanceOf(FlinkHiveException.class)
+                            .hasMessageContaining(
+                                    String.format(
+                                            "Streaming write to partitioned hive table `%s`.`%s`.`%s` without providing a commit policy",
+                                            hiveCatalog.getName(), "db1", "dest"));
+                });
     }
 
     @Test
-    public void testCustomPartitionCommitPolicyNotFound() {
+    void testCustomPartitionCommitPolicyNotFound() {
         String customCommitPolicyClassName = "NotExistPartitionCommitPolicyClass";
 
         assertThatThrownBy(
@@ -443,12 +454,12 @@ public class HiveTableSinkITCase {
     }
 
     @Test
-    public void testCustomPartitionCommitPolicy() throws Exception {
+    void testCustomPartitionCommitPolicy() throws Exception {
         testStreamingWriteWithCustomPartitionCommitPolicy(TestCustomCommitPolicy.class.getName());
     }
 
     @Test
-    public void testWritingNoDataToPartition() throws Exception {
+    void testWritingNoDataToPartition() throws Exception {
         TableEnvironment tEnv = HiveTestUtils.createTableEnvInBatchMode(SqlDialect.HIVE);
         tEnv.registerCatalog(hiveCatalog.getName(), hiveCatalog);
         tEnv.useCatalog(hiveCatalog.getName());
@@ -467,7 +478,7 @@ public class HiveTableSinkITCase {
 
         // insert overwrite partition
         tEnv.executeSql(
-                        "INSERT OVERWRITE target_table partition (dt='2022-07-28') SELECT name FROM src_table where dt = '2022-07-28'")
+                        "INSERT OVERWRITE TABLE target_table partition (dt='2022-07-28') SELECT name FROM src_table where dt = '2022-07-28'")
                 .await();
         partitions =
                 CollectionUtil.iteratorToList(
@@ -479,7 +490,7 @@ public class HiveTableSinkITCase {
         tEnv.executeSql("INSERT INTO target_table partition (dt='2022-07-29') VALUES ('zm')")
                 .await();
 
-        assertBatch("target_table", Arrays.asList("+I[zm, 2022-07-29]"));
+        assertBatch("target_table", Collections.singletonList("+I[zm, 2022-07-29]"));
         tEnv.executeSql(
                         "INSERT INTO target_table partition (dt='2022-07-29') SELECT name FROM src_table where dt = '2022-07-29'")
                 .await();
@@ -488,18 +499,18 @@ public class HiveTableSinkITCase {
                         tEnv.executeSql("show partitions target_table").collect());
         assertThat(partitions).hasSize(3);
         assertThat(partitions.toString()).contains("dt=2022-07-29");
-        assertBatch("target_table", Arrays.asList("+I[zm, 2022-07-29]"));
+        assertBatch("target_table", Collections.singletonList("+I[zm, 2022-07-29]"));
 
         // insert overwrite a partition with data
         tEnv.executeSql(
-                        "INSERT OVERWRITE target_table partition (dt='2022-07-29') SELECT name FROM src_table where dt = '2022-07-29'")
+                        "INSERT OVERWRITE TABLE target_table partition (dt='2022-07-29') SELECT name FROM src_table where dt = '2022-07-29'")
                 .await();
         partitions =
                 CollectionUtil.iteratorToList(
                         tEnv.executeSql("show partitions target_table").collect());
         assertThat(partitions).hasSize(3);
         assertThat(partitions.toString()).contains("dt=2022-07-29");
-        assertBatch("target_table", Arrays.asList());
+        assertBatch("target_table", Collections.emptyList());
 
         // test for dynamic partition
         tEnv.executeSql(
@@ -516,7 +527,7 @@ public class HiveTableSinkITCase {
     }
 
     @Test
-    public void testSortByDynamicPartitionEnableConfigurationInBatchMode() {
+    void testSortByDynamicPartitionEnableConfigurationInBatchMode() {
         final TableEnvironment tEnv = HiveTestUtils.createTableEnvInBatchMode();
         tEnv.registerCatalog(hiveCatalog.getName(), hiveCatalog);
         tEnv.useCatalog(hiveCatalog.getName());
@@ -542,7 +553,7 @@ public class HiveTableSinkITCase {
     }
 
     @Test
-    public void testWriteSuccessFile() throws Exception {
+    void testWriteSuccessFile() throws Exception {
         TableEnvironment tEnv = HiveTestUtils.createTableEnvInBatchMode(SqlDialect.HIVE);
         tEnv.registerCatalog(hiveCatalog.getName(), hiveCatalog);
         tEnv.useCatalog(hiveCatalog.getName());
@@ -595,7 +606,7 @@ public class HiveTableSinkITCase {
     }
 
     @Test
-    public void testAutoGatherStatisticForBatchWriting() throws Exception {
+    void testAutoGatherStatisticForBatchWriting() throws Exception {
         TableEnvironment tEnv = HiveTestUtils.createTableEnvInBatchMode(SqlDialect.HIVE);
         tEnv.registerCatalog(hiveCatalog.getName(), hiveCatalog);
         tEnv.useCatalog(hiveCatalog.getName());
@@ -726,7 +737,7 @@ public class HiveTableSinkITCase {
 
     private long getPathSize(java.nio.file.Path path) throws IOException {
         String defaultSuccessFileName =
-                HiveOptions.SINK_PARTITION_COMMIT_SUCCESS_FILE_NAME.defaultValue();
+                FileSystemConnectorOptions.SINK_PARTITION_COMMIT_SUCCESS_FILE_NAME.defaultValue();
         return Files.list(path)
                 .filter(
                         p ->
@@ -770,78 +781,87 @@ public class HiveTableSinkITCase {
         tEnv.useCatalog(hiveCatalog.getName());
         tEnv.getConfig().setSqlDialect(SqlDialect.HIVE);
 
-        try {
-            tEnv.executeSql("create database db1");
-            tEnv.useDatabase("db1");
-
-            // prepare source
-            List<Row> data =
-                    Arrays.asList(
-                            Row.of(1, "a", "b", "2020-05-03", "7"),
-                            Row.of(2, "p", "q", "2020-05-03", "8"),
-                            Row.of(3, "x", "y", "2020-05-03", "9"),
-                            Row.of(4, "x", "y", "2020-05-03", "10"),
-                            Row.of(5, "x", "y", "2020-05-03", "11"));
-            DataStream<Row> stream =
-                    env.addSource(
-                            new FiniteTestSource<>(data),
+        TableEnvExecutorUtil.executeInSeparateDatabase(
+                tEnv,
+                true,
+                () -> {
+                    // prepare source
+                    List<Row> data =
+                            Arrays.asList(
+                                    Row.of(1, "a", "b", "2020-05-03", "7"),
+                                    Row.of(2, "p", "q", "2020-05-03", "8"),
+                                    Row.of(3, "x", "y", "2020-05-03", "9"),
+                                    Row.of(4, "x", "y", "2020-05-03", "10"),
+                                    Row.of(5, "x", "y", "2020-05-03", "11"));
+                    RowTypeInfo rowTypeInfo =
                             new RowTypeInfo(
                                     Types.INT,
                                     Types.STRING,
                                     Types.STRING,
                                     Types.STRING,
-                                    Types.STRING));
-            tEnv.createTemporaryView("my_table", stream, $("a"), $("b"), $("c"), $("d"), $("e"));
+                                    Types.STRING);
 
-            // DDL
-            tEnv.executeSql(
-                    "create external table sink_table (a int,b string,c string"
-                            + ") "
-                            + "partitioned by (d string,e string) "
-                            + " stored as textfile"
-                            + " TBLPROPERTIES ("
-                            + "'"
-                            + SINK_PARTITION_COMMIT_DELAY.key()
-                            + "'='1h',"
-                            + "'"
-                            + SINK_PARTITION_COMMIT_POLICY_KIND.key()
-                            + "'='metastore,custom',"
-                            + "'"
-                            + SINK_PARTITION_COMMIT_POLICY_CLASS.key()
-                            + "'='"
-                            + customPartitionCommitPolicyClassName
-                            + "'"
-                            + ")");
+                    DataStream<Row> stream =
+                            env.fromSource(
+                                    TestDataGenerators.fromDataWithSnapshotsLatch(
+                                            data, rowTypeInfo),
+                                    WatermarkStrategy.noWatermarks(),
+                                    "Test Source");
 
-            // hive dialect only works with hive tables at the moment, switch to default dialect
-            tEnv.getConfig().setSqlDialect(SqlDialect.DEFAULT);
-            tEnv.sqlQuery("select * from my_table").executeInsert("sink_table").await();
+                    tEnv.createTemporaryView(
+                            "my_table", stream, $("a"), $("b"), $("c"), $("d"), $("e"));
 
-            // check committed partitions for CustomizedCommitPolicy
-            Set<String> committedPaths =
-                    TestCustomCommitPolicy.getCommittedPartitionPathsAndReset();
-            String base =
-                    URI.create(
-                                    hiveCatalog
-                                            .getHiveTable(ObjectPath.fromString("db1.sink_table"))
-                                            .getSd()
-                                            .getLocation())
-                            .getPath();
-            List<String> partitionKVs = Lists.newArrayList("e=7", "e=8", "e=9", "e=10", "e=11");
-            partitionKVs.forEach(
-                    partitionKV -> {
-                        String partitionPath =
-                                new Path(new Path(base, "d=2020-05-03"), partitionKV).toString();
-                        assertThat(committedPaths)
-                                .as(
-                                        "Partition(d=2020-05-03, "
-                                                + partitionKV
-                                                + ") is not committed successfully")
-                                .contains(partitionPath);
-                    });
-        } finally {
-            tEnv.executeSql("drop database if exists db1 cascade");
-        }
+                    // DDL
+                    tEnv.executeSql(
+                            "create external table sink_table (a int,b string,c string"
+                                    + ") "
+                                    + "partitioned by (d string,e string) "
+                                    + " stored as textfile"
+                                    + " TBLPROPERTIES ("
+                                    + "'"
+                                    + SINK_PARTITION_COMMIT_DELAY.key()
+                                    + "'='1h',"
+                                    + "'"
+                                    + SINK_PARTITION_COMMIT_POLICY_KIND.key()
+                                    + "'='metastore,custom',"
+                                    + "'"
+                                    + SINK_PARTITION_COMMIT_POLICY_CLASS.key()
+                                    + "'='"
+                                    + customPartitionCommitPolicyClassName
+                                    + "'"
+                                    + ")");
+
+                    // hive dialect only works with hive tables at the moment, switch to default
+                    // dialect
+                    tEnv.getConfig().setSqlDialect(SqlDialect.DEFAULT);
+                    tEnv.sqlQuery("select * from my_table").executeInsert("sink_table").await();
+
+                    // check committed partitions for CustomizedCommitPolicy
+                    Set<String> committedPaths =
+                            TestCustomCommitPolicy.getCommittedPartitionPathsAndReset();
+                    String base =
+                            URI.create(
+                                            hiveCatalog
+                                                    .getHiveTable(
+                                                            ObjectPath.fromString("db1.sink_table"))
+                                                    .getSd()
+                                                    .getLocation())
+                                    .getPath();
+                    List<String> partitionKVs =
+                            Lists.newArrayList("e=7", "e=8", "e=9", "e=10", "e=11");
+                    partitionKVs.forEach(
+                            partitionKV -> {
+                                String partitionPath =
+                                        new Path(new Path(base, "d=2020-05-03"), partitionKV)
+                                                .toString();
+                                assertThat(committedPaths)
+                                        .as(
+                                                "Partition(d=2020-05-03, "
+                                                        + partitionKV
+                                                        + ") is not committed successfully")
+                                        .contains(partitionPath);
+                            });
+                });
     }
 
     private void testStreamingWrite(
@@ -861,80 +881,94 @@ public class HiveTableSinkITCase {
             tEnv.getConfig().set(HiveOptions.TABLE_EXEC_HIVE_FALLBACK_MAPRED_WRITER, false);
         }
 
-        try {
-            tEnv.executeSql("create database db1");
-            tEnv.useDatabase("db1");
-
-            // prepare source
-            List<Row> data =
-                    Arrays.asList(
-                            Row.of(1, "a", "b", "2020-05-03", "7"),
-                            Row.of(2, "p", "q", "2020-05-03", "8"),
-                            Row.of(3, "x", "y", "2020-05-03", "9"),
-                            Row.of(4, "x", "y", "2020-05-03", "10"),
-                            Row.of(5, "x", "y", "2020-05-03", "11"));
-            DataStream<Row> stream =
-                    env.addSource(
-                            new FiniteTestSource<>(data),
+        TableEnvExecutorUtil.executeInSeparateDatabase(
+                tEnv,
+                true,
+                () -> {
+                    // prepare source
+                    List<Row> data =
+                            Arrays.asList(
+                                    Row.of(1, "a", "b", "2020-05-03", "7"),
+                                    Row.of(2, "p", "q", "2020-05-03", "8"),
+                                    Row.of(3, "x", "y", "2020-05-03", "9"),
+                                    Row.of(4, "x", "y", "2020-05-03", "10"),
+                                    Row.of(5, "x", "y", "2020-05-03", "11"));
+                    RowTypeInfo rowTypeInfo =
                             new RowTypeInfo(
                                     Types.INT,
                                     Types.STRING,
                                     Types.STRING,
                                     Types.STRING,
-                                    Types.STRING));
-            tEnv.createTemporaryView("my_table", stream, $("a"), $("b"), $("c"), $("d"), $("e"));
+                                    Types.STRING);
 
-            // DDL
-            tEnv.executeSql(
-                    "create external table sink_table (a int,b string,c string"
-                            + (part ? "" : ",d string,e string")
-                            + ") "
-                            + (part ? "partitioned by (d string,e string) " : "")
-                            + " stored as "
-                            + format
-                            + " TBLPROPERTIES ("
-                            + "'"
-                            + PARTITION_TIME_EXTRACTOR_TIMESTAMP_PATTERN.key()
-                            + "'='$d $e:00:00',"
-                            + "'"
-                            + SINK_PARTITION_COMMIT_DELAY.key()
-                            + "'='1h',"
-                            + "'"
-                            + SINK_PARTITION_COMMIT_POLICY_KIND.key()
-                            + "'='metastore,success-file',"
-                            + "'"
-                            + SINK_PARTITION_COMMIT_SUCCESS_FILE_NAME.key()
-                            + "'='_MY_SUCCESS'"
-                            + ")");
+                    DataStream<Row> stream =
+                            env.fromSource(
+                                    TestDataGenerators.fromDataWithSnapshotsLatch(
+                                            data, rowTypeInfo),
+                                    WatermarkStrategy.noWatermarks(),
+                                    "Test Source");
 
-            // hive dialect only works with hive tables at the moment, switch to default dialect
-            tEnv.getConfig().setSqlDialect(SqlDialect.DEFAULT);
-            tEnv.sqlQuery("select * from my_table").executeInsert("sink_table").await();
+                    tEnv.createTemporaryView(
+                            "my_table",
+                            stream,
+                            Schema.newBuilder()
+                                    .column("f0", DataTypes.INT())
+                                    .column("f1", DataTypes.STRING())
+                                    .column("f2", DataTypes.STRING())
+                                    .column("f3", DataTypes.STRING())
+                                    .column("f4", DataTypes.STRING())
+                                    .build());
+                    // DDL
+                    tEnv.executeSql(
+                            "create external table sink_table (a int,b string,c string"
+                                    + (part ? "" : ",d string,e string")
+                                    + ") "
+                                    + (part ? "partitioned by (d string,e string) " : "")
+                                    + " stored as "
+                                    + format
+                                    + " TBLPROPERTIES ("
+                                    + "'"
+                                    + PARTITION_TIME_EXTRACTOR_TIMESTAMP_PATTERN.key()
+                                    + "'='$d $e:00:00',"
+                                    + "'"
+                                    + SINK_PARTITION_COMMIT_DELAY.key()
+                                    + "'='1h',"
+                                    + "'"
+                                    + SINK_PARTITION_COMMIT_POLICY_KIND.key()
+                                    + "'='metastore,success-file',"
+                                    + "'"
+                                    + SINK_PARTITION_COMMIT_SUCCESS_FILE_NAME.key()
+                                    + "'='_MY_SUCCESS'"
+                                    + ")");
 
-            assertBatch(
-                    "db1.sink_table",
-                    Arrays.asList(
-                            "+I[1, a, b, 2020-05-03, 7]",
-                            "+I[1, a, b, 2020-05-03, 7]",
-                            "+I[2, p, q, 2020-05-03, 8]",
-                            "+I[2, p, q, 2020-05-03, 8]",
-                            "+I[3, x, y, 2020-05-03, 9]",
-                            "+I[3, x, y, 2020-05-03, 9]",
-                            "+I[4, x, y, 2020-05-03, 10]",
-                            "+I[4, x, y, 2020-05-03, 10]",
-                            "+I[5, x, y, 2020-05-03, 11]",
-                            "+I[5, x, y, 2020-05-03, 11]"));
+                    // hive dialect only works with hive tables at the moment, switch to default
+                    // dialect
+                    tEnv.getConfig().setSqlDialect(SqlDialect.DEFAULT);
+                    tEnv.sqlQuery("select * from my_table").executeInsert("sink_table").await();
 
-            pathConsumer.accept(
-                    URI.create(
-                                    hiveCatalog
-                                            .getHiveTable(ObjectPath.fromString("db1.sink_table"))
-                                            .getSd()
-                                            .getLocation())
-                            .getPath());
-        } finally {
-            tEnv.executeSql("drop database db1 cascade");
-        }
+                    assertBatch(
+                            "db1.sink_table",
+                            Arrays.asList(
+                                    "+I[1, a, b, 2020-05-03, 7]",
+                                    "+I[1, a, b, 2020-05-03, 7]",
+                                    "+I[2, p, q, 2020-05-03, 8]",
+                                    "+I[2, p, q, 2020-05-03, 8]",
+                                    "+I[3, x, y, 2020-05-03, 9]",
+                                    "+I[3, x, y, 2020-05-03, 9]",
+                                    "+I[4, x, y, 2020-05-03, 10]",
+                                    "+I[4, x, y, 2020-05-03, 10]",
+                                    "+I[5, x, y, 2020-05-03, 11]",
+                                    "+I[5, x, y, 2020-05-03, 11]"));
+
+                    pathConsumer.accept(
+                            URI.create(
+                                            hiveCatalog
+                                                    .getHiveTable(
+                                                            ObjectPath.fromString("db1.sink_table"))
+                                                    .getSd()
+                                                    .getLocation())
+                                    .getPath());
+                });
     }
 
     private void assertBatch(String table, List<String> expected) {

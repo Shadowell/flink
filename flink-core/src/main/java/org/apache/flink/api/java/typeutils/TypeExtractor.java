@@ -136,6 +136,38 @@ public class TypeExtractor {
     }
 
     // --------------------------------------------------------------------------------------------
+    //  TypeInfoFactory registry
+    // --------------------------------------------------------------------------------------------
+
+    private static final Map<Type, Class<? extends TypeInfoFactory<?>>>
+            registeredTypeInfoFactories = new HashMap<>();
+
+    /**
+     * Registers a type information factory globally for a certain type. Every following type
+     * extraction operation will use the provided factory for this type. The factory will have the
+     * highest precedence for this type. In a hierarchy of types the registered factory has higher
+     * precedence than annotations at the same level but lower precedence than factories defined
+     * down the hierarchy.
+     *
+     * @param t type for which a new factory is registered
+     * @param factory type information factory that will produce {@link TypeInformation}
+     */
+    @Internal
+    public static void registerFactory(Type t, Class<? extends TypeInfoFactory<?>> factory) {
+        Preconditions.checkNotNull(t, "Type parameter must not be null.");
+        Preconditions.checkNotNull(factory, "Factory parameter must not be null.");
+
+        if (!TypeInfoFactory.class.isAssignableFrom(factory)) {
+            throw new IllegalArgumentException("Class is not a TypeInfoFactory.");
+        }
+        if (registeredTypeInfoFactories.containsKey(t)) {
+            throw new InvalidTypesException(
+                    "A TypeInfoFactory for type '" + t + "' is already registered.");
+        }
+        registeredTypeInfoFactories.put(t, factory);
+    }
+
+    // --------------------------------------------------------------------------------------------
     //  Function specific methods
     // --------------------------------------------------------------------------------------------
 
@@ -552,7 +584,7 @@ public class TypeExtractor {
 
                 // number of parameters the SAM of implemented interface has; the parameter indexing
                 // applies to this range
-                final int baseParametersLen = sam.getParameterTypes().length;
+                final int baseParametersLen = sam.getParameterCount();
 
                 final Type output;
                 if (lambdaOutputTypeArgumentIndices.length > 0) {
@@ -687,7 +719,7 @@ public class TypeExtractor {
             if (exec != null) {
 
                 final Method sam = TypeExtractionUtils.getSingleAbstractMethod(baseClass);
-                final int baseParametersLen = sam.getParameterTypes().length;
+                final int baseParametersLen = sam.getParameterCount();
 
                 // parameters must be accessed from behind, since JVM can add additional parameters
                 // e.g. when using local variables inside lambda function
@@ -1699,15 +1731,19 @@ public class TypeExtractor {
     @SuppressWarnings("unchecked")
     public static <OUT> TypeInfoFactory<OUT> getTypeInfoFactory(Type t) {
         final Class<?> factoryClass;
-        if (!isClassType(t) || !typeToClass(t).isAnnotationPresent(TypeInfo.class)) {
-            return null;
-        }
-        final TypeInfo typeInfoAnnotation = typeToClass(t).getAnnotation(TypeInfo.class);
-        factoryClass = typeInfoAnnotation.value();
-        // check for valid factory class
-        if (!TypeInfoFactory.class.isAssignableFrom(factoryClass)) {
-            throw new InvalidTypesException(
-                    "TypeInfo annotation does not specify a valid TypeInfoFactory.");
+        if (registeredTypeInfoFactories.containsKey(t)) {
+            factoryClass = registeredTypeInfoFactories.get(t);
+        } else {
+            if (!isClassType(t) || !typeToClass(t).isAnnotationPresent(TypeInfo.class)) {
+                return null;
+            }
+            final TypeInfo typeInfoAnnotation = typeToClass(t).getAnnotation(TypeInfo.class);
+            factoryClass = typeInfoAnnotation.value();
+            // check for valid factory class
+            if (!TypeInfoFactory.class.isAssignableFrom(factoryClass)) {
+                throw new InvalidTypesException(
+                        "TypeInfo annotation does not specify a valid TypeInfoFactory.");
+            }
         }
 
         // instantiate
@@ -2004,7 +2040,7 @@ public class TypeExtractor {
                                 || methodNameLow.equals(fieldNameLow))
                         &&
                         // no arguments for the getter
-                        m.getParameterTypes().length == 0
+                        m.getParameterCount() == 0
                         &&
                         // return type is same as field type (or the generic variant of it)
                         (m.getGenericReturnType().equals(fieldType)
@@ -2015,7 +2051,7 @@ public class TypeExtractor {
                 // check for setters (<FieldName>_$eq for scala)
                 if ((methodNameLow.equals("set" + fieldNameLow)
                                 || methodNameLow.equals(fieldNameLow + "_$eq"))
-                        && m.getParameterTypes().length == 1
+                        && m.getParameterCount() == 1
                         && // one parameter of the field's type
                         (m.getGenericParameterTypes()[0].equals(fieldType)
                                 || (m.getParameterTypes()[0].equals(fieldTypeWrapper))
@@ -2072,10 +2108,11 @@ public class TypeExtractor {
             return new GenericTypeInfo<>(clazz);
         }
 
+        boolean isRecord = isRecord(clazz);
         List<PojoField> pojoFields = new ArrayList<>();
         for (Field field : fields) {
             Type fieldType = field.getGenericType();
-            if (!isValidPojoField(field, clazz, typeHierarchy) && clazz != Row.class) {
+            if (!isRecord && !isValidPojoField(field, clazz, typeHierarchy) && clazz != Row.class) {
                 LOG.info(
                         "Class "
                                 + clazz
@@ -2140,6 +2177,11 @@ public class TypeExtractor {
             }
         }
 
+        if (isRecord) {
+            // no default constructor extraction needs to be applied for Java records
+            return pojoType;
+        }
+
         // Try retrieving the default constructor, if it does not have one
         // we cannot use this because the serializer uses it.
         Constructor<OUT> defaultConstructor = null;
@@ -2172,6 +2214,20 @@ public class TypeExtractor {
 
         // everything is checked, we return the pojo
         return pojoType;
+    }
+
+    /**
+     * Determine whether the given class is a valid Java record.
+     *
+     * @param clazz class to check
+     * @return True if the class is a Java record
+     */
+    @PublicEvolving
+    public static boolean isRecord(Class<?> clazz) {
+        Class<?> superclass = clazz.getSuperclass();
+        return superclass != null
+                && superclass.getName().equals("java.lang.Record")
+                && (clazz.getModifiers() & Modifier.FINAL) != 0;
     }
 
     /**

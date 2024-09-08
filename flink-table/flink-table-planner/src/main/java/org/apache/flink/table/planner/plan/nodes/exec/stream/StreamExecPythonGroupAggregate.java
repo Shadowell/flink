@@ -176,7 +176,7 @@ public class StreamExecPythonGroupAggregate extends StreamExecAggregateBase {
         DataViewSpec[][] dataViewSpecs = aggInfosAndDataViewSpecs.f1;
         Configuration pythonConfig =
                 CommonPythonUtil.extractPythonConfiguration(
-                        planner.getExecEnv(), config, planner.getFlinkContext().getClassLoader());
+                        planner.getTableConfig(), planner.getFlinkContext().getClassLoader());
         final OneInputStreamOperator<RowData, RowData> operator =
                 getPythonAggregateFunctionOperator(
                         pythonConfig,
@@ -196,7 +196,8 @@ public class StreamExecPythonGroupAggregate extends StreamExecAggregateBase {
                         createTransformationMeta(PYTHON_GROUP_AGGREGATE_TRANSFORMATION, config),
                         operator,
                         InternalTypeInfo.of(getOutputType()),
-                        inputTransform.getParallelism());
+                        inputTransform.getParallelism(),
+                        false);
 
         if (CommonPythonUtil.isPythonWorkerUsingManagedMemory(
                 pythonConfig, planner.getFlinkContext().getClassLoader())) {

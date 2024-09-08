@@ -21,6 +21,7 @@ package org.apache.flink.table.planner.plan.nodes.exec;
 import org.apache.flink.api.connector.source.Boundedness;
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.lineage.LineageDataset;
 import org.apache.flink.streaming.api.transformations.LegacySourceTransformation;
 import org.apache.flink.streaming.api.transformations.WithBoundedness;
 import org.apache.flink.table.api.CompiledPlan;
@@ -34,6 +35,7 @@ import org.apache.flink.table.api.TableDescriptor;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.table.api.internal.CompiledPlanUtils;
+import org.apache.flink.table.planner.lineage.TableSourceLineageVertex;
 import org.apache.flink.table.planner.utils.JsonTestUtils;
 
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
@@ -45,6 +47,7 @@ import org.junit.jupiter.api.parallel.ExecutionMode;
 import java.io.IOException;
 import java.util.List;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -83,6 +86,15 @@ class TransformationsTest {
 
         assertBoundedness(Boundedness.BOUNDED, sourceTransform);
         assertThat(sourceTransform.getOperator().emitsProgressiveWatermarks()).isFalse();
+
+        assertThat(sourceTransform.getLineageVertex()).isNotNull();
+        assertThat(((TableSourceLineageVertex) sourceTransform.getLineageVertex()).boundedness())
+                .isEqualTo(Boundedness.BOUNDED);
+
+        List<LineageDataset> datasets = sourceTransform.getLineageVertex().datasets();
+        assertThat(datasets.size()).isEqualTo(1);
+        assertThat(datasets.get(0).name()).contains("*anonymous_values$");
+        assertThat(datasets.get(0).namespace()).isEqualTo("values://FromElementsFunction");
     }
 
     @Test
@@ -104,6 +116,15 @@ class TransformationsTest {
 
         assertBoundedness(Boundedness.CONTINUOUS_UNBOUNDED, sourceTransform);
         assertThat(sourceTransform.getOperator().emitsProgressiveWatermarks()).isTrue();
+
+        assertThat(sourceTransform.getLineageVertex()).isNotNull();
+        assertThat(((TableSourceLineageVertex) sourceTransform.getLineageVertex()).boundedness())
+                .isEqualTo(Boundedness.CONTINUOUS_UNBOUNDED);
+
+        List<LineageDataset> datasets = sourceTransform.getLineageVertex().datasets();
+        assertThat(datasets.size()).isEqualTo(1);
+        assertThat(datasets.get(0).name()).contains("*anonymous_values$");
+        assertThat(datasets.get(0).namespace()).isEqualTo("values://FromElementsFunction");
     }
 
     @Test
@@ -202,7 +223,12 @@ class TransformationsTest {
     @Test
     public void testUidDefaults() throws IOException {
         checkUidModification(
-                config -> {}, json -> {}, "\\d+_sink", "\\d+_constraint-validator", "\\d+_values");
+                config -> {},
+                json -> {},
+                env -> planFromCurrentFlinkVersion(env).asJsonString(),
+                "\\d+_sink",
+                "\\d+_constraint-validator",
+                "\\d+_values");
     }
 
     @Test
@@ -211,6 +237,19 @@ class TransformationsTest {
                 config ->
                         config.set(TABLE_EXEC_UID_FORMAT, "<id>_<type>_<version>_<transformation>"),
                 json -> {},
+                env -> planFromFlink1_15(env).asJsonString(),
+                "\\d+_stream-exec-sink_1_sink",
+                "\\d+_stream-exec-sink_1_constraint-validator",
+                "\\d+_stream-exec-values_1_values");
+    }
+
+    @Test
+    public void testUidFlink1_18() throws IOException {
+        checkUidModification(
+                config ->
+                        config.set(TABLE_EXEC_UID_FORMAT, "<id>_<type>_<version>_<transformation>"),
+                json -> {},
+                env -> planFromCurrentFlinkVersion(env).asJsonString(),
                 "\\d+_stream-exec-sink_1_sink",
                 "\\d+_stream-exec-sink_1_constraint-validator",
                 "\\d+_stream-exec-values_1_values");
@@ -226,6 +265,7 @@ class TransformationsTest {
                                 "stream-exec-sink_1",
                                 TABLE_EXEC_UID_FORMAT.key(),
                                 "my_custom_<transformation>_<id>"),
+                env -> planFromCurrentFlinkVersion(env).asJsonString(),
                 "my_custom_sink_\\d+",
                 "my_custom_constraint-validator_\\d+",
                 "\\d+_values");
@@ -234,12 +274,12 @@ class TransformationsTest {
     private static void checkUidModification(
             Consumer<TableConfig> configModifier,
             Consumer<JsonNode> jsonModifier,
+            Function<TableEnvironment, String> planGenerator,
             String... expectedUidPatterns)
             throws IOException {
         final TableEnvironment env = TableEnvironment.create(EnvironmentSettings.inStreamingMode());
         configModifier.accept(env.getConfig());
-        final String plan = minimalPlan(env).asJsonString();
-        final JsonNode json = JsonTestUtils.readFromString(plan);
+        final JsonNode json = JsonTestUtils.readFromString(planGenerator.apply(env));
         jsonModifier.accept(json);
         final List<String> planUids =
                 CompiledPlanUtils.toTransformations(
@@ -256,10 +296,15 @@ class TransformationsTest {
     // Helper methods
     // --------------------------------------------------------------------------------------------
 
-    private static CompiledPlan minimalPlan(TableEnvironment env) {
+    private static CompiledPlan planFromCurrentFlinkVersion(TableEnvironment env) {
         return env.fromValues(1, 2, 3)
                 .insertInto(TableDescriptor.forConnector("blackhole").build())
                 .compilePlan();
+    }
+
+    private static CompiledPlan planFromFlink1_15(TableEnvironment env) {
+        // plan content is compiled using release-1.15 with exec node version 1
+        return env.loadPlan(PlanReference.fromResource("/jsonplan/testUidFlink1_15.out"));
     }
 
     private static LegacySourceTransformation<?> toLegacySourceTransformation(

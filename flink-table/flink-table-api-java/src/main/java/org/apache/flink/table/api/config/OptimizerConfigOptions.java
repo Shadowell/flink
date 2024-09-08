@@ -21,9 +21,11 @@ package org.apache.flink.table.api.config;
 import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.annotation.docs.Documentation;
 import org.apache.flink.configuration.ConfigOption;
+import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.description.Description;
 
 import static org.apache.flink.configuration.ConfigOptions.key;
+import static org.apache.flink.configuration.description.TextElement.code;
 
 /**
  * This class holds configuration constants used by Flink's table planner module.
@@ -37,10 +39,10 @@ public class OptimizerConfigOptions {
     //  Optimizer Options
     // ------------------------------------------------------------------------
     @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH_STREAMING)
-    public static final ConfigOption<String> TABLE_OPTIMIZER_AGG_PHASE_STRATEGY =
+    public static final ConfigOption<AggregatePhaseStrategy> TABLE_OPTIMIZER_AGG_PHASE_STRATEGY =
             key("table.optimizer.agg-phase-strategy")
-                    .stringType()
-                    .defaultValue("AUTO")
+                    .enumType(AggregatePhaseStrategy.class)
+                    .defaultValue(AggregatePhaseStrategy.AUTO)
                     .withDescription(
                             "Strategy for aggregate phase. Only AUTO, TWO_PHASE or ONE_PHASE can be set.\n"
                                     + "AUTO: No special enforcer for aggregate stage. Whether to choose two stage aggregate or one"
@@ -100,6 +102,8 @@ public class OptimizerConfigOptions {
                                     + TABLE_OPTIMIZER_REUSE_SUB_PLAN_ENABLED.key()
                                     + " is true.");
 
+    /** This configuration will be removed in Flink 2.0. */
+    @Deprecated
     @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH)
     public static final ConfigOption<Boolean> TABLE_OPTIMIZER_SOURCE_AGGREGATE_PUSHDOWN_ENABLED =
             key("table.optimizer.source.aggregate-pushdown-enabled")
@@ -109,6 +113,8 @@ public class OptimizerConfigOptions {
                             "When it is true, the optimizer will push down the local aggregates into "
                                     + "the TableSource which implements SupportsAggregatePushDown.");
 
+    /** This configuration will be removed in Flink 2.0. */
+    @Deprecated
     @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH_STREAMING)
     public static final ConfigOption<Boolean> TABLE_OPTIMIZER_SOURCE_PREDICATE_PUSHDOWN_ENABLED =
             key("table.optimizer.source.predicate-pushdown-enabled")
@@ -135,6 +141,18 @@ public class OptimizerConfigOptions {
                     .defaultValue(false)
                     .withDescription("Enables join reorder in optimizer. Default is disabled.");
 
+    @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH_STREAMING)
+    public static final ConfigOption<Integer> TABLE_OPTIMIZER_BUSHY_JOIN_REORDER_THRESHOLD =
+            key("table.optimizer.bushy-join-reorder-threshold")
+                    .intType()
+                    .defaultValue(12)
+                    .withDescription(
+                            "The maximum number of joined nodes allowed in the bushy join reorder algorithm, "
+                                    + "otherwise the left-deep join reorder algorithm will be used. The search "
+                                    + "space of bushy join reorder algorithm will increase with the increase of "
+                                    + "this threshold value, so this threshold is not recommended to be set too "
+                                    + "large. The default value is 12.");
+
     @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH)
     public static final ConfigOption<Boolean> TABLE_OPTIMIZER_MULTIPLE_INPUT_ENABLED =
             key("table.optimizer.multiple-input-enabled")
@@ -152,6 +170,64 @@ public class OptimizerConfigOptions {
                     .withDescription(
                             "When it is true, the optimizer will try to push dynamic filtering into scan table source,"
                                     + " the irrelevant partitions or input data will be filtered to reduce scan I/O in runtime.");
+
+    @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH)
+    public static final ConfigOption<Boolean> TABLE_OPTIMIZER_RUNTIME_FILTER_ENABLED =
+            key("table.optimizer.runtime-filter.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "A flag to enable or disable the runtime filter. "
+                                    + "When it is true, the optimizer will try to inject a runtime filter for eligible join.");
+
+    /**
+     * The data volume of build side needs to be under this value. If the data volume of build side
+     * is too large, the building overhead will be too large, which may lead to a negative impact on
+     * job performance.
+     */
+    @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH)
+    public static final ConfigOption<MemorySize>
+            TABLE_OPTIMIZER_RUNTIME_FILTER_MAX_BUILD_DATA_SIZE =
+                    key("table.optimizer.runtime-filter.max-build-data-size")
+                            .memoryType()
+                            .defaultValue(MemorySize.parse("150m"))
+                            .withDescription(
+                                    "Max data volume threshold of the runtime filter build side. "
+                                            + "Estimated data volume needs to be under this value to try to inject runtime filter.");
+
+    /**
+     * The data volume of probe side needs to be over this value. If the data volume on the probe
+     * side is too small, the overhead of building runtime filter is not worth it.
+     */
+    @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH)
+    public static final ConfigOption<MemorySize>
+            TABLE_OPTIMIZER_RUNTIME_FILTER_MIN_PROBE_DATA_SIZE =
+                    key("table.optimizer.runtime-filter.min-probe-data-size")
+                            .memoryType()
+                            .defaultValue(MemorySize.parse("10g"))
+                            .withDescription(
+                                    Description.builder()
+                                            .text(
+                                                    "Min data volume threshold of the runtime filter probe side. "
+                                                            + "Estimated data volume needs to be over this value to try to inject runtime filter."
+                                                            + "This value should be larger than %s.",
+                                                    code(
+                                                            TABLE_OPTIMIZER_RUNTIME_FILTER_MAX_BUILD_DATA_SIZE
+                                                                    .key()))
+                                            .build());
+
+    /**
+     * The filtering ratio of runtime filter needs to be over this value. A low filter rate is not
+     * worth it to build runtime filter.
+     */
+    @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH)
+    public static final ConfigOption<Double> TABLE_OPTIMIZER_RUNTIME_FILTER_MIN_FILTER_RATIO =
+            key("table.optimizer.runtime-filter.min-filter-ratio")
+                    .doubleType()
+                    .defaultValue(0.5)
+                    .withDescription(
+                            "Min filter ratio threshold of the runtime filter. "
+                                    + "Estimated filter ratio needs to be over this value to try to inject runtime filter.");
 
     @Documentation.TableOption(execMode = Documentation.ExecMode.STREAMING)
     public static final ConfigOption<NonDeterministicUpdateStrategy>
@@ -185,6 +261,56 @@ public class OptimizerConfigOptions {
                                             .text(
                                                     "Default value is `IGNORE`, the optimizer does no changes.")
                                             .build());
+
+    @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH_STREAMING)
+    public static final ConfigOption<Boolean> TABLE_OPTIMIZER_SQL2REL_PROJECT_MERGE_ENABLED =
+            key("table.optimizer.sql2rel.project-merge.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDeprecatedKeys("table.optimizer.sql-to-rel.project.merge.enabled")
+                    .withDescription(
+                            Description.builder()
+                                    .text(
+                                            "If set to true, it will merge projects when converting SqlNode to RelNode.")
+                                    .linebreak()
+                                    .text(
+                                            "Note: it is not recommended to turn on unless you are aware of possible side effects, "
+                                                    + "such as causing the output of certain non-deterministic expressions to not meet expectations(see FLINK-20887).")
+                                    .build());
+
+    @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH_STREAMING)
+    public static final ConfigOption<Boolean> TABLE_OPTIMIZER_UNIONALL_AS_BREAKPOINT_ENABLED =
+            key("table.optimizer.union-all-as-breakpoint-enabled")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription(
+                            "When true, the optimizer will breakup the graph at union-all node "
+                                    + "when it's a breakpoint. When false, the optimizer will skip the union-all node "
+                                    + "even it's a breakpoint, and will try find the breakpoint in its inputs.");
+
+    @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH_STREAMING)
+    public static final ConfigOption<Boolean>
+            TABLE_OPTIMIZER_REUSE_OPTIMIZE_BLOCK_WITH_DIGEST_ENABLED =
+                    key("table.optimizer.reuse-optimize-block-with-digest-enabled")
+                            .booleanType()
+                            .defaultValue(false)
+                            .withDescription(
+                                    "When true, the optimizer will try to find out duplicated sub-plans by "
+                                            + "digest to build optimize blocks (a.k.a. common sub-graphs). "
+                                            + "Each optimize block will be optimized independently.");
+
+    @Documentation.TableOption(execMode = Documentation.ExecMode.STREAMING)
+    public static final ConfigOption<Boolean> TABLE_OPTIMIZER_INCREMENTAL_AGG_ENABLED =
+            key("table.optimizer.incremental-agg-enabled")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription(
+                            "When both local aggregation and distinct aggregation splitting "
+                                    + "are enabled, a distinct aggregation will be optimized into four aggregations, "
+                                    + "i.e., local-agg1, global-agg1, local-agg2, and global-agg2. We can combine global-agg1 "
+                                    + "and local-agg2 into a single operator (we call it incremental agg because "
+                                    + "it receives incremental accumulators and outputs incremental results). "
+                                    + "In this way, we can reduce some state overhead and resources. Default is enabled.");
 
     /** Strategy for handling non-deterministic updates. */
     @PublicEvolving

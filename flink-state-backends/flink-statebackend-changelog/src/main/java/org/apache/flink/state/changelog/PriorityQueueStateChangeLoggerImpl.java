@@ -18,11 +18,11 @@
 package org.apache.flink.state.changelog;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.core.memory.DataOutputViewStreamWrapper;
+import org.apache.flink.core.memory.DataOutputView;
+import org.apache.flink.runtime.state.InternalKeyContext;
 import org.apache.flink.runtime.state.RegisteredPriorityQueueStateBackendMetaInfo;
 import org.apache.flink.runtime.state.RegisteredStateMetaInfoBase;
 import org.apache.flink.runtime.state.changelog.StateChangelogWriter;
-import org.apache.flink.runtime.state.heap.InternalKeyContext;
 
 import java.io.IOException;
 
@@ -42,13 +42,12 @@ class PriorityQueueStateChangeLoggerImpl<K, T> extends AbstractStateChangeLogger
     }
 
     @Override
-    protected void serializeValue(T t, DataOutputViewStreamWrapper out) throws IOException {
+    protected void serializeValue(T t, DataOutputView out) throws IOException {
         serializer.serialize(t, out);
     }
 
     @Override
-    protected void serializeScope(Void unused, DataOutputViewStreamWrapper out)
-            throws IOException {}
+    protected void serializeScope(Void unused, DataOutputView out) throws IOException {}
 
     @Override
     protected PriorityQueueStateChangeLoggerImpl<K, T> setMetaInfo(

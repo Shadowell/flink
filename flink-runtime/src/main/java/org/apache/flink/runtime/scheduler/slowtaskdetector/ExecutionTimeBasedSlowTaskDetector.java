@@ -29,7 +29,9 @@ import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
 import org.apache.flink.runtime.executiongraph.ExecutionGraph;
 import org.apache.flink.runtime.executiongraph.ExecutionJobVertex;
 import org.apache.flink.runtime.executiongraph.ExecutionVertex;
+import org.apache.flink.runtime.rpc.FatalErrorHandler;
 import org.apache.flink.runtime.scheduler.strategy.ExecutionVertexID;
+import org.apache.flink.util.FatalExitExceptionHandler;
 import org.apache.flink.util.IterableUtils;
 
 import java.util.Arrays;
@@ -41,7 +43,9 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
+import static org.apache.flink.runtime.executiongraph.ExecutionVertex.NUM_BYTES_UNKNOWN;
 import static org.apache.flink.util.Preconditions.checkArgument;
+import static org.apache.flink.util.Preconditions.checkNotNull;
 import static org.apache.flink.util.Preconditions.checkState;
 
 /** The slow task detector which detects slow tasks based on their execution time. */
@@ -56,6 +60,11 @@ public class ExecutionTimeBasedSlowTaskDetector implements SlowTaskDetector {
     private final double baselineMultiplier;
 
     private ScheduledFuture<?> scheduledDetectionFuture;
+
+    private FatalErrorHandler fatalErrorHandler =
+            throwable ->
+                    FatalExitExceptionHandler.INSTANCE.uncaughtException(
+                            Thread.currentThread(), throwable);
 
     public ExecutionTimeBasedSlowTaskDetector(Configuration configuration) {
         this.checkIntervalMillis =
@@ -77,7 +86,7 @@ public class ExecutionTimeBasedSlowTaskDetector implements SlowTaskDetector {
                 this.baselineLowerBoundMillis);
 
         this.baselineRatio =
-                configuration.getDouble(SlowTaskDetectorOptions.EXECUTION_TIME_BASELINE_RATIO);
+                configuration.get(SlowTaskDetectorOptions.EXECUTION_TIME_BASELINE_RATIO);
         checkArgument(
                 baselineRatio >= 0 && this.baselineRatio < 1,
                 "The configuration {} should be in [0, 1), but is {}.",
@@ -85,12 +94,19 @@ public class ExecutionTimeBasedSlowTaskDetector implements SlowTaskDetector {
                 this.baselineRatio);
 
         this.baselineMultiplier =
-                configuration.getDouble(SlowTaskDetectorOptions.EXECUTION_TIME_BASELINE_MULTIPLIER);
+                configuration.get(SlowTaskDetectorOptions.EXECUTION_TIME_BASELINE_MULTIPLIER);
         checkArgument(
                 baselineMultiplier > 0,
                 "The configuration {} should be positive, but is {}.",
                 SlowTaskDetectorOptions.EXECUTION_TIME_BASELINE_MULTIPLIER.key(),
                 this.baselineMultiplier);
+    }
+
+    @VisibleForTesting
+    ExecutionTimeBasedSlowTaskDetector(
+            Configuration configuration, FatalErrorHandler fatalErrorHandler) {
+        this(configuration);
+        this.fatalErrorHandler = checkNotNull(fatalErrorHandler);
     }
 
     @Override
@@ -109,7 +125,11 @@ public class ExecutionTimeBasedSlowTaskDetector implements SlowTaskDetector {
         this.scheduledDetectionFuture =
                 mainThreadExecutor.schedule(
                         () -> {
-                            listener.notifySlowTasks(findSlowTasks(executionGraph));
+                            try {
+                                listener.notifySlowTasks(findSlowTasks(executionGraph));
+                            } catch (Throwable throwable) {
+                                fatalErrorHandler.onFatalError(throwable);
+                            }
                             scheduleTask(executionGraph, listener, mainThreadExecutor);
                         },
                         checkIntervalMillis,
@@ -118,8 +138,9 @@ public class ExecutionTimeBasedSlowTaskDetector implements SlowTaskDetector {
 
     /**
      * Given that the parallelism is N and the ratio is R, define T as the median of the first N*R
-     * finished tasks' execution time. The baseline will be T*M, where M is the multiplier. A task
-     * will be identified as slow if its execution time is longer than the baseline.
+     * finished tasks' execution time. The baseline will be T*M, where M is the multiplier. Note
+     * that the execution time will be weighted with its input bytes when calculating the median. A
+     * task will be identified as slow if its weighted execution time is longer than the baseline.
      */
     @VisibleForTesting
     Map<ExecutionVertexID, Collection<ExecutionAttemptID>> findSlowTasks(
@@ -131,7 +152,7 @@ public class ExecutionTimeBasedSlowTaskDetector implements SlowTaskDetector {
         final List<ExecutionJobVertex> jobVerticesToCheck = getJobVerticesToCheck(executionGraph);
 
         for (ExecutionJobVertex ejv : jobVerticesToCheck) {
-            final long baseline = getBaseline(ejv, currentTimeMillis);
+            final ExecutionTimeWithInputBytes baseline = getBaseline(ejv, currentTimeMillis);
 
             for (ExecutionVertex ev : ejv.getTaskVertices()) {
                 if (ev.getExecutionState().isTerminal()) {
@@ -168,21 +189,25 @@ public class ExecutionTimeBasedSlowTaskDetector implements SlowTaskDetector {
         return (double) finishedCount / executionJobVertex.getTaskVertices().length;
     }
 
-    private long getBaseline(
+    private ExecutionTimeWithInputBytes getBaseline(
             final ExecutionJobVertex executionJobVertex, final long currentTimeMillis) {
-        final long executionTimeMedian =
+        final ExecutionTimeWithInputBytes weightedExecutionTimeMedian =
                 calculateFinishedTaskExecutionTimeMedian(executionJobVertex, currentTimeMillis);
-        return (long) Math.max(baselineLowerBoundMillis, executionTimeMedian * baselineMultiplier);
+        long multipliedBaseline =
+                (long) (weightedExecutionTimeMedian.getExecutionTime() * baselineMultiplier);
+
+        return new ExecutionTimeWithInputBytes(
+                multipliedBaseline, weightedExecutionTimeMedian.getInputBytes());
     }
 
-    private long calculateFinishedTaskExecutionTimeMedian(
+    private ExecutionTimeWithInputBytes calculateFinishedTaskExecutionTimeMedian(
             final ExecutionJobVertex executionJobVertex, final long currentTime) {
 
         final int baselineExecutionCount =
                 (int) Math.round(executionJobVertex.getParallelism() * baselineRatio);
 
         if (baselineExecutionCount == 0) {
-            return 0;
+            return new ExecutionTimeWithInputBytes(0L, NUM_BYTES_UNKNOWN);
         }
 
         final List<Execution> finishedExecutions =
@@ -193,9 +218,9 @@ public class ExecutionTimeBasedSlowTaskDetector implements SlowTaskDetector {
 
         checkState(finishedExecutions.size() >= baselineExecutionCount);
 
-        final List<Long> firstFinishedExecutions =
+        final List<ExecutionTimeWithInputBytes> firstFinishedExecutions =
                 finishedExecutions.stream()
-                        .map(e -> getExecutionTime(e, currentTime))
+                        .map(e -> getExecutionTimeAndInputBytes(e, currentTime))
                         .sorted()
                         .limit(baselineExecutionCount)
                         .collect(Collectors.toList());
@@ -204,10 +229,28 @@ public class ExecutionTimeBasedSlowTaskDetector implements SlowTaskDetector {
     }
 
     private List<ExecutionAttemptID> findExecutionsExceedingBaseline(
-            Collection<Execution> executions, long baseline, long currentTimeMillis) {
+            Collection<Execution> executions,
+            ExecutionTimeWithInputBytes baseline,
+            long currentTimeMillis) {
         return executions.stream()
-                .filter(e -> !e.getState().isTerminal() && e.getState() != ExecutionState.CANCELING)
-                .filter(e -> getExecutionTime(e, currentTimeMillis) >= baseline)
+                .filter(
+                        // We will filter out tasks that are in the CREATED state, as we do not
+                        // allow speculative execution for them because they have not been
+                        // scheduled.
+                        // However, for tasks that are already in the SCHEDULED state, we allow
+                        // speculative execution to provide the capability of parallel execution
+                        // running.
+                        e ->
+                                !e.getState().isTerminal()
+                                        && e.getState() != ExecutionState.CANCELING
+                                        && e.getState() != ExecutionState.CREATED)
+                .filter(
+                        e -> {
+                            ExecutionTimeWithInputBytes timeWithBytes =
+                                    getExecutionTimeAndInputBytes(e, currentTimeMillis);
+                            return timeWithBytes.getExecutionTime() >= baselineLowerBoundMillis
+                                    && timeWithBytes.compareTo(baseline) >= 0;
+                        })
                 .map(Execution::getAttemptId)
                 .collect(Collectors.toList());
     }
@@ -225,10 +268,70 @@ public class ExecutionTimeBasedSlowTaskDetector implements SlowTaskDetector {
         }
     }
 
+    private long getExecutionInputBytes(final Execution execution) {
+        return execution.getVertex().getInputBytes();
+    }
+
+    private ExecutionTimeWithInputBytes getExecutionTimeAndInputBytes(
+            Execution execution, final long currentTime) {
+        long executionTime = getExecutionTime(execution, currentTime);
+        long executionInputBytes = getExecutionInputBytes(execution);
+
+        return new ExecutionTimeWithInputBytes(executionTime, executionInputBytes);
+    }
+
     @Override
     public void stop() {
         if (scheduledDetectionFuture != null) {
             scheduledDetectionFuture.cancel(false);
+        }
+    }
+
+    @VisibleForTesting
+    ScheduledFuture<?> getScheduledDetectionFuture() {
+        return scheduledDetectionFuture;
+    }
+
+    /** This class defines the execution time and input bytes for an execution. */
+    @VisibleForTesting
+    static class ExecutionTimeWithInputBytes implements Comparable<ExecutionTimeWithInputBytes> {
+
+        private final long executionTime;
+        private final long inputBytes;
+
+        public ExecutionTimeWithInputBytes(long executionTime, long inputBytes) {
+            this.executionTime = executionTime;
+            this.inputBytes = inputBytes;
+        }
+
+        public long getExecutionTime() {
+            return executionTime;
+        }
+
+        public long getInputBytes() {
+            return inputBytes;
+        }
+
+        @Override
+        public int compareTo(ExecutionTimeWithInputBytes other) {
+            // In order to ensure the stability of comparison, it requires both elements' input
+            // bytes should be both valid or both UNKNOWN, unless the execution time is 0.
+            // (When baselineRatio is 0, a baseline of 0 execution time will be generated.)
+            if (inputBytes == NUM_BYTES_UNKNOWN || other.getInputBytes() == NUM_BYTES_UNKNOWN) {
+                if (inputBytes == NUM_BYTES_UNKNOWN && other.getInputBytes() == NUM_BYTES_UNKNOWN
+                        || executionTime == 0
+                        || other.executionTime == 0) {
+                    return (int) (executionTime - other.getExecutionTime());
+                } else {
+                    throw new IllegalArgumentException(
+                            "Both compared elements should be NUM_BYTES_UNKNOWN.");
+                }
+            }
+
+            return Double.compare(
+                    (double) executionTime / Math.max(inputBytes, Double.MIN_VALUE),
+                    (double) other.getExecutionTime()
+                            / Math.max(other.getInputBytes(), Double.MIN_VALUE));
         }
     }
 }

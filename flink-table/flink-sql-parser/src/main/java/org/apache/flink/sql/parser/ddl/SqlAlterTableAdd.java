@@ -18,7 +18,6 @@
 
 package org.apache.flink.sql.parser.ddl;
 
-import org.apache.flink.sql.parser.SqlUnparseUtils;
 import org.apache.flink.sql.parser.ddl.constraint.SqlTableConstraint;
 
 import org.apache.calcite.sql.SqlIdentifier;
@@ -31,7 +30,7 @@ import javax.annotation.Nullable;
 import java.util.List;
 
 /**
- * SqlNode to describe ALTER TABLE table_name ADD column/constraint/watermark clause.
+ * SqlNode to describe ALTER TABLE [IF EXISTS] table_name ADD column/constraint/watermark clause.
  *
  * <p>Example: DDL like the below for add column/constraint/watermark.
  *
@@ -56,16 +55,17 @@ public class SqlAlterTableAdd extends SqlAlterTableSchema {
             SqlIdentifier tableName,
             SqlNodeList addedColumns,
             List<SqlTableConstraint> constraint,
-            @Nullable SqlWatermark sqlWatermark) {
-        super(pos, tableName, addedColumns, constraint, sqlWatermark);
+            @Nullable SqlWatermark sqlWatermark,
+            @Nullable SqlDistribution distribution,
+            boolean ifTableExists) {
+        super(pos, tableName, addedColumns, constraint, sqlWatermark, distribution, ifTableExists);
     }
 
     @Override
     public void unparse(SqlWriter writer, int leftPrec, int rightPrec) {
         super.unparse(writer, leftPrec, rightPrec);
         writer.keyword("ADD");
-        // unparse table schema
-        SqlUnparseUtils.unparseTableSchema(
-                writer, leftPrec, rightPrec, columnList, constraints, watermark);
+        // unparse table schema and distribution
+        unparseSchemaAndDistribution(writer, leftPrec, rightPrec);
     }
 }

@@ -19,16 +19,14 @@
 package org.apache.flink.api.scala.typeutils;
 
 import org.apache.flink.FlinkVersion;
-import org.apache.flink.api.common.ExecutionConfig;
+import org.apache.flink.api.common.serialization.SerializerConfigImpl;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.api.common.typeutils.TypeSerializerMatchers;
+import org.apache.flink.api.common.typeutils.TypeSerializerConditions;
 import org.apache.flink.api.common.typeutils.TypeSerializerSchemaCompatibility;
 import org.apache.flink.api.common.typeutils.TypeSerializerUpgradeTestBase;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 
-import org.hamcrest.Matcher;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.assertj.core.api.Condition;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -37,32 +35,22 @@ import java.util.Objects;
 import scala.util.Failure;
 import scala.util.Try;
 
-import static org.hamcrest.Matchers.is;
-
 /** A {@link TypeSerializerUpgradeTestBase} for {@link TrySerializer}. */
-@RunWith(Parameterized.class)
-public class ScalaTrySerializerUpgradeTest
+class ScalaTrySerializerUpgradeTest
         extends TypeSerializerUpgradeTestBase<Try<String>, Try<String>> {
 
     private static final String SPEC_NAME = "scala-try-serializer";
 
-    public ScalaTrySerializerUpgradeTest(
-            TestSpecification<Try<String>, Try<String>> testSpecification) {
-        super(testSpecification);
-    }
-
-    @Parameterized.Parameters(name = "Test Specification = {0}")
-    public static Collection<TestSpecification<?, ?>> testSpecifications() throws Exception {
+    public Collection<TestSpecification<?, ?>> createTestSpecifications(FlinkVersion flinkVersion)
+            throws Exception {
 
         ArrayList<TestSpecification<?, ?>> testSpecifications = new ArrayList<>();
-        for (FlinkVersion flinkVersion : MIGRATION_VERSIONS) {
-            testSpecifications.add(
-                    new TestSpecification<>(
-                            SPEC_NAME,
-                            flinkVersion,
-                            ScalaTrySerializerSetup.class,
-                            ScalaTrySerializerVerifier.class));
-        }
+        testSpecifications.add(
+                new TestSpecification<>(
+                        SPEC_NAME,
+                        flinkVersion,
+                        ScalaTrySerializerSetup.class,
+                        ScalaTrySerializerVerifier.class));
         return testSpecifications;
     }
 
@@ -77,7 +65,7 @@ public class ScalaTrySerializerUpgradeTest
             implements TypeSerializerUpgradeTestBase.PreUpgradeSetup<Try<String>> {
         @Override
         public TypeSerializer<Try<String>> createPriorSerializer() {
-            return new TrySerializer<>(StringSerializer.INSTANCE, new ExecutionConfig());
+            return new TrySerializer<>(StringSerializer.INSTANCE, new SerializerConfigImpl());
         }
 
         @SuppressWarnings("unchecked")
@@ -95,19 +83,23 @@ public class ScalaTrySerializerUpgradeTest
             implements TypeSerializerUpgradeTestBase.UpgradeVerifier<Try<String>> {
         @Override
         public TypeSerializer<Try<String>> createUpgradedSerializer() {
-            return new TrySerializer<>(StringSerializer.INSTANCE, new ExecutionConfig());
+            return new TrySerializer<>(StringSerializer.INSTANCE, new SerializerConfigImpl());
         }
 
         @SuppressWarnings("unchecked")
         @Override
-        public Matcher<Try<String>> testDataMatcher() {
-            return is(new Failure(new SpecifiedException("Specified exception for ScalaTry.")));
+        public Condition<Try<String>> testDataCondition() {
+            return new Condition<>(
+                    t ->
+                            new Failure(new SpecifiedException("Specified exception for ScalaTry."))
+                                    .equals(t),
+                    "is a Failure with a specified exception");
         }
 
         @Override
-        public Matcher<TypeSerializerSchemaCompatibility<Try<String>>> schemaCompatibilityMatcher(
-                FlinkVersion version) {
-            return TypeSerializerMatchers.isCompatibleAsIs();
+        public Condition<TypeSerializerSchemaCompatibility<Try<String>>>
+                schemaCompatibilityCondition(FlinkVersion version) {
+            return TypeSerializerConditions.isCompatibleAsIs();
         }
     }
 

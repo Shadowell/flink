@@ -18,8 +18,8 @@
 
 package org.apache.flink.table.runtime.operators.join;
 
+import org.apache.flink.api.common.functions.DefaultOpenContext;
 import org.apache.flink.configuration.AlgorithmOptions;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.operators.BoundedMultiInput;
 import org.apache.flink.streaming.api.operators.InputSelectable;
 import org.apache.flink.streaming.api.operators.InputSelection;
@@ -114,18 +114,19 @@ public abstract class HashJoinOperator extends TableStreamOperator<RowData>
                 getContainingTask()
                         .getEnvironment()
                         .getTaskConfiguration()
-                        .getBoolean(AlgorithmOptions.HASH_JOIN_BLOOM_FILTERS);
+                        .get(AlgorithmOptions.HASH_JOIN_BLOOM_FILTERS);
 
-        int parallel = getRuntimeContext().getNumberOfParallelSubtasks();
+        int parallel = getRuntimeContext().getTaskInfo().getNumberOfParallelSubtasks();
 
         this.condition = parameter.condFuncCode.newInstance(cl);
         condition.setRuntimeContext(getRuntimeContext());
-        condition.open(new Configuration());
+        condition.open(DefaultOpenContext.INSTANCE);
 
         this.table =
                 new BinaryHashTable(
-                        getContainingTask().getJobConfiguration(),
                         getContainingTask(),
+                        parameter.compressionEnabled,
+                        parameter.compressionBlockSize,
                         buildSerializer,
                         probeSerializer,
                         parameter.buildProjectionCode.newInstance(cl),
@@ -322,6 +323,8 @@ public abstract class HashJoinOperator extends TableStreamOperator<RowData>
     public static HashJoinOperator newHashJoinOperator(
             HashJoinType type,
             boolean leftIsBuild,
+            boolean compressionEnable,
+            int compressionBlockSize,
             GeneratedJoinCondition condFuncCode,
             boolean reverseJoinFunction,
             boolean[] filterNullKeys,
@@ -337,6 +340,8 @@ public abstract class HashJoinOperator extends TableStreamOperator<RowData>
                 new HashJoinParameter(
                         type,
                         leftIsBuild,
+                        compressionEnable,
+                        compressionBlockSize,
                         condFuncCode,
                         reverseJoinFunction,
                         filterNullKeys,
@@ -372,6 +377,8 @@ public abstract class HashJoinOperator extends TableStreamOperator<RowData>
     static class HashJoinParameter implements Serializable {
         HashJoinType type;
         boolean leftIsBuild;
+        boolean compressionEnabled;
+        int compressionBlockSize;
         GeneratedJoinCondition condFuncCode;
         boolean reverseJoinFunction;
         boolean[] filterNullKeys;
@@ -387,6 +394,8 @@ public abstract class HashJoinOperator extends TableStreamOperator<RowData>
         HashJoinParameter(
                 HashJoinType type,
                 boolean leftIsBuild,
+                boolean compressionEnabled,
+                int compressionBlockSize,
                 GeneratedJoinCondition condFuncCode,
                 boolean reverseJoinFunction,
                 boolean[] filterNullKeys,
@@ -400,6 +409,8 @@ public abstract class HashJoinOperator extends TableStreamOperator<RowData>
                 SortMergeJoinFunction sortMergeJoinFunction) {
             this.type = type;
             this.leftIsBuild = leftIsBuild;
+            this.compressionEnabled = compressionEnabled;
+            this.compressionBlockSize = compressionBlockSize;
             this.condFuncCode = condFuncCode;
             this.reverseJoinFunction = reverseJoinFunction;
             this.filterNullKeys = filterNullKeys;

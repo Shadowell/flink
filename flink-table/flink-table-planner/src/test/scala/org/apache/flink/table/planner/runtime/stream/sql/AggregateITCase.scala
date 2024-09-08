@@ -26,8 +26,9 @@ import org.apache.flink.streaming.api.scala.DataStream
 import org.apache.flink.table.api.{Types, _}
 import org.apache.flink.table.api.bridge.scala._
 import org.apache.flink.table.api.internal.TableEnvironmentInternal
+import org.apache.flink.table.planner.factories.TestValuesTableFactory
 import org.apache.flink.table.planner.factories.TestValuesTableFactory.{changelogRow, registerData}
-import org.apache.flink.table.planner.plan.utils.JavaUserDefinedAggFunctions.VarSumAggFunction
+import org.apache.flink.table.planner.plan.utils.JavaUserDefinedAggFunctions.{UserDefinedObjectUDAF, UserDefinedObjectUDAF2, VarSumAggFunction}
 import org.apache.flink.table.planner.runtime.batch.sql.agg.{MyPojoAggFunction, VarArgsAggFunction}
 import org.apache.flink.table.planner.runtime.utils._
 import org.apache.flink.table.planner.runtime.utils.JavaUserDefinedAggFunctions.OverloadedMaxFunction
@@ -39,21 +40,22 @@ import org.apache.flink.table.planner.runtime.utils.UserDefinedFunctionTestUtils
 import org.apache.flink.table.planner.utils.DateTimeTestUtil.{localDate, localDateTime, localTime => mLocalTime}
 import org.apache.flink.table.runtime.functions.aggregate.{ListAggWithRetractAggFunction, ListAggWsWithRetractAggFunction}
 import org.apache.flink.table.runtime.typeutils.BigDecimalTypeInfo
+import org.apache.flink.testutils.junit.extensions.parameterized.ParameterizedTestExtension
 import org.apache.flink.types.Row
 
-import org.junit._
-import org.junit.Assert.assertEquals
-import org.junit.runner.RunWith
-import org.junit.runners.Parameterized
+import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.{Disabled, TestTemplate}
+import org.junit.jupiter.api.extension.ExtendWith
 
 import java.lang.{Integer => JInt, Long => JLong}
 import java.math.{BigDecimal => JBigDecimal}
+import java.time.Duration
 
 import scala.collection.{mutable, Seq}
 import scala.math.BigDecimal.double2bigDecimal
 import scala.util.Random
 
-@RunWith(classOf[Parameterized])
+@ExtendWith(Array(classOf[ParameterizedTestExtension]))
 class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: StateBackendMode)
   extends StreamingWithAggTestBase(aggMode, miniBatch, backend) {
 
@@ -69,7 +71,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     (20000L, 20, "Hello World")
   )
 
-  @Test
+  @TestTemplate
   def testEmptyInputAggregation(): Unit = {
     val data = new mutable.MutableList[(Int, Int)]
     data.+=((1, 1))
@@ -77,7 +79,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     data.+=((3, 3))
 
     val t = failingDataSource(data).toTable(tEnv, 'a, 'b)
-    tEnv.registerTable("T", t)
+    tEnv.createTemporaryView("T", t)
 
     val t1 = tEnv.sqlQuery(
       "select sum(a), avg(a), min(a), count(a), count(1) from T where a > 9999 group by b")
@@ -85,10 +87,59 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     t1.toRetractStream[Row].addSink(sink)
     env.execute()
     val expected = List()
-    assertEquals(expected, sink.getRetractResults)
+    assertThat(sink.getRetractResults).isEqualTo(expected)
   }
 
-  @Test
+  @TestTemplate
+  def testMaxAggRetractWithCondition(): Unit = {
+    val data = new mutable.MutableList[(Int, Int)]
+    data.+=((1, 10))
+    data.+=((1, 10))
+    data.+=((2, 5))
+    data.+=((1, 10))
+
+    val t = failingDataSource(data).toTable(tEnv, 'id, 'price)
+    tEnv.createTemporaryView("T", t)
+
+    val sql =
+      """
+        |SELECT MAX(price) FROM(
+        |   SELECT id, count(*) as c, price FROM T GROUP BY id, price)
+        |WHERE c > 0 and c < 3""".stripMargin
+
+    val sink = new TestingRetractSink
+    tEnv.sqlQuery(sql).toRetractStream[Row].addSink(sink).setParallelism(1)
+    env.execute()
+
+    val expected = List("5")
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
+  }
+
+  @TestTemplate
+  def testMinAggRetractWithCondition(): Unit = {
+    val data = new mutable.MutableList[(Int, Int)]
+    data.+=((1, 5))
+    data.+=((2, 6))
+    data.+=((1, 5))
+
+    val t = failingDataSource(data).toTable(tEnv, 'id, 'price)
+    tEnv.createTemporaryView("T", t)
+
+    val sql =
+      """
+        |SELECT MIN(price) FROM(
+        |   SELECT id, count(*) as c, price FROM T GROUP BY id, price)
+        |WHERE c < 2""".stripMargin
+
+    val sink = new TestingRetractSink
+    tEnv.sqlQuery(sql).toRetractStream[Row].addSink(sink).setParallelism(1)
+    env.execute()
+
+    val expected = List("6")
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
+  }
+
+  @TestTemplate
   def testShufflePojo(): Unit = {
     val data = new mutable.MutableList[(Int, Int)]
     data.+=((1, 1))
@@ -96,8 +147,8 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     data.+=((3, 3))
 
     val t = failingDataSource(data).toTable(tEnv, 'a, 'b)
-    tEnv.registerTable("T", t)
-    tEnv.registerFunction("pojoFunc", MyToPojoFunc)
+    tEnv.createTemporaryView("T", t)
+    tEnv.createTemporaryFunction("pojoFunc", MyToPojoFunc)
 
     val t1 =
       tEnv.sqlQuery("select sum(a), avg(a), min(a), count(a), count(1) from T group by pojoFunc(b)")
@@ -105,11 +156,11 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     t1.toRetractStream[Row].addSink(sink)
     env.execute()
     val expected = List("1,1,1,1,1", "2,2,2,1,1", "3,3,3,1,1")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Ignore("[FLINK-12215] Fix this when introduce SqlProcessFunction.")
-  @Test
+  @Disabled("[FLINK-12215] Fix this when introduce SqlProcessFunction.")
+  @TestTemplate
   def testEmptyInputAggregationWithoutGroupBy(): Unit = {
     val data = new mutable.MutableList[(Int, Int)]
     data.+=((1, 1))
@@ -117,7 +168,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     data.+=((3, 3))
 
     val t = failingDataSource(data).toTable(tEnv, 'a, 'b)
-    tEnv.registerTable("T", t)
+    tEnv.createTemporaryView("T", t)
 
     val t1 =
       tEnv.sqlQuery("select sum(a), avg(a), min(a), count(a), count(1) from T where a > 9999")
@@ -125,10 +176,10 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     t1.toRetractStream[Row].addSink(sink).setParallelism(1)
     env.execute()
     val expected = List("null,null,null,0,0")
-    assertEquals(expected, sink.getRetractResults)
+    assertThat(sink.getRetractResults).isEqualTo(expected)
   }
 
-  @Test
+  @TestTemplate
   def testAggregationWithoutWatermark(): Unit = {
     // NOTE: Different from AggregateITCase, we do not set stream time characteristic
     // of environment to event time, so that emitWatermark() actually does nothing.
@@ -140,17 +191,17 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     data.+=((3, 3))
 
     val t = failingDataSource(data).toTable(tEnv, 'a, 'b)
-    tEnv.registerTable("T", t)
+    tEnv.createTemporaryView("T", t)
 
     val t1 = tEnv.sqlQuery("select sum(a), avg(a), min(a), count(a), count(1) from T")
     val sink = new TestingRetractSink
     t1.toRetractStream[Row].addSink(sink).setParallelism(1)
     env.execute()
     val expected = List("6,2,1,3,3")
-    assertEquals(expected, sink.getRetractResults)
+    assertThat(sink.getRetractResults).isEqualTo(expected)
   }
 
-  @Test
+  @TestTemplate
   def testDistinctGroupBy(): Unit = {
 
     val sqlQuery =
@@ -162,7 +213,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
         "GROUP BY b"
 
     val t = failingDataSource(TestData.tupleData3).toTable(tEnv, 'a, 'b, 'c)
-    tEnv.registerTable("MyTable", t)
+    tEnv.createTemporaryView("MyTable", t)
 
     val result = tEnv.sqlQuery(sqlQuery).toRetractStream[Row]
     val sink = new TestingRetractSink
@@ -171,10 +222,10 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
 
     val expected = List("1,3,1,1", "2,15,1,2", "3,45,3,3", "4,102,1,4", "5,195,1,5", "6,333,1,6")
 
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testCountDistinct(): Unit = {
     val ids = List(1, 2, 2, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 5)
 
@@ -292,10 +343,10 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
       "3,3,3,3,3,3,3,3",
       "4,2,2,2,2,2,2,2",
       "5,4,4,4,4,4,4,4")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testDistinctWithRetract(): Unit = {
     // this case covers LongArrayValueWithRetractionGenerator and LongValueWithRetractionGenerator
     val data = new mutable.MutableList[(Int, Long, String)]
@@ -321,7 +372,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     // 5, 2
 
     val t = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c)
-    tEnv.registerTable("T", t)
+    tEnv.createTemporaryView("T", t)
 
     val sql =
       """
@@ -344,10 +395,10 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.execute()
 
     val expected = List("3,9,4,2,3,5")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testDistinctAggregateMoreThan64(): Unit = {
     // this case is used to cover DistinctAggCodeGen#LongArrayValueWithoutRetractionGenerator
     val data = new mutable.MutableList[(Int, Int)]
@@ -357,7 +408,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
       }
     }
     val t = failingDataSource(Random.shuffle(data)).toTable(tEnv, 'a, 'b)
-    tEnv.registerTable("T", t)
+    tEnv.createTemporaryView("T", t)
 
     val distincts = for (i <- 0 until 100) yield {
       s"count(distinct a) filter (where b = $i)"
@@ -376,10 +427,10 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.execute()
 
     val expected = List((1 to 100).reverse.mkString(","))
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testDistinctAggWithNullValues(): Unit = {
     val data = new mutable.MutableList[(Int, Long, String)]
     data.+=((1, 1L, "A"))
@@ -401,8 +452,8 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     data.+=((17, 5L, "B"))
 
     val t = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c)
-    tEnv.registerTable("T", t)
-    tEnv.createTemporarySystemFunction("CntNullNonNull", new CountNullNonNull)
+    tEnv.createTemporaryView("T", t)
+    tEnv.createTemporarySystemFunction("CntNullNonNull", classOf[CountNullNonNull])
     val t1 = tEnv.sqlQuery("SELECT b, count(*), CntNullNonNull(DISTINCT c)  FROM T GROUP BY b")
 
     val sink = new TestingRetractSink
@@ -410,10 +461,10 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.execute()
 
     val expected = List("1,1,1|0", "2,2,1|0", "3,4,1|1", "4,7,4|1", "5,3,2|1")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testPrecisionForSumAggregationOnDecimal(): Unit = {
     var t = tEnv.sqlQuery(
       "select sum(cast(1.03520274 as DECIMAL(32, 8))), " +
@@ -426,7 +477,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     // Use the result precision/scale calculated for sum and don't override with the one calculated
     // for plus(), which "looses" a decimal digit.
     var expected = List("1.03520274,12345.03520274865400000000,12.3456789012345670000000")
-    assertEquals(expected, sink.getRetractResults)
+    assertThat(sink.getRetractResults).isEqualTo(expected)
 
     val data = new mutable.MutableList[Double]
     data.+=(1.11111111)
@@ -434,7 +485,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.setParallelism(1)
 
     t = failingDataSource(data).toTable(tEnv, 'a)
-    tEnv.registerTable("T", t)
+    tEnv.createTemporaryView("T", t)
 
     t = tEnv.sqlQuery("select sum(cast(a as decimal(32, 8))) from T")
     sink = new TestingRetractSink
@@ -444,10 +495,10 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     // Use the result precision/scale calculated for sum and don't override with the one calculated
     // for plus(), which results in loosing a decimal digit.
     expected = List("2.22222222")
-    assertEquals(expected, sink.getRetractResults)
+    assertThat(sink.getRetractResults).isEqualTo(expected)
   }
 
-  @Test
+  @TestTemplate
   def testPrecisionForSumWithRetractAggregationOnDecimal(): Unit = {
     val upsertSourceCurrencyData = List(
       changelogRow(
@@ -524,10 +575,10 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     // Use the result precision/scale calculated for sum and don't override with the one calculated
     // for plus()/minus(), which results in loosing a decimal digit.
     val expected = List("6.41671935,65947.23071935707000000000,609.02867403703699700000")
-    assertEquals(expected, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected)
   }
 
-  @Test
+  @TestTemplate
   def testPrecisionForAvgAggregationOnDecimal(): Unit = {
     var t = tEnv.sqlQuery(
       "select avg(cast(1.03520274 as DECIMAL(32, 8))), " +
@@ -540,7 +591,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     // Use the result precision/scale calculated for AvgAggFunction's SumType and don't override
     // with the one calculated for plus()/minus(), which results in loosing a decimal digit.
     var expected = List("1.03520274,12345.03520274865400000000,12.3456789012345670000000")
-    assertEquals(expected, sink.getRetractResults)
+    assertThat(sink.getRetractResults).isEqualTo(expected)
 
     val data = new mutable.MutableList[Double]
     data.+=(2.22222222)
@@ -548,7 +599,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.setParallelism(1)
 
     t = failingDataSource(data).toTable(tEnv, 'a)
-    tEnv.registerTable("T", t)
+    tEnv.createTemporaryView("T", t)
 
     t = tEnv.sqlQuery("select avg(cast(a as decimal(32, 8))) from T")
     sink = new TestingRetractSink
@@ -558,10 +609,10 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     // Use the result precision/scale calculated for AvgAggFunction's SumType and don't override
     // with the one calculated for plus()/minus(), which result in loosing a decimal digit.
     expected = List("2.77777778")
-    assertEquals(expected, sink.getRetractResults)
+    assertThat(sink.getRetractResults).isEqualTo(expected)
   }
 
-  @Test
+  @TestTemplate
   def testGroupByAgg(): Unit = {
     val data = new mutable.MutableList[(Int, Long, String)]
     data.+=((1, 1L, "A"))
@@ -578,7 +629,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     data.+=((12, 5L, "B"))
 
     val t = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c)
-    tEnv.registerTable("T", t)
+    tEnv.createTemporaryView("T", t)
     val t1 = tEnv.sqlQuery("SELECT b, count(c), sum(a) FROM T GROUP BY b")
 
     val sink = new TestingRetractSink
@@ -586,7 +637,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.execute()
 
     val expected = List("1,1,1", "2,2,5", "3,3,15", "4,4,34", "5,2,23")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
   def testCountWithNullableIfCall(): Unit = {
@@ -605,7 +656,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     data.+=((12, 5L, "B"))
 
     val t = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c)
-    tEnv.registerTable("T", t)
+    tEnv.createTemporaryView("T", t)
     val sql =
       s"""
          |select
@@ -623,10 +674,10 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.execute()
 
     val expected = List("1,1,0,0", "2,2,0,0", "3,3,3,3", "4,4,2,2", "5,2,0,0")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testNestedGroupByAgg(): Unit = {
     val data = new mutable.MutableList[(Int, Long, String)]
     data.+=((1, 1L, "A"))
@@ -643,7 +694,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     data.+=((12, 5L, "B"))
 
     val t = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c)
-    tEnv.registerTable("T", t)
+    tEnv.createTemporaryView("T", t)
 
     val sql =
       """
@@ -661,14 +712,14 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.execute()
 
     val expected = List("1,1,1,1,1", "3,1,15,15,3", "4,1,34,34,4", "7,2,23,5,2")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
   /** test unbounded groupBy (without window) * */
-  @Test
+  @TestTemplate
   def testUnboundedGroupBy(): Unit = {
     val t = failingDataSource(TestData.tupleData3).toTable(tEnv, 'a, 'b, 'c)
-    tEnv.registerTable("MyTable", t)
+    tEnv.createTemporaryView("MyTable", t)
 
     val sqlQuery = "SELECT b, COUNT(a) FROM MyTable GROUP BY b"
 
@@ -677,16 +728,16 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.execute()
 
     val expected = List("1,1", "2,2", "3,3", "4,4", "5,5", "6,6")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testWindowWithUnboundedAgg(): Unit = {
     val t = failingDataSource(TestData.tupleData5.map { case (a, b, c, d, e) => (b, a, c, d, e) })
       .assignTimestampsAndWatermarks(
         new TimestampAndWatermarkWithOffset[(Long, Int, Int, String, Long)](0L))
       .toTable(tEnv, 'rowtime.rowtime, 'a, 'c, 'd, 'e)
-    tEnv.registerTable("MyTable", t)
+    tEnv.createTemporaryView("MyTable", t)
 
     val innerSql =
       """
@@ -706,17 +757,17 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.execute()
 
     val expected = List("1,5,3", "2,5,2")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testListAggWithRetraction(): Unit = {
     env.setParallelism(1) // we have to use parallelism=1 to make sure the result is deterministic
     val dataWithNull = List(("1", "a"), ("1", "b"), ("1", null), ("1", "a"))
 
     val t: DataStream[(String, String)] = failingDataSource(dataWithNull)
     val streamTable = t.toTable(tEnv, 'x, 'y)
-    tEnv.registerTable("T", streamTable)
+    tEnv.createTemporaryView("T", streamTable)
 
     tEnv.executeSql("""
                       |CREATE VIEW view1 AS
@@ -749,16 +800,16 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.execute()
 
     val expected = List("1,[b=1;1;a=2],[b=1,1,a=2]")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testListAggWithNullData(): Unit = {
     val dataWithNull = List((1, 1, null), (2, 1, null), (3, 1, null))
 
     val t: DataStream[(Int, Int, String)] = failingDataSource(dataWithNull)
     val streamTable = t.toTable(tEnv, 'id, 'len, 'content)
-    tEnv.registerTable("T", streamTable)
+    tEnv.createTemporaryView("T", streamTable)
 
     val sqlQuery =
       s"""
@@ -770,16 +821,16 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.execute()
 
     val expected = List("1,null")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testListAggWithoutDelimiterTreatNull(): Unit = {
     val dataWithNull = List((1, 1, null), (2, 1, null), (3, 1, null))
 
     val t: DataStream[(Int, Int, String)] = failingDataSource(dataWithNull)
     val streamTable = t.toTable(tEnv, 'id, 'len, 'content)
-    tEnv.registerTable("T", streamTable)
+    tEnv.createTemporaryView("T", streamTable)
 
     val sqlQuery =
       s"""
@@ -791,10 +842,10 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.execute()
 
     val expected = List("1,null")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testListAggWithDistinct(): Unit = {
     val data = new mutable.MutableList[(Int, Long, String)]
     data.+=((1, 1L, "A"))
@@ -808,20 +859,20 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     data.+=((8, 4L, "EF"))
     data.+=((8, 4L, null))
     val sqlQuery = "SELECT b, LISTAGG(DISTINCT c, '#') FROM MyTable GROUP BY b"
-    tEnv.registerTable("MyTable", failingDataSource(data).toTable(tEnv).as("a", "b", "c"))
+    tEnv.createTemporaryView("MyTable", failingDataSource(data).toTable(tEnv).as("a", "b", "c"))
     val sink = new TestingRetractSink
     tEnv.sqlQuery(sqlQuery).toRetractStream[Row].addSink(sink).setParallelism(1)
     env.execute()
     val expected = List("1,A", "2,B", "3,C#A", "4,EF")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testUnboundedGroupByCollect(): Unit = {
     val sqlQuery = "SELECT b, COLLECT(a) FROM MyTable GROUP BY b"
 
     val t = failingDataSource(TestData.tupleData3).toTable(tEnv, 'a, 'b, 'c)
-    tEnv.registerTable("MyTable", t)
+    tEnv.createTemporaryView("MyTable", t)
 
     val sink = new TestingRetractSink
     tEnv.sqlQuery(sqlQuery).toRetractStream[Row].addSink(sink)
@@ -839,7 +890,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     assertMapStrEquals(expected.sorted.toString, sink.getRetractResults.sorted.toString)
   }
 
-  @Test
+  @TestTemplate
   def testUnboundedGroupByCollectWithObject(): Unit = {
     val sqlQuery = "SELECT b, COLLECT(c) FROM MyTable GROUP BY b"
 
@@ -851,7 +902,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
       (5, 3, List(18, "42.6"))
     )
 
-    tEnv.registerTable("MyTable", failingDataSource(data).toTable(tEnv, 'a, 'b, 'c))
+    tEnv.createTemporaryView("MyTable", failingDataSource(data).toTable(tEnv, 'a, 'b, 'c))
 
     val sink = new TestingRetractSink
     tEnv.sqlQuery(sqlQuery).toRetractStream[Row].addSink(sink)
@@ -864,7 +915,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     assertMapStrEquals(expected.sorted.toString, sink.getRetractResults.sorted.toString)
   }
 
-  @Test
+  @TestTemplate
   def testGroupBySingleValue(): Unit = {
     val data = new mutable.MutableList[(Int, Long, String)]
     data.+=((1, 1L, "A"))
@@ -888,8 +939,8 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     data.+=((12, 5L, "B"))
 
     val t = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c)
-    tEnv.registerTable("T1", t)
-    tEnv.registerTable("T2", t)
+    tEnv.createTemporaryView("T1", t)
+    tEnv.createTemporaryView("T2", t)
     val t1 = tEnv.sqlQuery("SELECT * FROM T2 WHERE T2.a < (SELECT count(*) * 0.3 FROM T1)")
 
     val sink = new TestingRetractSink
@@ -897,26 +948,26 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.execute()
 
     val expected = List("1,1,A", "2,2,B", "3,2,B", "4,3,C", "5,3,C")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
 
     // test single value for char type
     val tc = tEnv.fromValues(DataTypes.ROW(DataTypes.FIELD("a", DataTypes.CHAR(3))), Row.of("AA"))
-    tEnv.registerTable("tc", tc)
+    tEnv.createTemporaryView("tc", tc)
     val tr = tEnv.sqlQuery("SELECT * FROM tc WHERE tc.a = (SELECT a FROM tc)")
     val sink1 = new TestingRetractSink
     tr.toRetractStream[Row].addSink(sink1).setParallelism(1)
     env.execute()
-    assertEquals(List("AA "), sink1.getRetractResults.sorted)
+    assertThat(sink1.getRetractResults.sorted).isEqualTo(List("AA "))
   }
 
-  @Test
+  @TestTemplate
   def testPojoField(): Unit = {
     val data = Seq((1, new MyPojo(5, 105)), (1, new MyPojo(6, 11)), (1, new MyPojo(7, 12)))
 
     val t = failingDataSource(data).toTable(tEnv, 'a, 'b)
-    tEnv.registerTable("MyTable", t)
-    tEnv.registerFunction("pojoFunc", new MyPojoAggFunction)
-    tEnv.registerFunction("pojoToInt", MyPojoFunc)
+    tEnv.createTemporaryView("MyTable", t)
+    tEnv.createTemporarySystemFunction("pojoFunc", classOf[MyPojoAggFunction])
+    tEnv.createTemporarySystemFunction("pojoToInt", MyPojoFunc)
 
     val sql = "SELECT pojoToInt(pojoFunc(b)) FROM MyTable group by a"
 
@@ -925,10 +976,10 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.execute()
 
     val expected = List("128")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testDecimalSum(): Unit = {
     val data = new mutable.MutableList[Row]
     data.+=(Row.of(BigDecimal(1).bigDecimal))
@@ -938,7 +989,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
 
     val rowType = new RowTypeInfo(BigDecimalTypeInfo.of(7, 2))
     val t = failingDataSource(data)(rowType).toTable(tEnv, 'd)
-    tEnv.registerTable("T", t)
+    tEnv.createTemporaryView("T", t)
 
     val sql =
       """
@@ -952,10 +1003,10 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.execute()
 
     val expected = List("1,4.00", "2,2.00")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testDifferentTypesSumWithRetract(): Unit = {
     val upsertSourceCurrencyData = List(
       changelogRow(
@@ -1066,10 +1117,10 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.execute()
 
     val expected = List("6,6,6,6,6.0,6.0")
-    assertEquals(expected, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected)
   }
 
-  @Test
+  @TestTemplate
   def testAggAfterUnion(): Unit = {
     val data = List(
       (1L, 1, "Hello"),
@@ -1084,9 +1135,9 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     )
 
     val t1 = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c)
-    tEnv.registerTable("T1", t1)
+    tEnv.createTemporaryView("T1", t1)
     val t2 = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c)
-    tEnv.registerTable("T2", t2)
+    tEnv.createTemporaryView("T2", t2)
 
     val sql =
       """
@@ -1103,15 +1154,15 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.execute()
 
     val expected = List("1,2,1", "2,10,1", "3,18,1", "7,42,2", "10,40,1")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testVarArgsNoGroupBy(): Unit = {
     val data = List((1, 1L, "5", "3"), (1, 22L, "15", "13"), (3, 33L, "25", "23"))
 
     val t = failingDataSource(data).toTable(tEnv, 'id, 's, 's1, 's2)
-    tEnv.registerTable("MyTable", t)
+    tEnv.createTemporaryView("MyTable", t)
     tEnv.createTemporarySystemFunction("func", classOf[VarArgsAggFunction])
 
     val sql = "SELECT func(s, s1, s2) FROM MyTable"
@@ -1120,15 +1171,15 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.execute()
 
     val expected = List("140")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testVarArgsWithGroupBy(): Unit = {
     val data = List((1, 1L, "5", "3"), (1, 22L, "15", "13"), (3, 33L, "25", "23"))
 
     val t = failingDataSource(data).toTable(tEnv, 'id, 's, 's1, 's2)
-    tEnv.registerTable("MyTable", t)
+    tEnv.createTemporaryView("MyTable", t)
     tEnv.createTemporarySystemFunction("func", classOf[VarArgsAggFunction])
 
     val sink = new TestingRetractSink
@@ -1138,10 +1189,10 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
       .addSink(sink)
     env.execute()
     val expected = List("1,59", "3,81")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testMinMaxWithBinaryString(): Unit = {
     val data = new mutable.MutableList[(Int, Long, String)]
     data.+=((1, 1L, "A"))
@@ -1156,7 +1207,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     data.+=((10, 4L, "IJ"))
 
     val t = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c)
-    tEnv.registerTable("T", t)
+    tEnv.createTemporaryView("T", t)
 
     val sql =
       """
@@ -1173,10 +1224,10 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.execute()
 
     val expected = List("1,A,A", "2,B,BC", "3,C,DE", "4,EF,IJ")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testBigDataOfMinMaxWithBinaryString(): Unit = {
     val data = new mutable.MutableList[(Int, Long, String)]
     for (i <- 0 until 100) {
@@ -1184,7 +1235,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     }
 
     val t = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c)
-    tEnv.registerTable("T", t)
+    tEnv.createTemporaryView("T", t)
 
     val sql =
       """
@@ -1206,10 +1257,10 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
       "7,7,97,17",
       "8,8,98,18",
       "9,9,99,19")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testAggWithFilterClause(): Unit = {
     val data = new mutable.MutableList[(Int, Long, String, Boolean)]
     data.+=((1, 5L, "B", true))
@@ -1224,7 +1275,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     data.+=((2, 3L, "D", true))
 
     val t = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c, 'd)
-    tEnv.registerTable("T", t)
+    tEnv.createTemporaryView("T", t)
     // test declarative and imperative aggregates
     val sql =
       """
@@ -1241,10 +1292,10 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.execute()
 
     val expected = List("1,8,2,6", "2,1,3,3", "3,null,1,5")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testMinMaxWithDecimal(): Unit = {
     val data = new mutable.MutableList[Row]
     data.+=(Row.of(BigDecimal(1).bigDecimal))
@@ -1264,7 +1315,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
 
     val rowType = new RowTypeInfo(BigDecimalTypeInfo.of(7, 2))
     val t = failingDataSource(data)(rowType).toTable(tEnv, 'a)
-    tEnv.registerTable("T", t)
+    tEnv.createTemporaryView("T", t)
 
     val sql =
       """
@@ -1278,10 +1329,87 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.execute()
 
     val expected = List("1,1.00,4.00", "2,2.00,2.00")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
+  def testMinMaxWithChar(): Unit = {
+    val data =
+      List(
+        rowOf(1, "a", "gg"),
+        rowOf(1, "b", "hh"),
+        rowOf(2, "d", "j"),
+        rowOf(2, "c", "i")
+      )
+    val dataId = TestValuesTableFactory.registerData(data)
+    tEnv.executeSql(s"""
+                       |CREATE TABLE src(
+                       |  `id` INT,
+                       |  `char1` CHAR(1),
+                       |  `char2` CHAR(2)
+                       |) WITH (
+                       |  'connector' = 'values',
+                       |  'data-id' = '$dataId'
+                       |)
+                       |""".stripMargin)
+
+    val sql =
+      """
+        |select `id`, count(*), min(`char1`), max(`char1`), min(`char2`), max(`char2`)  from src group by `id`
+      """.stripMargin
+
+    val sink = new TestingRetractSink()
+    tEnv.sqlQuery(sql).toRetractStream[Row].addSink(sink)
+    env.execute()
+
+    val expected = List("1,2,a,b,gg,hh", "2,2,c,d,i,j")
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
+  }
+
+  @TestTemplate
+  def testRetractMinMaxWithChar(): Unit = {
+    val data =
+      List(
+        changelogRow("+I", Int.box(1), "a", "ee"),
+        changelogRow("+I", Int.box(1), "b", "ff"),
+        changelogRow("+I", Int.box(1), "c", "gg"),
+        changelogRow("-D", Int.box(1), "c", "gg"),
+        changelogRow("-D", Int.box(1), "a", "ee"),
+        changelogRow("+I", Int.box(2), "a", "e"),
+        changelogRow("+I", Int.box(2), "b", "f"),
+        changelogRow("+I", Int.box(2), "c", "g"),
+        changelogRow("-U", Int.box(2), "b", "f"),
+        changelogRow("+U", Int.box(2), "d", "h"),
+        changelogRow("-U", Int.box(2), "a", "e"),
+        changelogRow("+U", Int.box(2), "b", "f")
+      )
+    val dataId = TestValuesTableFactory.registerData(data)
+    tEnv.executeSql(s"""
+                       |CREATE TABLE src(
+                       |  `id` INT,
+                       |  `char1` CHAR(1),
+                       |  `char2` CHAR(2)
+                       |) WITH (
+                       |  'connector' = 'values',
+                       |  'data-id' = '$dataId',
+                       |  'changelog-mode' = 'I,UA,UB,D'
+                       |)
+                       |""".stripMargin)
+
+    val sql =
+      """
+        |select `id`, count(*), min(`char1`), max(`char1`), min(`char2`), max(`char2`) from src group by `id`
+      """.stripMargin
+
+    val sink = new TestingRetractSink()
+    tEnv.sqlQuery(sql).toRetractStream[Row].addSink(sink)
+    env.execute()
+
+    val expected = List("1,1,b,b,ff,ff", "2,3,b,d,f,h")
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
+  }
+
+  @TestTemplate
   def testCollectOnClusteredFields(): Unit = {
     val data = List(
       (1, 1, (12, "45.6")),
@@ -1290,11 +1418,11 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
       (4, 3, (14, "45.2136")),
       (5, 3, (18, "42.6"))
     )
-    tEnv.registerTable("src", env.fromCollection(data).toTable(tEnv, 'a, 'b, 'c))
+    tEnv.createTemporaryView("src", env.fromCollection(data).toTable(tEnv, 'a, 'b, 'c))
 
     val sql = "SELECT a, b, COLLECT(c) as `set` FROM src GROUP BY a, b"
     val view1 = tEnv.sqlQuery(sql)
-    tEnv.registerTable("v1", view1)
+    tEnv.createTemporaryView("v1", view1)
 
     tEnv.createTemporarySystemFunction("toCompObj", ToCompositeObj)
     tEnv.createTemporarySystemFunction("anyToString", AnyToStringFunction)
@@ -1323,11 +1451,11 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
       "4,3,{CompositeObj(14,a,100,45.2136)=1}",
       "5,3,{CompositeObj(18,a,100,42.6)=1}"
     )
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
   /** Test LISTAGG * */
-  @Test
+  @TestTemplate
   def testListAgg(): Unit = {
     tEnv.createTemporarySystemFunction("listagg_retract", classOf[ListAggWithRetractAggFunction])
     tEnv.createTemporarySystemFunction(
@@ -1347,7 +1475,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     }
 
     val t = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c)
-    tEnv.registerTable("MyTable", t)
+    tEnv.createTemporaryView("MyTable", t)
 
     val sink = new TestingRetractSink
     tEnv.sqlQuery(sqlQuery).toRetractStream[Row].addSink(sink)
@@ -1355,10 +1483,38 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     val expected = List(
       "Hi,Hi,Hi,Hi,Hi,Hi,Hi,Hi,Hi,Hi,Hi-Hi-Hi-Hi-Hi-Hi-Hi-Hi-Hi-Hi," +
         "Hi,Hi,Hi,Hi,Hi,Hi,Hi,Hi,Hi,Hi,Hi+Hi+Hi+Hi+Hi+Hi+Hi+Hi+Hi+Hi")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
+  def testUserDefinedObjectAgg(): Unit = {
+    tEnv.createTemporaryFunction("user_define_object", new UserDefinedObjectUDAF)
+    tEnv.createTemporaryFunction("user_define_object2", new UserDefinedObjectUDAF2)
+    val sqlQuery =
+      s"""
+         |select t1.a, user_define_object2(t1.d) from
+         |(SELECT a, user_define_object(b) as d
+         |FROM MyTable GROUP BY a) t1
+         |group by t1.a
+         |""".stripMargin
+    val data = new mutable.MutableList[(Int, String)]
+    data.+=((1, "Sam"))
+    data.+=((1, "Jerry"))
+    data.+=((2, "Ali"))
+    data.+=((3, "Grace"))
+    data.+=((3, "Lucas"))
+
+    val t = failingDataSource(data).toTable(tEnv, 'a, 'b)
+    tEnv.createTemporaryView("MyTable", t)
+
+    val sink = new TestingRetractSink
+    tEnv.sqlQuery(sqlQuery).toRetractStream[Row].addSink(sink)
+    env.execute()
+    val expected = List("1,Jerry", "2,Ali", "3,Lucas")
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
+  }
+
+  @TestTemplate
   def testSTDDEV(): Unit = {
     val sqlQuery = "SELECT STDDEV_SAMP(a), STDDEV_POP(a) FROM MyTable GROUP BY c"
 
@@ -1368,17 +1524,17 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     }
 
     val t = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c)
-    tEnv.registerTable("MyTable", t)
+    tEnv.createTemporaryView("MyTable", t)
 
     val sink = new TestingRetractSink
     tEnv.sqlQuery(sqlQuery).toRetractStream[Row].addSink(sink)
     env.execute()
     val expected = List("3.0276503540974917,2.8722813232690143")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
   /** test VAR_POP * */
-  @Test
+  @TestTemplate
   def testVAR_POP(): Unit = {
     val sqlQuery = "SELECT VAR_POP(a) FROM MyTable GROUP BY c"
 
@@ -1390,17 +1546,17 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     data.+=((11000, 1L, "Hello"))
 
     val t = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c)
-    tEnv.registerTable("MyTable", t)
+    tEnv.createTemporaryView("MyTable", t)
 
     val sink = new TestingRetractSink
     tEnv.sqlQuery(sqlQuery).toRetractStream[Row].addSink(sink)
     env.execute()
     // TODO: define precise behavior of VAR_POP()
     val expected = List(15602500.toString, 28889.toString)
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testLongVarargsAgg(): Unit = {
     tEnv.createTemporarySystemFunction("var_sum", classOf[VarSumAggFunction])
     val sqlQuery = s"SELECT a, " +
@@ -1408,23 +1564,23 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     val data = Seq[(Int, Int)]((1, 1), (2, 2))
 
     val t = failingDataSource(data).toTable(tEnv, 'a, 'b)
-    tEnv.registerTable("MyTable", t)
+    tEnv.createTemporaryView("MyTable", t)
 
     val sink = new TestingRetractSink
     tEnv.sqlQuery(sqlQuery).toRetractStream[Row].addSink(sink)
     env.execute()
 
     val expected = List("1,260", "2,520")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testCountDistinctWithBinaryRowSource(): Unit = {
     // this case is failed before, because of object reuse problem
     val data = (0 until 100).map(i => ("1", "1", s"${i % 50}", "1")).toList
     // use BinaryRowData source here for StringData reuse
     val t = failingBinaryRowSource(data).toTable(tEnv, 'a, 'b, 'c, 'd)
-    tEnv.registerTable("src", t)
+    tEnv.createTemporaryView("src", t)
 
     val sql =
       s"""
@@ -1453,13 +1609,13 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.execute("test")
 
     val expected = List("1,1,50", "1,ALL,50")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testDistinctWithMultiFilter(): Unit = {
     val t = failingDataSource(TestData.tupleData3).toTable(tEnv).as("a", "b", "c")
-    tEnv.registerTable("MyTable", t)
+    tEnv.createTemporaryView("MyTable", t)
 
     val sqlQuery =
       s"""
@@ -1485,10 +1641,10 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
       "4,102,1,4,1,2",
       "5,195,1,5,2,1",
       "6,333,1,6,2,2")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testPruneUselessAggCall(): Unit = {
     val data = new mutable.MutableList[(Int, Long, String)]
     data.+=((1, 1L, "Hi"))
@@ -1496,7 +1652,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     data.+=((3, 2L, "Hello world"))
 
     val t = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c)
-    tEnv.registerTable("T", t)
+    tEnv.createTemporaryView("T", t)
 
     val t1 = tEnv.sqlQuery(
       "select a from (select b, max(a) as a, count(*), max(c) as c from T group by b) T1")
@@ -1504,14 +1660,14 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     t1.toRetractStream[Row].addSink(sink).setParallelism(1)
     env.execute()
     val expected = List("1", "3")
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testGenericTypesWithoutStateClean(): Unit = {
     // because we don't provide a way to disable state cleanup.
     // TODO verify all tests with state cleanup closed.
-    tEnv.getConfig.setIdleStateRetentionTime(Time.days(0), Time.days(0))
+    tEnv.getConfig.setIdleStateRetention(Duration.ofDays(0))
     val t = failingDataSource(Seq(1, 2, 3)).toTable(tEnv, 'a)
     val results = t
       .select(new GenericAggregateFunction()('a))
@@ -1522,7 +1678,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.execute()
   }
 
-  @Test
+  @TestTemplate
   def testConstantGroupKeyWithUpsertSink(): Unit = {
     val data = new mutable.MutableList[(Int, Long, String)]
     data.+=((1, 1L, "A"))
@@ -1532,7 +1688,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     data.+=((5, 3L, "C"))
 
     val t = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c)
-    tEnv.registerTable("MyTable", t)
+    tEnv.createTemporaryView("MyTable", t)
 
     val tableSink = new TestingUpsertTableSink(Array(0))
       .configure(Array[String]("c", "bMax"), Array[TypeInformation[_]](Types.STRING, Types.LONG))
@@ -1548,10 +1704,10 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
       .await()
 
     val expected = List("A,1", "B,2", "C,3")
-    assertEquals(expected.sorted, tableSink.getUpsertResults.sorted)
+    assertThat(tableSink.getUpsertResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testAggregationCodeSplit(): Unit = {
 
     val t = env
@@ -1576,11 +1732,11 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.execute()
 
     val expected = Stream.range(3, columnNumber).map(_.toString).mkString(",")
-    assertEquals(sink.getRawResults.size, 3)
-    sink.getRetractResults.foreach(result => assertEquals(expected, result))
+    assertThat(sink.getRawResults.size).isEqualTo(3)
+    sink.getRetractResults.foreach(result => assertThat(result).isEqualTo(expected))
   }
 
-  @Test
+  @TestTemplate
   def testOverloadedAccumulator(): Unit = {
     val data = new mutable.MutableList[(String, Long)]
     data.+=(("x", 1L))
@@ -1610,13 +1766,13 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     env.execute()
 
     val expected1 = List("x,3", "y,2", "z,3")
-    assertEquals(expected1.sorted, sink1.getRetractResults.sorted)
+    assertThat(sink1.getRetractResults.sorted).isEqualTo(expected1.sorted)
 
     val expected2 = List("1,y", "2,y", "3,z")
-    assertEquals(expected2.sorted, sink2.getRetractResults.sorted)
+    assertThat(sink2.getRetractResults.sorted).isEqualTo(expected2.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testCoalesceOnGroupingSets(): Unit = {
     val empsData = List(
       (100L, "Fred", 10, null, null, 40L, 25, true, false),
@@ -1627,7 +1783,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     )
     val tableA = failingDataSource(empsData)
       .toTable(tEnv, 'empno, 'name, 'deptno, 'gender, 'city, 'empid, 'age, 'slacker, 'manager)
-    tEnv.registerTable("emps", tableA)
+    tEnv.createTemporaryView("emps", tableA)
     val sql =
       s"""
          |select
@@ -1649,10 +1805,10 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
       "null,null,-1,1",
       "null,null,10,1"
     )
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testBooleanColumnOnGroupingSets(): Unit = {
     val empsData = List(
       (100L, "Fred", 10, null, null, 40L, 25, true, false),
@@ -1663,7 +1819,7 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     )
     val tableA = failingDataSource(empsData)
       .toTable(tEnv, 'empno, 'name, 'deptno, 'gender, 'city, 'empid, 'age, 'slacker, 'manager)
-    tEnv.registerTable("emps", tableA)
+    tEnv.createTemporaryView("emps", tableA)
     val sql =
       s"""
          |select
@@ -1683,10 +1839,10 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
       "null,null,false,1",
       "null,null,null,2"
     )
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testGroupByArrayType(): Unit = {
     val sql =
       s"""
@@ -1701,10 +1857,10 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
       "[1, 2],3",
       "[3, 4],5"
     )
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testDistinctArrayType(): Unit = {
     val sql =
       s"""
@@ -1720,10 +1876,10 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
       "[2, 3]",
       "[3, 4]"
     )
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
-  @Test
+  @TestTemplate
   def testCountDistinctArrayType(): Unit = {
     val sql =
       s"""
@@ -1739,6 +1895,104 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
       "2,2",
       "5,1"
     )
-    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
+  }
+
+  @TestTemplate
+  def testCountStar(): Unit = {
+    val data =
+      List(rowOf(2L, 15, "Hello"), rowOf(8L, 11, "Hello world"), rowOf(9L, 12, "Hello world!"))
+    val dataId = TestValuesTableFactory.registerData(data)
+    tEnv.executeSql(s"""
+                       |CREATE TABLE src(
+                       |  `id` BIGINT,
+                       |  `len` INT,
+                       |  `content` STRING,
+                       |  `proctime` AS PROCTIME()
+                       |) WITH (
+                       |  'connector' = 'values',
+                       |  'data-id' = '$dataId'
+                       |)
+                       |""".stripMargin)
+    val sink = new TestingRetractSink
+    tEnv.sqlQuery("select count(*) from src").toRetractStream[Row].addSink(sink).setParallelism(1)
+    env.execute()
+    val expected = List("3")
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
+  }
+
+  @TestTemplate
+  def testLagAggFunction(): Unit = {
+    val data =
+      List(rowOf(2L, 15, "Hello"), rowOf(8L, 11, "Hello world"), rowOf(9L, 12, "Hello world!"))
+    val dataId = TestValuesTableFactory.registerData(data)
+    tEnv.executeSql(s"""
+                       |CREATE TABLE src(
+                       |  `id` BIGINT,
+                       |  `len` INT NOT NULL,
+                       |  `content` STRING,
+                       |  `proctime` AS PROCTIME()
+                       |) WITH (
+                       |  'connector' = 'values',
+                       |  'data-id' = '$dataId'
+                       |)
+                       |""".stripMargin)
+    val sink = new TestingRetractSink
+    val sql =
+      s"""
+         |select
+         |  LAG(len, 1, cast(null as int)) OVER w AS nullable_prev_quantity,
+         |  LAG(len, 1, 1) OVER w AS prev_quantity,
+         |  LAG(len) OVER w AS prev_quantity
+         |from src
+         |WINDOW w AS (ORDER BY proctime)
+         |""".stripMargin
+    tEnv.sqlQuery(sql).toRetractStream[Row].addSink(sink).setParallelism(1)
+    env.execute()
+    val expected = List("null,1,null", "15,15,15", "11,11,11")
+    assertThat(sink.getRetractResults).isEqualTo(expected)
+  }
+
+  @TestTemplate
+  def testJsonArrayAggAndJsonObjectAggWithOtherAggs(): Unit = {
+    val sink = new TestingRetractSink
+    val sql =
+      s"""
+         |SELECT
+         |  MAX(d), JSON_OBJECTAGG(g VALUE d), JSON_ARRAYAGG(d), JSON_ARRAYAGG(g)
+         |FROM Table5 WHERE d <= 3
+         |""".stripMargin
+
+    val t = failingDataSource(TestData.tupleData5).toTable(tEnv, 'd, 'e, 'f, 'g, 'h)
+    tEnv.createTemporaryView("Table5", t)
+    tEnv.sqlQuery(sql).toRetractStream[Row].addSink(sink).setParallelism(1)
+    env.execute()
+    val expected =
+      List(
+        "3,{\"ABC\":3,\"BCD\":3,\"Hallo\":1,\"Hallo Welt\":2,\"Hallo Welt wie\":2,\"Hallo Welt wie gehts?\":3}," +
+          "[1,2,2,3,3,3],[\"Hallo\",\"Hallo Welt\",\"Hallo Welt wie\",\"Hallo Welt wie gehts?\",\"ABC\",\"BCD\"]")
+    assertThat(sink.getRetractResults).isEqualTo(expected)
+  }
+
+  @TestTemplate
+  def testGroupJsonArrayAggAndJsonObjectAggWithOtherAggs(): Unit = {
+    val sink = new TestingRetractSink
+    val sql =
+      s"""
+         |SELECT
+         |  d, JSON_OBJECTAGG(g VALUE f), JSON_ARRAYAGG(g), JSON_ARRAYAGG(f), max(f)
+         |FROM Table5 WHERE d <= 3 GROUP BY d
+         |""".stripMargin
+    val t = failingDataSource(TestData.tupleData5).toTable(tEnv, 'd, 'e, 'f, 'g, 'h)
+    tEnv.createTemporaryView("Table5", t)
+    tEnv.sqlQuery(sql).toRetractStream[Row].addSink(sink).setParallelism(1)
+    env.execute()
+    val expected =
+      List(
+        "3,{\"ABC\":4,\"BCD\":5,\"Hallo Welt wie gehts?\":3},[\"Hallo Welt wie gehts?\",\"ABC\",\"BCD\"],[3,4,5],5",
+        "1,{\"Hallo\":0},[\"Hallo\"],[0],0",
+        "2,{\"Hallo Welt\":1,\"Hallo Welt wie\":2},[\"Hallo Welt\",\"Hallo Welt wie\"],[1,2],2"
+      )
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 }

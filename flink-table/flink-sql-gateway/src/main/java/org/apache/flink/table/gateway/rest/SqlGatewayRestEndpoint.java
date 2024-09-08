@@ -18,34 +18,50 @@
 
 package org.apache.flink.table.gateway.rest;
 
+import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.rest.RestServerEndpoint;
 import org.apache.flink.runtime.rest.handler.RestHandlerSpecification;
 import org.apache.flink.table.gateway.api.SqlGatewayService;
 import org.apache.flink.table.gateway.api.endpoint.SqlGatewayEndpoint;
+import org.apache.flink.table.gateway.rest.handler.materializedtable.RefreshMaterializedTableHandler;
+import org.apache.flink.table.gateway.rest.handler.materializedtable.scheduler.CreateEmbeddedSchedulerWorkflowHandler;
+import org.apache.flink.table.gateway.rest.handler.materializedtable.scheduler.DeleteEmbeddedSchedulerWorkflowHandler;
+import org.apache.flink.table.gateway.rest.handler.materializedtable.scheduler.ResumeEmbeddedSchedulerWorkflowHandler;
+import org.apache.flink.table.gateway.rest.handler.materializedtable.scheduler.SuspendEmbeddedSchedulerWorkflowHandler;
 import org.apache.flink.table.gateway.rest.handler.operation.CancelOperationHandler;
 import org.apache.flink.table.gateway.rest.handler.operation.CloseOperationHandler;
 import org.apache.flink.table.gateway.rest.handler.operation.GetOperationStatusHandler;
 import org.apache.flink.table.gateway.rest.handler.session.CloseSessionHandler;
+import org.apache.flink.table.gateway.rest.handler.session.ConfigureSessionHandler;
 import org.apache.flink.table.gateway.rest.handler.session.GetSessionConfigHandler;
 import org.apache.flink.table.gateway.rest.handler.session.OpenSessionHandler;
 import org.apache.flink.table.gateway.rest.handler.session.TriggerSessionHeartbeatHandler;
+import org.apache.flink.table.gateway.rest.handler.statement.CompleteStatementHandler;
 import org.apache.flink.table.gateway.rest.handler.statement.ExecuteStatementHandler;
 import org.apache.flink.table.gateway.rest.handler.statement.FetchResultsHandler;
 import org.apache.flink.table.gateway.rest.handler.util.GetApiVersionHandler;
 import org.apache.flink.table.gateway.rest.handler.util.GetInfoHandler;
+import org.apache.flink.table.gateway.rest.header.materializedtable.RefreshMaterializedTableHeaders;
+import org.apache.flink.table.gateway.rest.header.materializedtable.scheduler.CreateEmbeddedSchedulerWorkflowHeaders;
+import org.apache.flink.table.gateway.rest.header.materializedtable.scheduler.DeleteEmbeddedSchedulerWorkflowHeaders;
+import org.apache.flink.table.gateway.rest.header.materializedtable.scheduler.ResumeEmbeddedSchedulerWorkflowHeaders;
+import org.apache.flink.table.gateway.rest.header.materializedtable.scheduler.SuspendEmbeddedSchedulerWorkflowHeaders;
 import org.apache.flink.table.gateway.rest.header.operation.CancelOperationHeaders;
 import org.apache.flink.table.gateway.rest.header.operation.CloseOperationHeaders;
 import org.apache.flink.table.gateway.rest.header.operation.GetOperationStatusHeaders;
 import org.apache.flink.table.gateway.rest.header.session.CloseSessionHeaders;
+import org.apache.flink.table.gateway.rest.header.session.ConfigureSessionHeaders;
 import org.apache.flink.table.gateway.rest.header.session.GetSessionConfigHeaders;
 import org.apache.flink.table.gateway.rest.header.session.OpenSessionHeaders;
 import org.apache.flink.table.gateway.rest.header.session.TriggerSessionHeartbeatHeaders;
+import org.apache.flink.table.gateway.rest.header.statement.CompleteStatementHeaders;
 import org.apache.flink.table.gateway.rest.header.statement.ExecuteStatementHeaders;
 import org.apache.flink.table.gateway.rest.header.statement.FetchResultsHeaders;
 import org.apache.flink.table.gateway.rest.header.util.GetApiVersionHeaders;
 import org.apache.flink.table.gateway.rest.header.util.GetInfoHeaders;
+import org.apache.flink.table.gateway.workflow.scheduler.EmbeddedQuartzScheduler;
 import org.apache.flink.util.ConfigurationException;
 
 import org.apache.flink.shaded.netty4.io.netty.channel.ChannelInboundHandler;
@@ -59,11 +75,18 @@ import java.util.concurrent.CompletableFuture;
 public class SqlGatewayRestEndpoint extends RestServerEndpoint implements SqlGatewayEndpoint {
 
     public final SqlGatewayService service;
+    private final EmbeddedQuartzScheduler quartzScheduler;
 
     public SqlGatewayRestEndpoint(Configuration configuration, SqlGatewayService sqlGatewayService)
             throws IOException, ConfigurationException {
         super(configuration);
         service = sqlGatewayService;
+        quartzScheduler = new EmbeddedQuartzScheduler();
+    }
+
+    @VisibleForTesting
+    public EmbeddedQuartzScheduler getQuartzScheduler() {
+        return quartzScheduler;
     }
 
     @Override
@@ -74,6 +97,8 @@ public class SqlGatewayRestEndpoint extends RestServerEndpoint implements SqlGat
         addOperationRelatedHandlers(handlers);
         addUtilRelatedHandlers(handlers);
         addStatementRelatedHandlers(handlers);
+        addEmbeddedSchedulerRelatedHandlers(handlers);
+        addMaterializedTableRelatedHandlers(handlers);
         return handlers;
     }
 
@@ -89,6 +114,12 @@ public class SqlGatewayRestEndpoint extends RestServerEndpoint implements SqlGat
                 new CloseSessionHandler(
                         service, responseHeaders, CloseSessionHeaders.getInstance());
         handlers.add(Tuple2.of(CloseSessionHeaders.getInstance(), closeSessionHandler));
+
+        // Configure session
+        ConfigureSessionHandler configureSessionHandler =
+                new ConfigureSessionHandler(
+                        service, responseHeaders, ConfigureSessionHeaders.getInstance());
+        handlers.add(Tuple2.of(ConfigureSessionHeaders.getInstance(), configureSessionHandler));
 
         // Get session configuration
         GetSessionConfigHandler getSessionConfigHandler =
@@ -144,6 +175,11 @@ public class SqlGatewayRestEndpoint extends RestServerEndpoint implements SqlGat
 
     private void addStatementRelatedHandlers(
             List<Tuple2<RestHandlerSpecification, ChannelInboundHandler>> handlers) {
+        // Complete a statement
+        CompleteStatementHandler completeStatementHandler =
+                new CompleteStatementHandler(
+                        service, responseHeaders, CompleteStatementHeaders.getInstance());
+        handlers.add(Tuple2.of(CompleteStatementHeaders.getInstance(), completeStatementHandler));
 
         // Execute a statement
         ExecuteStatementHandler executeStatementHandler =
@@ -152,17 +188,83 @@ public class SqlGatewayRestEndpoint extends RestServerEndpoint implements SqlGat
         handlers.add(Tuple2.of(ExecuteStatementHeaders.getInstance(), executeStatementHandler));
 
         // Fetch results
-        FetchResultsHandler fetchResultsHandler =
-                new FetchResultsHandler(
-                        service, responseHeaders, FetchResultsHeaders.getInstance());
-        handlers.add(Tuple2.of(FetchResultsHeaders.getInstance(), fetchResultsHandler));
+        handlers.add(
+                Tuple2.of(
+                        FetchResultsHeaders.getDefaultInstance(),
+                        new FetchResultsHandler(
+                                service,
+                                responseHeaders,
+                                FetchResultsHeaders.getDefaultInstance())));
+        handlers.add(
+                Tuple2.of(
+                        FetchResultsHeaders.getInstanceV1(),
+                        new FetchResultsHandler(
+                                service, responseHeaders, FetchResultsHeaders.getInstanceV1())));
+    }
+
+    private void addEmbeddedSchedulerRelatedHandlers(
+            List<Tuple2<RestHandlerSpecification, ChannelInboundHandler>> handlers) {
+        // create workflow
+        CreateEmbeddedSchedulerWorkflowHandler createHandler =
+                new CreateEmbeddedSchedulerWorkflowHandler(
+                        service,
+                        quartzScheduler,
+                        responseHeaders,
+                        CreateEmbeddedSchedulerWorkflowHeaders.getInstance());
+        handlers.add(
+                Tuple2.of(CreateEmbeddedSchedulerWorkflowHeaders.getInstance(), createHandler));
+
+        // suspend workflow
+        SuspendEmbeddedSchedulerWorkflowHandler suspendHandler =
+                new SuspendEmbeddedSchedulerWorkflowHandler(
+                        service,
+                        quartzScheduler,
+                        responseHeaders,
+                        SuspendEmbeddedSchedulerWorkflowHeaders.getInstance());
+        handlers.add(
+                Tuple2.of(SuspendEmbeddedSchedulerWorkflowHeaders.getInstance(), suspendHandler));
+
+        // resume workflow
+        ResumeEmbeddedSchedulerWorkflowHandler resumeHandler =
+                new ResumeEmbeddedSchedulerWorkflowHandler(
+                        service,
+                        quartzScheduler,
+                        responseHeaders,
+                        ResumeEmbeddedSchedulerWorkflowHeaders.getInstance());
+        handlers.add(
+                Tuple2.of(ResumeEmbeddedSchedulerWorkflowHeaders.getInstance(), resumeHandler));
+
+        // delete workflow
+        DeleteEmbeddedSchedulerWorkflowHandler deleteHandler =
+                new DeleteEmbeddedSchedulerWorkflowHandler(
+                        service,
+                        quartzScheduler,
+                        responseHeaders,
+                        DeleteEmbeddedSchedulerWorkflowHeaders.getInstance());
+        handlers.add(
+                Tuple2.of(DeleteEmbeddedSchedulerWorkflowHeaders.getInstance(), deleteHandler));
+    }
+
+    private void addMaterializedTableRelatedHandlers(
+            List<Tuple2<RestHandlerSpecification, ChannelInboundHandler>> handlers) {
+        // Refresh materialized table
+        RefreshMaterializedTableHandler refreshMaterializedTableHandler =
+                new RefreshMaterializedTableHandler(
+                        service, responseHeaders, RefreshMaterializedTableHeaders.getInstance());
+        handlers.add(
+                Tuple2.of(
+                        RefreshMaterializedTableHeaders.getInstance(),
+                        refreshMaterializedTableHandler));
     }
 
     @Override
-    protected void startInternal() {}
+    protected void startInternal() {
+        quartzScheduler.start();
+    }
 
     @Override
     public void stop() throws Exception {
         super.close();
+        quartzScheduler.stop();
     }
 }

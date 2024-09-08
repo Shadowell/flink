@@ -18,21 +18,21 @@
 
 package org.apache.flink.formats.compress;
 
-import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.typeinfo.Types;
+import org.apache.flink.connector.datagen.source.TestDataGenerators;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.formats.compress.extractor.DefaultExtractor;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.filesystem.StreamingFileSink;
 import org.apache.flink.streaming.api.functions.sink.filesystem.bucketassigners.UniqueBucketAssigner;
-import org.apache.flink.streaming.util.FiniteTestSource;
 import org.apache.flink.test.junit5.MiniClusterExtension;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.io.compress.CompressionCodec;
 import org.apache.hadoop.io.compress.CompressionCodecFactory;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -60,7 +60,6 @@ class CompressionFactoryITCase {
     private final List<String> testData = Arrays.asList("line1", "line2", "line3");
 
     @Test
-    @Timeout(20)
     void testWriteCompressedFile(@TempDir java.nio.file.Path tmpDir) throws Exception {
         final File folder = tmpDir.toFile();
         final Path testPath = Path.fromLocalFile(folder);
@@ -70,7 +69,10 @@ class CompressionFactoryITCase {
         env.enableCheckpointing(100);
 
         DataStream<String> stream =
-                env.addSource(new FiniteTestSource<>(testData), TypeInformation.of(String.class));
+                env.fromSource(
+                        TestDataGenerators.fromDataWithSnapshotsLatch(testData, Types.STRING),
+                        WatermarkStrategy.noWatermarks(),
+                        "Test Source");
 
         stream.map(str -> str)
                 .addSink(

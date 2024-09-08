@@ -23,13 +23,28 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.NettyShuffleEnvironmentOptions;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionID;
+import org.apache.flink.runtime.io.network.partition.hybrid.tiered.shuffle.TieredInternalShuffleMaster;
+import org.apache.flink.runtime.io.network.partition.hybrid.tiered.tier.TierShuffleDescriptor;
 import org.apache.flink.runtime.shuffle.NettyShuffleDescriptor.LocalExecutionPartitionConnectionInfo;
 import org.apache.flink.runtime.shuffle.NettyShuffleDescriptor.NetworkPartitionConnectionInfo;
 import org.apache.flink.runtime.shuffle.NettyShuffleDescriptor.PartitionConnectionInfo;
 import org.apache.flink.runtime.util.ConfigurationParserUtils;
 
+import javax.annotation.Nullable;
+
+import java.time.Duration;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
+import static org.apache.flink.api.common.BatchShuffleMode.ALL_EXCHANGES_HYBRID_FULL;
+import static org.apache.flink.api.common.BatchShuffleMode.ALL_EXCHANGES_HYBRID_SELECTIVE;
+import static org.apache.flink.configuration.ExecutionOptions.BATCH_SHUFFLE_MODE;
+import static org.apache.flink.util.Preconditions.checkArgument;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /** Default {@link ShuffleMaster} for netty and local file based shuffle implementation. */
@@ -37,7 +52,9 @@ public class NettyShuffleMaster implements ShuffleMaster<NettyShuffleDescriptor>
 
     private final int buffersPerInputChannel;
 
-    private final int buffersPerInputGate;
+    private final int floatingBuffersPerGate;
+
+    private final Optional<Integer> maxRequiredBuffersPerGate;
 
     private final int sortShuffleMinParallelism;
 
@@ -45,18 +62,43 @@ public class NettyShuffleMaster implements ShuffleMaster<NettyShuffleDescriptor>
 
     private final int networkBufferSize;
 
-    public NettyShuffleMaster(Configuration conf) {
+    @Nullable private final TieredInternalShuffleMaster tieredInternalShuffleMaster;
+
+    private final Map<JobID, JobShuffleContext> jobShuffleContexts = new HashMap<>();
+
+    public NettyShuffleMaster(ShuffleMasterContext shuffleMasterContext) {
+        Configuration conf = shuffleMasterContext.getConfiguration();
         checkNotNull(conf);
         buffersPerInputChannel =
-                conf.getInteger(NettyShuffleEnvironmentOptions.NETWORK_BUFFERS_PER_CHANNEL);
-        buffersPerInputGate =
-                conf.getInteger(NettyShuffleEnvironmentOptions.NETWORK_EXTRA_BUFFERS_PER_GATE);
+                conf.get(NettyShuffleEnvironmentOptions.NETWORK_BUFFERS_PER_CHANNEL);
+        floatingBuffersPerGate =
+                conf.get(NettyShuffleEnvironmentOptions.NETWORK_EXTRA_BUFFERS_PER_GATE);
+        maxRequiredBuffersPerGate =
+                conf.getOptional(
+                        NettyShuffleEnvironmentOptions.NETWORK_READ_MAX_REQUIRED_BUFFERS_PER_GATE);
         sortShuffleMinParallelism =
-                conf.getInteger(
-                        NettyShuffleEnvironmentOptions.NETWORK_SORT_SHUFFLE_MIN_PARALLELISM);
+                conf.get(NettyShuffleEnvironmentOptions.NETWORK_SORT_SHUFFLE_MIN_PARALLELISM);
         sortShuffleMinBuffers =
-                conf.getInteger(NettyShuffleEnvironmentOptions.NETWORK_SORT_SHUFFLE_MIN_BUFFERS);
+                conf.get(NettyShuffleEnvironmentOptions.NETWORK_SORT_SHUFFLE_MIN_BUFFERS);
         networkBufferSize = ConfigurationParserUtils.getPageSize(conf);
+
+        if (isHybridShuffleEnabled(conf)) {
+            tieredInternalShuffleMaster = new TieredInternalShuffleMaster(shuffleMasterContext);
+        } else {
+            tieredInternalShuffleMaster = null;
+        }
+
+        checkArgument(
+                !maxRequiredBuffersPerGate.isPresent() || maxRequiredBuffersPerGate.get() >= 1,
+                String.format(
+                        "At least one buffer is required for each gate, please increase the value of %s.",
+                        NettyShuffleEnvironmentOptions.NETWORK_READ_MAX_REQUIRED_BUFFERS_PER_GATE
+                                .key()));
+        checkArgument(
+                floatingBuffersPerGate >= 1,
+                String.format(
+                        "The configured floating buffer should be at least 1, please increase the value of %s.",
+                        NettyShuffleEnvironmentOptions.NETWORK_EXTRA_BUFFERS_PER_GATE.key()));
     }
 
     @Override
@@ -70,18 +112,29 @@ public class NettyShuffleMaster implements ShuffleMaster<NettyShuffleDescriptor>
                         partitionDescriptor.getPartitionId(),
                         producerDescriptor.getProducerExecutionId());
 
+        List<TierShuffleDescriptor> tierShuffleDescriptors = null;
+        if (tieredInternalShuffleMaster != null) {
+            tierShuffleDescriptors =
+                    tieredInternalShuffleMaster.addPartitionAndGetShuffleDescriptor(
+                            jobID, resultPartitionID);
+        }
+
         NettyShuffleDescriptor shuffleDeploymentDescriptor =
                 new NettyShuffleDescriptor(
                         producerDescriptor.getProducerLocation(),
                         createConnectionInfo(
                                 producerDescriptor, partitionDescriptor.getConnectionIndex()),
-                        resultPartitionID);
-
+                        resultPartitionID,
+                        tierShuffleDescriptors);
         return CompletableFuture.completedFuture(shuffleDeploymentDescriptor);
     }
 
     @Override
-    public void releasePartitionExternally(ShuffleDescriptor shuffleDescriptor) {}
+    public void releasePartitionExternally(ShuffleDescriptor shuffleDescriptor) {
+        if (tieredInternalShuffleMaster != null) {
+            tieredInternalShuffleMaster.releasePartition(shuffleDescriptor);
+        }
+    }
 
     private static PartitionConnectionInfo createConnectionInfo(
             ProducerDescriptor producerDescriptor, int connectionIndex) {
@@ -104,21 +157,71 @@ public class NettyShuffleMaster implements ShuffleMaster<NettyShuffleDescriptor>
     public MemorySize computeShuffleMemorySizeForTask(TaskInputsOutputsDescriptor desc) {
         checkNotNull(desc);
 
-        int numTotalInputChannels =
-                desc.getInputChannelNums().values().stream().mapToInt(Integer::intValue).sum();
-        int numTotalInputGates = desc.getInputGateNums();
-
         int numRequiredNetworkBuffers =
                 NettyShuffleUtils.computeNetworkBuffersForAnnouncing(
                         buffersPerInputChannel,
-                        buffersPerInputGate,
+                        floatingBuffersPerGate,
+                        maxRequiredBuffersPerGate,
                         sortShuffleMinParallelism,
                         sortShuffleMinBuffers,
-                        numTotalInputChannels,
-                        numTotalInputGates,
+                        desc.getInputChannelNums(),
+                        desc.getPartitionReuseCount(),
                         desc.getSubpartitionNums(),
+                        desc.getInputPartitionTypes(),
                         desc.getPartitionTypes());
 
         return new MemorySize((long) networkBufferSize * numRequiredNetworkBuffers);
+    }
+
+    private boolean isHybridShuffleEnabled(Configuration conf) {
+        return (conf.get(BATCH_SHUFFLE_MODE) == ALL_EXCHANGES_HYBRID_FULL
+                || conf.get(BATCH_SHUFFLE_MODE) == ALL_EXCHANGES_HYBRID_SELECTIVE);
+    }
+
+    @Override
+    public CompletableFuture<Collection<PartitionWithMetrics>> getPartitionWithMetrics(
+            JobID jobId, Duration timeout, Set<ResultPartitionID> expectedPartitions) {
+        return checkNotNull(jobShuffleContexts.get(jobId))
+                .getPartitionWithMetrics(timeout, expectedPartitions);
+    }
+
+    @Override
+    public void registerJob(JobShuffleContext context) {
+        jobShuffleContexts.put(context.getJobId(), context);
+        if (tieredInternalShuffleMaster != null) {
+            tieredInternalShuffleMaster.registerJob(context);
+        }
+    }
+
+    @Override
+    public void unregisterJob(JobID jobId) {
+        jobShuffleContexts.remove(jobId);
+        if (tieredInternalShuffleMaster != null) {
+            tieredInternalShuffleMaster.unregisterJob(jobId);
+        }
+    }
+
+    @Override
+    public boolean supportsBatchSnapshot() {
+        return true;
+    }
+
+    @Override
+    public void snapshotState(
+            CompletableFuture<ShuffleMasterSnapshot> snapshotFuture,
+            ShuffleMasterSnapshotContext context) {
+        snapshotFuture.complete(EmptyShuffleMasterSnapshot.getInstance());
+    }
+
+    @Override
+    public void notifyPartitionRecoveryStarted(JobID jobId) {
+        checkNotNull(jobShuffleContexts.get(jobId)).notifyPartitionRecoveryStarted();
+    }
+
+    @Override
+    public void close() throws Exception {
+        if (tieredInternalShuffleMaster != null) {
+            tieredInternalShuffleMaster.close();
+        }
     }
 }

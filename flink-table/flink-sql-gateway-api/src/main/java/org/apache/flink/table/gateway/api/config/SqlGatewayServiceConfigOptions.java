@@ -36,14 +36,14 @@ public class SqlGatewayServiceConfigOptions {
                     .defaultValue(Duration.ofMinutes(10))
                     .withDescription(
                             "Timeout interval for closing the session when the session hasn't been accessed during the interval. "
-                                    + "If setting to zero or negative value, the session will not be closed.");
+                                    + "If setting to zero, the session will not be closed.");
 
     public static final ConfigOption<Duration> SQL_GATEWAY_SESSION_CHECK_INTERVAL =
             key("sql-gateway.session.check-interval")
                     .durationType()
                     .defaultValue(Duration.ofMinutes(1))
                     .withDescription(
-                            "The check interval for idle session timeout, which can be disabled by setting to zero or negative value.");
+                            "The check interval for idle session timeout, which can be disabled by setting to zero.");
 
     public static final ConfigOption<Integer> SQL_GATEWAY_SESSION_MAX_NUM =
             key("sql-gateway.session.max-num")
@@ -51,6 +51,30 @@ public class SqlGatewayServiceConfigOptions {
                     .defaultValue(1000000)
                     .withDescription(
                             "The maximum number of the active session for sql gateway service.");
+
+    public static final ConfigOption<Boolean> SQL_GATEWAY_SESSION_PLAN_CACHE_ENABLED =
+            key("sql-gateway.session.plan-cache.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "When it is true, sql gateway will cache and reuse plans for queries per session.");
+
+    public static final ConfigOption<Integer> SQL_GATEWAY_SESSION_PLAN_CACHE_SIZE =
+            key("sql-gateway.session.plan-cache.size")
+                    .intType()
+                    .defaultValue(100)
+                    .withDescription(
+                            "Plan cache size, it takes effect iff "
+                                    + "`table.optimizer.plan-cache.enabled` is true.");
+
+    public static final ConfigOption<Duration> SQL_GATEWAY_SESSION_PLAN_CACHE_TTL =
+            key("sql-gateway.session.plan-cache.ttl")
+                    .durationType()
+                    .defaultValue(Duration.ofHours(1))
+                    .withDescription(
+                            "TTL for plan cache, it controls how long will the "
+                                    + "cache expire after write, it takes effect iff "
+                                    + "`table.optimizer.plan-cache.enabled` is true.");
 
     public static final ConfigOption<Integer> SQL_GATEWAY_WORKER_THREADS_MAX =
             key("sql-gateway.worker.threads.max")

@@ -22,6 +22,9 @@ package org.apache.flink.test.checkpointing;
 import org.apache.flink.api.common.JobExecutionResult;
 import org.apache.flink.api.common.accumulators.LongCounter;
 import org.apache.flink.api.common.functions.FilterFunction;
+import org.apache.flink.api.common.functions.MapFunction;
+import org.apache.flink.api.common.functions.OpenContext;
+import org.apache.flink.api.common.functions.Partitioner;
 import org.apache.flink.api.common.functions.RichMapFunction;
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
@@ -32,7 +35,6 @@ import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.common.typeutils.base.LongSerializer;
 import org.apache.flink.api.java.functions.KeySelector;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
 import org.apache.flink.runtime.state.FunctionSnapshotContext;
 import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
@@ -44,6 +46,7 @@ import org.apache.flink.streaming.api.functions.co.BroadcastProcessFunction;
 import org.apache.flink.streaming.api.functions.co.CoMapFunction;
 import org.apache.flink.streaming.api.functions.co.KeyedBroadcastProcessFunction;
 import org.apache.flink.streaming.api.functions.co.KeyedCoProcessFunction;
+import org.apache.flink.streaming.api.functions.sink.SinkFunction;
 import org.apache.flink.util.Collector;
 
 import org.apache.commons.lang3.ArrayUtils;
@@ -68,6 +71,7 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
     private final int oldParallelism;
     private final int newParallelism;
     private final int buffersPerChannel;
+    private final long sourceSleepMs;
 
     enum Topology implements DagCreator {
         PIPELINE {
@@ -76,7 +80,8 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                     StreamExecutionEnvironment env,
                     int minCheckpoints,
                     boolean slotSharing,
-                    int expectedRestarts) {
+                    int expectedRestarts,
+                    long sourceSleepMillis) {
                 final int parallelism = env.getParallelism();
                 final DataStream<Long> source =
                         createSourcePipeline(
@@ -86,6 +91,7 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                                 expectedRestarts,
                                 parallelism,
                                 0,
+                                sourceSleepMillis,
                                 val -> true);
                 addFailingSink(source, minCheckpoints, slotSharing);
             }
@@ -97,7 +103,8 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                     StreamExecutionEnvironment env,
                     int minCheckpoints,
                     boolean slotSharing,
-                    int expectedRestarts) {
+                    int expectedRestarts,
+                    long sourceSleepMs) {
 
                 final int parallelism = env.getParallelism();
                 DataStream<Long> combinedSource = null;
@@ -111,6 +118,7 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                                     expectedRestarts,
                                     parallelism,
                                     inputIndex,
+                                    sourceSleepMs,
                                     val -> withoutHeader(val) % NUM_SOURCES == finalInputIndex);
                     combinedSource =
                             combinedSource == null
@@ -134,10 +142,10 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                     StreamExecutionEnvironment env,
                     int minCheckpoints,
                     boolean slotSharing,
-                    int expectedRestarts) {
+                    int expectedRestarts,
+                    long sourceSleepMs) {
 
                 final int parallelism = env.getParallelism();
-                checkState(parallelism >= 4);
                 final DataStream<Long> source1 =
                         createSourcePipeline(
                                 env,
@@ -146,6 +154,7 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                                 expectedRestarts,
                                 parallelism / 2,
                                 0,
+                                sourceSleepMs,
                                 val -> withoutHeader(val) % 2 == 0);
                 final DataStream<Long> source2 =
                         createSourcePipeline(
@@ -155,6 +164,7 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                                 expectedRestarts,
                                 parallelism / 3,
                                 1,
+                                sourceSleepMs,
                                 val -> withoutHeader(val) % 2 == 1);
 
                 KeySelector<Long, Long> keySelector = i -> withoutHeader(i) % NUM_GROUPS;
@@ -174,7 +184,8 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                     StreamExecutionEnvironment env,
                     int minCheckpoints,
                     boolean slotSharing,
-                    int expectedRestarts) {
+                    int expectedRestarts,
+                    long sourceSleepMs) {
 
                 final int parallelism = env.getParallelism();
                 DataStream<Long> combinedSource = null;
@@ -188,6 +199,7 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                                     expectedRestarts,
                                     parallelism,
                                     inputIndex,
+                                    sourceSleepMs,
                                     val -> withoutHeader(val) % NUM_SOURCES == finalInputIndex);
                     combinedSource = combinedSource == null ? source : combinedSource.union(source);
                 }
@@ -202,7 +214,8 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                     StreamExecutionEnvironment env,
                     int minCheckpoints,
                     boolean slotSharing,
-                    int expectedRestarts) {
+                    int expectedRestarts,
+                    long sourceSleepMs) {
 
                 final int parallelism = env.getParallelism();
                 final DataStream<Long> broadcastSide =
@@ -211,7 +224,8 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                                         minCheckpoints,
                                         parallelism,
                                         expectedRestarts,
-                                        env.getCheckpointInterval()),
+                                        env.getCheckpointInterval(),
+                                        sourceSleepMs),
                                 noWatermarks(),
                                 "source");
                 final DataStream<Long> source =
@@ -222,6 +236,7 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                                         expectedRestarts,
                                         parallelism,
                                         0,
+                                        sourceSleepMs,
                                         val -> true)
                                 .map(i -> checkHeader(i))
                                 .name("map")
@@ -249,7 +264,8 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                     StreamExecutionEnvironment env,
                     int minCheckpoints,
                     boolean slotSharing,
-                    int expectedRestarts) {
+                    int expectedRestarts,
+                    long sourceSleepMs) {
 
                 final int parallelism = env.getParallelism();
                 final DataStream<Long> broadcastSide1 =
@@ -258,7 +274,8 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                                                 minCheckpoints,
                                                 1,
                                                 expectedRestarts,
-                                                env.getCheckpointInterval()),
+                                                env.getCheckpointInterval(),
+                                                sourceSleepMs),
                                         noWatermarks(),
                                         "source-1")
                                 .setParallelism(1);
@@ -268,7 +285,8 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                                                 minCheckpoints,
                                                 1,
                                                 expectedRestarts,
-                                                env.getCheckpointInterval()),
+                                                env.getCheckpointInterval(),
+                                                sourceSleepMs),
                                         noWatermarks(),
                                         "source-2")
                                 .setParallelism(1);
@@ -278,7 +296,8 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                                                 minCheckpoints,
                                                 1,
                                                 expectedRestarts,
-                                                env.getCheckpointInterval()),
+                                                env.getCheckpointInterval(),
+                                                sourceSleepMs),
                                         noWatermarks(),
                                         "source-3")
                                 .setParallelism(1);
@@ -290,6 +309,7 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                                         expectedRestarts,
                                         parallelism,
                                         0,
+                                        sourceSleepMs,
                                         val -> true)
                                 .map(i -> checkHeader(i))
                                 .name("map")
@@ -312,6 +332,63 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
 
                 addFailingSink(joined, minCheckpoints, slotSharing);
             }
+        },
+        CUSTOM_PARTITIONER {
+            final int sinkParallelism = 3;
+
+            @Override
+            public void create(
+                    StreamExecutionEnvironment env,
+                    int minCheckpoints,
+                    boolean slotSharing,
+                    int expectedRestarts,
+                    long sourceSleepMs) {
+                int parallelism = env.getParallelism();
+
+                env.fromSource(
+                                new LongSource(
+                                        minCheckpoints,
+                                        parallelism,
+                                        expectedRestarts,
+                                        env.getCheckpointInterval(),
+                                        sourceSleepMs),
+                                noWatermarks(),
+                                "source")
+                        .name("source")
+                        .uid("source")
+                        .map(
+                                new MapFunction<Long, String>() {
+                                    @Override
+                                    public String map(Long value) throws Exception {
+                                        value = withoutHeader(value);
+                                        return buildString(
+                                                value % sinkParallelism, value / sinkParallelism);
+                                    }
+                                })
+                        .name("long-to-string-map")
+                        .uid("long-to-string-map")
+                        .map(
+                                new FailingMapper<>(
+                                        state -> false,
+                                        state ->
+                                                state.completedCheckpoints >= minCheckpoints / 2
+                                                        && state.runNumber == 0,
+                                        state -> false,
+                                        state -> false))
+                        .name("failing-map")
+                        .uid("failing-map")
+                        .setParallelism(parallelism)
+                        .partitionCustom(new StringPartitioner(), str -> str.split(" ")[0])
+                        .addSink(new BackPressureInducingSink())
+                        .name("sink")
+                        .uid("sink")
+                        .setParallelism(sinkParallelism);
+            }
+
+            private String buildString(long partition, long index) {
+                String longStr = new String(new char[3713]).replace('\0', '\uFFFF');
+                return partition + " " + index + " " + longStr;
+            }
         };
 
         void addFailingSink(
@@ -319,7 +396,7 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
             combinedSource
                     .shuffle()
                     .map(
-                            new FailingMapper(
+                            new FailingMapper<>(
                                     state -> false,
                                     state ->
                                             state.completedCheckpoints >= minCheckpoints / 2
@@ -349,13 +426,15 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                 int expectedRestarts,
                 int parallelism,
                 int inputIndex,
+                long sourceSleepMs,
                 FilterFunction<Long> sourceFilter) {
             return env.fromSource(
                             new LongSource(
                                     minCheckpoints,
                                     parallelism,
                                     expectedRestarts,
-                                    env.getCheckpointInterval()),
+                                    env.getCheckpointInterval(),
+                                    sourceSleepMs),
                             noWatermarks(),
                             "source" + inputIndex)
                     .uid("source" + inputIndex)
@@ -459,53 +538,69 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
         }
     }
 
-    @Parameterized.Parameters(name = "{0} {1} from {2} to {3}, buffersPerChannel = {4}")
+    @Parameterized.Parameters(
+            name = "{0} {1} from {2} to {3}, sourceSleepMs = {4}, buffersPerChannel = {5}")
     public static Object[][] getScaleFactors() {
+        // We use `sourceSleepMs` > 0 to test rescaling without backpressure and only very few
+        // captured in-flight records, see FLINK-31963.
         Object[][] parameters =
                 new Object[][] {
-                    new Object[] {"downscale", Topology.KEYED_DIFFERENT_PARALLELISM, 12, 7},
-                    new Object[] {"upscale", Topology.KEYED_DIFFERENT_PARALLELISM, 7, 12},
-                    new Object[] {"downscale", Topology.KEYED_BROADCAST, 7, 2},
-                    new Object[] {"upscale", Topology.KEYED_BROADCAST, 2, 7},
-                    new Object[] {"downscale", Topology.BROADCAST, 5, 2},
-                    new Object[] {"upscale", Topology.BROADCAST, 2, 5},
-                    new Object[] {"upscale", Topology.PIPELINE, 1, 2},
-                    new Object[] {"upscale", Topology.PIPELINE, 2, 3},
-                    new Object[] {"upscale", Topology.PIPELINE, 3, 7},
-                    new Object[] {"upscale", Topology.PIPELINE, 4, 8},
-                    new Object[] {"upscale", Topology.PIPELINE, 20, 21},
-                    new Object[] {"downscale", Topology.PIPELINE, 2, 1},
-                    new Object[] {"downscale", Topology.PIPELINE, 3, 2},
-                    new Object[] {"downscale", Topology.PIPELINE, 7, 3},
-                    new Object[] {"downscale", Topology.PIPELINE, 8, 4},
-                    new Object[] {"downscale", Topology.PIPELINE, 21, 20},
-                    new Object[] {"no scale", Topology.PIPELINE, 1, 1},
-                    new Object[] {"no scale", Topology.PIPELINE, 3, 3},
-                    new Object[] {"no scale", Topology.PIPELINE, 7, 7},
-                    new Object[] {"no scale", Topology.PIPELINE, 20, 20},
-                    new Object[] {"upscale", Topology.UNION, 1, 2},
-                    new Object[] {"upscale", Topology.UNION, 2, 3},
-                    new Object[] {"upscale", Topology.UNION, 3, 7},
-                    new Object[] {"downscale", Topology.UNION, 2, 1},
-                    new Object[] {"downscale", Topology.UNION, 3, 2},
-                    new Object[] {"downscale", Topology.UNION, 7, 3},
-                    new Object[] {"no scale", Topology.UNION, 1, 1},
-                    new Object[] {"no scale", Topology.UNION, 7, 7},
-                    new Object[] {"upscale", Topology.MULTI_INPUT, 1, 2},
-                    new Object[] {"upscale", Topology.MULTI_INPUT, 2, 3},
-                    new Object[] {"upscale", Topology.MULTI_INPUT, 3, 7},
-                    new Object[] {"downscale", Topology.MULTI_INPUT, 2, 1},
-                    new Object[] {"downscale", Topology.MULTI_INPUT, 3, 2},
-                    new Object[] {"downscale", Topology.MULTI_INPUT, 7, 3},
-                    new Object[] {"no scale", Topology.MULTI_INPUT, 1, 1},
-                    new Object[] {"no scale", Topology.MULTI_INPUT, 7, 7},
+                    new Object[] {"downscale", Topology.CUSTOM_PARTITIONER, 3, 2, 0L},
+                    new Object[] {"downscale", Topology.KEYED_DIFFERENT_PARALLELISM, 12, 7, 0L},
+                    new Object[] {"upscale", Topology.KEYED_DIFFERENT_PARALLELISM, 7, 12, 0L},
+                    new Object[] {"downscale", Topology.KEYED_DIFFERENT_PARALLELISM, 5, 3, 5L},
+                    new Object[] {"upscale", Topology.KEYED_DIFFERENT_PARALLELISM, 3, 5, 5L},
+                    new Object[] {"downscale", Topology.KEYED_BROADCAST, 7, 2, 0L},
+                    new Object[] {"upscale", Topology.KEYED_BROADCAST, 2, 7, 0L},
+                    new Object[] {"downscale", Topology.KEYED_BROADCAST, 5, 3, 5L},
+                    new Object[] {"upscale", Topology.KEYED_BROADCAST, 3, 5, 5L},
+                    new Object[] {"downscale", Topology.BROADCAST, 5, 2, 0L},
+                    new Object[] {"upscale", Topology.BROADCAST, 2, 5, 0L},
+                    new Object[] {"downscale", Topology.BROADCAST, 5, 3, 5L},
+                    new Object[] {"upscale", Topology.BROADCAST, 3, 5, 5L},
+                    new Object[] {"upscale", Topology.PIPELINE, 1, 2, 0L},
+                    new Object[] {"upscale", Topology.PIPELINE, 2, 3, 0L},
+                    new Object[] {"upscale", Topology.PIPELINE, 3, 7, 0L},
+                    new Object[] {"upscale", Topology.PIPELINE, 4, 8, 0L},
+                    new Object[] {"upscale", Topology.PIPELINE, 20, 21, 0L},
+                    new Object[] {"upscale", Topology.PIPELINE, 3, 5, 5L},
+                    new Object[] {"downscale", Topology.PIPELINE, 2, 1, 0L},
+                    new Object[] {"downscale", Topology.PIPELINE, 3, 2, 0L},
+                    new Object[] {"downscale", Topology.PIPELINE, 7, 3, 0L},
+                    new Object[] {"downscale", Topology.PIPELINE, 8, 4, 0L},
+                    new Object[] {"downscale", Topology.PIPELINE, 21, 20, 0L},
+                    new Object[] {"downscale", Topology.PIPELINE, 5, 3, 5L},
+                    new Object[] {"no scale", Topology.PIPELINE, 1, 1, 0L},
+                    new Object[] {"no scale", Topology.PIPELINE, 3, 3, 0L},
+                    new Object[] {"no scale", Topology.PIPELINE, 7, 7, 0L},
+                    new Object[] {"no scale", Topology.PIPELINE, 20, 20, 0L},
+                    new Object[] {"upscale", Topology.UNION, 1, 2, 0L},
+                    new Object[] {"upscale", Topology.UNION, 2, 3, 0L},
+                    new Object[] {"upscale", Topology.UNION, 3, 7, 0L},
+                    new Object[] {"upscale", Topology.UNION, 3, 5, 5L},
+                    new Object[] {"downscale", Topology.UNION, 2, 1, 0L},
+                    new Object[] {"downscale", Topology.UNION, 3, 2, 0L},
+                    new Object[] {"downscale", Topology.UNION, 7, 3, 0L},
+                    new Object[] {"downscale", Topology.UNION, 5, 3, 5L},
+                    new Object[] {"no scale", Topology.UNION, 1, 1, 0L},
+                    new Object[] {"no scale", Topology.UNION, 7, 7, 0L},
+                    new Object[] {"upscale", Topology.MULTI_INPUT, 1, 2, 0L},
+                    new Object[] {"upscale", Topology.MULTI_INPUT, 2, 3, 0L},
+                    new Object[] {"upscale", Topology.MULTI_INPUT, 3, 7, 0L},
+                    new Object[] {"upscale", Topology.MULTI_INPUT, 3, 5, 5L},
+                    new Object[] {"downscale", Topology.MULTI_INPUT, 2, 1, 0L},
+                    new Object[] {"downscale", Topology.MULTI_INPUT, 3, 2, 0L},
+                    new Object[] {"downscale", Topology.MULTI_INPUT, 7, 3, 0L},
+                    new Object[] {"downscale", Topology.MULTI_INPUT, 5, 3, 5L},
+                    new Object[] {"no scale", Topology.MULTI_INPUT, 1, 1, 0L},
+                    new Object[] {"no scale", Topology.MULTI_INPUT, 7, 7, 0L},
                 };
         return Arrays.stream(parameters)
                 .map(
                         params ->
                                 new Object[][] {
-                                    ArrayUtils.add(params, 0),
-                                    ArrayUtils.add(params, BUFFER_PER_CHANNEL)
+                                    ArrayUtils.insert(params.length, params, 0),
+                                    ArrayUtils.insert(params.length, params, BUFFER_PER_CHANNEL)
                                 })
                 .flatMap(Arrays::stream)
                 .toArray(Object[][]::new);
@@ -516,10 +611,12 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
             Topology topology,
             int oldParallelism,
             int newParallelism,
+            long sourceSleepMs,
             int buffersPerChannel) {
         this.topology = topology;
         this.oldParallelism = oldParallelism;
         this.newParallelism = newParallelism;
+        this.sourceSleepMs = sourceSleepMs;
         this.buffersPerChannel = buffersPerChannel;
     }
 
@@ -529,7 +626,8 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                 new UnalignedSettings(topology)
                         .setParallelism(oldParallelism)
                         .setExpectedFailures(1)
-                        .setBuffersPerChannel(buffersPerChannel);
+                        .setBuffersPerChannel(buffersPerChannel)
+                        .setSourceSleepMs(sourceSleepMs);
         prescaleSettings.setGenerateCheckpoint(true);
         final File checkpointDir = super.execute(prescaleSettings);
 
@@ -548,8 +646,12 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                 "NUM_OUTPUTS = NUM_INPUTS",
                 result.<Long>getAccumulatorResult(NUM_OUTPUTS),
                 equalTo(result.getAccumulatorResult(NUM_INPUTS)));
-        collector.checkThat(
-                "NUM_DUPLICATES", result.<Long>getAccumulatorResult(NUM_DUPLICATES), equalTo(0L));
+        if (!topology.equals(Topology.CUSTOM_PARTITIONER)) {
+            collector.checkThat(
+                    "NUM_DUPLICATES",
+                    result.<Long>getAccumulatorResult(NUM_DUPLICATES),
+                    equalTo(0L));
+        }
     }
 
     /**
@@ -576,8 +678,8 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                     LOG.info(
                             "Duplicate record {} @ {} subtask ({} attempt)",
                             intValue,
-                            getRuntimeContext().getIndexOfThisSubtask(),
-                            getRuntimeContext().getAttemptNumber());
+                            getRuntimeContext().getTaskInfo().getIndexOfThisSubtask(),
+                            getRuntimeContext().getTaskInfo().getAttemptNumber());
                     firstDuplicate = false;
                 }
             }
@@ -605,7 +707,7 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
         ValueState<Long> state;
 
         @Override
-        public void open(Configuration parameters) throws Exception {
+        public void open(OpenContext openContext) throws Exception {
             state = getRuntimeContext().getState(DESC);
         }
 
@@ -630,8 +732,8 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
         private ListState<Long> state;
 
         @Override
-        public void open(Configuration parameters) throws Exception {
-            super.open(parameters);
+        public void open(OpenContext openContext) throws Exception {
+            super.open(openContext);
             getRuntimeContext().addAccumulator(NUM_INPUTS, numInputCounter);
         }
 
@@ -666,6 +768,22 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
         @Override
         public Long map2(Long value) throws Exception {
             return checkHeader(value);
+        }
+    }
+
+    private static class StringPartitioner implements Partitioner<String> {
+        @Override
+        public int partition(String key, int numPartitions) {
+            return Integer.parseInt(key) % numPartitions;
+        }
+    }
+
+    private static class BackPressureInducingSink<T> implements SinkFunction<T> {
+        @Override
+        public void invoke(T value, Context ctx) throws Exception {
+            // TODO: maybe similarly to VerifyingSink, we should back pressure only until some point
+            // but currently it doesn't seem to be needed (test runs quickly enough)
+            Thread.sleep(1);
         }
     }
 }

@@ -31,14 +31,14 @@ import org.apache.flink.table.planner.runtime.utils.BatchTestBase.row
 import org.apache.flink.table.planner.utils.TableTestUtil
 
 import org.apache.calcite.sql.SqlExplainLevel
-import org.junit.{Before, Test}
-import org.junit.Assert.assertEquals
+import org.junit.jupiter.api.{BeforeEach, Test}
+import org.junit.jupiter.api.Assertions.assertEquals
 
 class FlinkRelOptUtilTest {
 
   var tableEnv: TableEnvironment = _
 
-  @Before
+  @BeforeEach
   def before(): Unit = {
     val settings = EnvironmentSettings.newInstance().build()
     val tEnv = TableEnvironmentImpl.create(settings)
@@ -58,7 +58,7 @@ class FlinkRelOptUtilTest {
     val tableEnv = StreamTableEnvironment.create(env, TableTestUtil.STREAM_SETTING)
 
     val table = env.fromElements[(Int, Long, String)]().toTable(tableEnv, 'a, 'b, 'c)
-    tableEnv.registerTable("MyTable", table)
+    tableEnv.createTemporaryView("MyTable", table)
 
     val sqlQuery =
       """
@@ -110,7 +110,7 @@ class FlinkRelOptUtilTest {
     val tableEnv = StreamTableEnvironment.create(env, TableTestUtil.STREAM_SETTING)
 
     val table = env.fromElements[(Int, Long, String)]().toTable(tableEnv, 'a, 'b, 'c)
-    tableEnv.registerTable("MyTable", table)
+    tableEnv.createTemporaryView("MyTable", table)
 
     val sqlQuery =
       """
@@ -163,7 +163,7 @@ class FlinkRelOptUtilTest {
   @Test
   def testGetDigestWithDynamicFunctionView(): Unit = {
     val view = tableEnv.sqlQuery("SELECT id AS random FROM MyTable ORDER BY rand() LIMIT 1")
-    tableEnv.registerTable("MyView", view)
+    tableEnv.createTemporaryView("MyView", view)
     val table = tableEnv.sqlQuery("""
                                     |(SELECT * FROM MyView)
                                     |INTERSECT

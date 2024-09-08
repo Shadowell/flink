@@ -44,7 +44,6 @@ public class TestCacheLoader extends CacheLoader {
 
     private final Consumer<Map<RowData, Collection<RowData>>> secondLoadDataChange;
     private int numLoads;
-    private boolean isClosed;
     private boolean isAwaitTriggered;
 
     public TestCacheLoader(Consumer<Map<RowData, Collection<RowData>>> secondLoadDataChange) {
@@ -55,8 +54,8 @@ public class TestCacheLoader extends CacheLoader {
         return numLoads;
     }
 
-    public boolean isClosed() {
-        return isClosed;
+    public boolean isStopped() {
+        return isStopped;
     }
 
     public boolean isAwaitTriggered() {
@@ -69,17 +68,12 @@ public class TestCacheLoader extends CacheLoader {
     }
 
     @Override
-    protected void reloadCache() throws Exception {
+    protected boolean updateCache() {
         cache = new ConcurrentHashMap<>(DATA);
         numLoads++;
         if (numLoads == 2) {
             secondLoadDataChange.accept(cache);
         }
-    }
-
-    @Override
-    public void close() throws Exception {
-        super.close();
-        isClosed = true;
+        return true;
     }
 }

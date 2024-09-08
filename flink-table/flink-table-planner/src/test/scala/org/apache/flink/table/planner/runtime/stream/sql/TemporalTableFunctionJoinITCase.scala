@@ -27,18 +27,18 @@ import org.apache.flink.table.api.bridge.scala._
 import org.apache.flink.table.planner.runtime.utils.{StreamingWithStateTestBase, TestingAppendSink}
 import org.apache.flink.table.planner.runtime.utils.StreamingWithStateTestBase.StateBackendMode
 import org.apache.flink.table.planner.utils.TableTestUtil
+import org.apache.flink.testutils.junit.extensions.parameterized.ParameterizedTestExtension
 import org.apache.flink.types.Row
 
-import org.junit._
-import org.junit.Assert.assertEquals
-import org.junit.runner.RunWith
-import org.junit.runners.Parameterized
+import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.TestTemplate
+import org.junit.jupiter.api.extension.ExtendWith
 
 import java.sql.Timestamp
 
 import scala.collection.mutable
 
-@RunWith(classOf[Parameterized])
+@ExtendWith(Array(classOf[ParameterizedTestExtension]))
 class TemporalTableFunctionJoinITCase(state: StateBackendMode)
   extends StreamingWithStateTestBase(state) {
 
@@ -47,7 +47,7 @@ class TemporalTableFunctionJoinITCase(state: StateBackendMode)
    * the result here. Instead of that, here we are just testing whether there are no exceptions in a
    * full blown ITCase. Actual correctness is tested in unit tests.
    */
-  @Test
+  @TestTemplate
   def testProcessTimeInnerJoin(): Unit = {
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     val tEnv = StreamTableEnvironment.create(env, TableTestUtil.STREAM_SETTING)
@@ -85,18 +85,18 @@ class TemporalTableFunctionJoinITCase(state: StateBackendMode)
       .fromCollection(ratesHistoryData)
       .toTable(tEnv, 'currency, 'rate, 'proctime.proctime)
 
-    tEnv.registerTable("Orders", orders)
-    tEnv.registerTable("RatesHistory", ratesHistory)
+    tEnv.createTemporaryView("Orders", orders)
+    tEnv.createTemporaryView("RatesHistory", ratesHistory)
     tEnv.createTemporarySystemFunction(
       "Rates",
       ratesHistory.createTemporalTableFunction($"proctime", $"currency"))
 
-    val result = tEnv.sqlQuery(sqlQuery).toAppendStream[Row]
+    val result = tEnv.sqlQuery(sqlQuery).toDataStream
     result.addSink(new TestingAppendSink)
     env.execute()
   }
 
-  @Test
+  @TestTemplate
   def testProcessTimeInnerJoinWithConstantTable(): Unit = {
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     val tEnv = StreamTableEnvironment.create(env, TableTestUtil.STREAM_SETTING)
@@ -106,12 +106,12 @@ class TemporalTableFunctionJoinITCase(state: StateBackendMode)
       .sqlQuery(
         "SELECT amount, currency, proctime() as proctime " +
           "FROM (VALUES (1, 2.0)) AS T(amount, currency)")
-      .toAppendStream[Row]
+      .toDataStream
     result.addSink(new TestingAppendSink)
     env.execute()
   }
 
-  @Test
+  @TestTemplate
   def testProcessTimeInnerJoinUnionAll(): Unit = {
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     val tEnv = StreamTableEnvironment.create(env, TableTestUtil.STREAM_SETTING)
@@ -152,22 +152,22 @@ class TemporalTableFunctionJoinITCase(state: StateBackendMode)
       .fromCollection(ratesHistoryData)
       .toTable(tEnv, 'currency, 'rate, 'proctime.proctime)
 
-    tEnv.registerTable("Orders1", orders1)
-    tEnv.registerTable("Orders2", orders2)
-    tEnv.registerTable("RatesHistory", ratesHistory)
+    tEnv.createTemporaryView("Orders1", orders1)
+    tEnv.createTemporaryView("Orders2", orders2)
+    tEnv.createTemporaryView("RatesHistory", ratesHistory)
 
-    tEnv.registerFunction(
+    tEnv.createTemporaryFunction(
       "Rates",
       ratesHistory.createTemporalTableFunction($"proctime", $"currency"))
-    tEnv.registerTable(
+    tEnv.createTemporaryView(
       "Orders",
       tEnv.sqlQuery("SELECT * FROM Orders1 UNION ALL SELECT * FROM Orders2"))
-    val result = tEnv.sqlQuery(sqlQuery).toAppendStream[Row]
+    val result = tEnv.sqlQuery(sqlQuery).toDataStream
     result.addSink(new TestingAppendSink)
     env.execute()
   }
 
-  @Test
+  @TestTemplate
   def testEventTimeInnerJoin(): Unit = {
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     val tEnv = StreamTableEnvironment.create(env, TableTestUtil.STREAM_SETTING)
@@ -210,9 +210,9 @@ class TemporalTableFunctionJoinITCase(state: StateBackendMode)
       .assignTimestampsAndWatermarks(new TimestampExtractor[(String, Long, Timestamp)]())
       .toTable(tEnv, 'currency, 'rate, 'rowtime.rowtime)
 
-    tEnv.registerTable("Orders", orders)
-    tEnv.registerTable("RatesHistory", ratesHistory)
-    tEnv.registerTable(
+    tEnv.createTemporaryView("Orders", orders)
+    tEnv.createTemporaryView("RatesHistory", ratesHistory)
+    tEnv.createTemporaryView(
       "FilteredRatesHistory",
       tEnv.sqlQuery("SELECT * FROM RatesHistory WHERE rate > 110"))
     tEnv.createTemporarySystemFunction(
@@ -220,19 +220,19 @@ class TemporalTableFunctionJoinITCase(state: StateBackendMode)
       tEnv
         .from("FilteredRatesHistory")
         .createTemporalTableFunction($"rowtime", $"currency"))
-    tEnv.registerTable("TemporalJoinResult", tEnv.sqlQuery(sqlQuery))
+    tEnv.createTemporaryView("TemporalJoinResult", tEnv.sqlQuery(sqlQuery))
 
     // Scan from registered table to test for interplay between
     // LogicalCorrelateToTemporalTableJoinRule and TableScanRule
-    val result = tEnv.from("TemporalJoinResult").toAppendStream[Row]
+    val result = tEnv.from("TemporalJoinResult").toDataStream
     val sink = new TestingAppendSink
     result.addSink(sink)
     env.execute()
 
-    assertEquals(expectedOutput, sink.getAppendResults.toSet)
+    assertThat(sink.getAppendResults.toSet).isEqualTo(expectedOutput)
   }
 
-  @Test
+  @TestTemplate
   def testNestedTemporalJoin(): Unit = {
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     val tEnv = StreamTableEnvironment.create(env, TableTestUtil.STREAM_SETTING)
@@ -297,7 +297,7 @@ class TemporalTableFunctionJoinITCase(state: StateBackendMode)
 
     // Scan from registered table to test for interplay between
     // LogicalCorrelateToTemporalTableJoinRule and TableScanRule
-    val result = tEnv.from("TemporalJoinResult").toAppendStream[Row]
+    val result = tEnv.from("TemporalJoinResult").toDataStream
     val sink = new TestingAppendSink
     result.addSink(sink)
     env.execute()
@@ -307,7 +307,7 @@ class TemporalTableFunctionJoinITCase(state: StateBackendMode)
       s"2,${1 * 102 * 10.2}",
       s"3,${50 * 1 * 1.0}",
       s"4,${3 * 116 * 11.6}")
-    assertEquals(expected.sorted, sink.getAppendResults.sorted)
+    assertThat(sink.getAppendResults.sorted).isEqualTo(expected.sorted)
   }
 }
 

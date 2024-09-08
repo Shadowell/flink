@@ -30,10 +30,11 @@ import org.junit.jupiter.api.extension.ExtensionContext;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
-import static org.apache.flink.table.gateway.rest.util.RestConfigUtils.getBaseConfig;
-import static org.apache.flink.table.gateway.rest.util.RestConfigUtils.getFlinkConfig;
+import static org.apache.flink.table.gateway.rest.util.SqlGatewayRestEndpointTestUtils.getBaseConfig;
+import static org.apache.flink.table.gateway.rest.util.SqlGatewayRestEndpointTestUtils.getFlinkConfig;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /** A simple {@link Extension} that manages the lifecycle of the {@link SqlGatewayRestEndpoint}. */
@@ -41,7 +42,10 @@ public class SqlGatewayRestEndpointExtension implements BeforeAllCallback, After
 
     private final Supplier<SqlGatewayService> serviceSupplier;
 
+    private final Consumer<Configuration> flinkConfConsumer;
+
     private SqlGatewayRestEndpoint sqlGatewayRestEndpoint;
+    private SqlGatewayService sqlGatewayService;
     private String targetAddress;
     private int targetPort;
 
@@ -53,17 +57,35 @@ public class SqlGatewayRestEndpointExtension implements BeforeAllCallback, After
         return targetPort;
     }
 
+    public SqlGatewayService getSqlGatewayService() {
+        return sqlGatewayService;
+    }
+
+    public SqlGatewayRestEndpoint getSqlGatewayRestEndpoint() {
+        return sqlGatewayRestEndpoint;
+    }
+
     public SqlGatewayRestEndpointExtension(Supplier<SqlGatewayService> serviceSupplier) {
+        this(serviceSupplier, (conf) -> {});
+    }
+
+    public SqlGatewayRestEndpointExtension(
+            Supplier<SqlGatewayService> serviceSupplier,
+            Consumer<Configuration> flinkConfConsumer) {
         this.serviceSupplier = serviceSupplier;
+        this.flinkConfConsumer = flinkConfConsumer;
     }
 
     @Override
     public void beforeAll(ExtensionContext context) {
         String address = InetAddress.getLoopbackAddress().getHostAddress();
-        Configuration config = getBaseConfig(getFlinkConfig(address, address, "0"));
+        Configuration flinkConfig = getFlinkConfig(address, address, "0");
+        flinkConfConsumer.accept(flinkConfig);
+        Configuration config = getBaseConfig(flinkConfig);
 
         try {
-            sqlGatewayRestEndpoint = new SqlGatewayRestEndpoint(config, serviceSupplier.get());
+            sqlGatewayService = serviceSupplier.get();
+            sqlGatewayRestEndpoint = new SqlGatewayRestEndpoint(config, sqlGatewayService);
             sqlGatewayRestEndpoint.start();
         } catch (Exception e) {
             throw new SqlGatewayException(

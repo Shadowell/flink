@@ -19,6 +19,7 @@
 package org.apache.flink.state.api;
 
 import org.apache.flink.api.common.RuntimeExecutionMode;
+import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.functions.RichFlatMapFunction;
 import org.apache.flink.api.common.functions.RichMapFunction;
 import org.apache.flink.api.common.state.ListState;
@@ -27,7 +28,6 @@ import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeinfo.Types;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.contrib.streaming.state.EmbeddedRocksDBStateBackend;
 import org.apache.flink.runtime.jobgraph.SavepointRestoreSettings;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
@@ -41,9 +41,9 @@ import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.co.BroadcastProcessFunction;
-import org.apache.flink.streaming.api.functions.sink.DiscardingSink;
+import org.apache.flink.streaming.api.functions.sink.v2.DiscardingSink;
 import org.apache.flink.streaming.api.graph.StreamGraph;
-import org.apache.flink.test.util.AbstractTestBase;
+import org.apache.flink.test.util.AbstractTestBaseJUnit4;
 import org.apache.flink.util.AbstractID;
 import org.apache.flink.util.CloseableIterator;
 import org.apache.flink.util.Collector;
@@ -62,7 +62,7 @@ import java.util.Set;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** IT test for writing savepoints. */
-public class SavepointWriterITCase extends AbstractTestBase {
+public class SavepointWriterITCase extends AbstractTestBaseJUnit4 {
 
     private static final String ACCOUNT_UID = "accounts";
 
@@ -113,21 +113,21 @@ public class SavepointWriterITCase extends AbstractTestBase {
         env.setRuntimeMode(RuntimeExecutionMode.AUTOMATIC);
 
         StateBootstrapTransformation<Account> transformation =
-                OperatorTransformation.bootstrapWith(env.fromCollection(accounts))
+                OperatorTransformation.bootstrapWith(env.fromData(accounts))
                         .keyBy(acc -> acc.id)
                         .transform(new AccountBootstrapper());
 
         StateBootstrapTransformation<CurrencyRate> broadcastTransformation =
-                OperatorTransformation.bootstrapWith(env.fromCollection(currencyRates))
+                OperatorTransformation.bootstrapWith(env.fromData(currencyRates))
                         .transform(new CurrencyBootstrapFunction());
 
         SavepointWriter writer =
                 backend == null
-                        ? SavepointWriter.newSavepoint(128)
-                        : SavepointWriter.newSavepoint(backend, 128);
+                        ? SavepointWriter.newSavepoint(env, 128)
+                        : SavepointWriter.newSavepoint(env, backend, 128);
 
-        writer.withOperator(ACCOUNT_UID, transformation)
-                .withOperator(CURRENCY_UID, broadcastTransformation)
+        writer.withOperator(OperatorIdentifier.forUid(ACCOUNT_UID), transformation)
+                .withOperator(getUidHashFromUid(CURRENCY_UID), broadcastTransformation)
                 .write(savepointPath);
 
         env.execute("Bootstrap");
@@ -141,18 +141,18 @@ public class SavepointWriterITCase extends AbstractTestBase {
         }
 
         DataStream<Account> stream =
-                env.fromCollection(accounts)
+                env.fromData(accounts)
                         .keyBy(acc -> acc.id)
                         .flatMap(new UpdateAndGetAccount())
                         .uid(ACCOUNT_UID);
 
         final CloseableIterator<Account> results = stream.collectAsync();
 
-        env.fromCollection(currencyRates)
-                .connect(env.fromCollection(currencyRates).broadcast(descriptor))
+        env.fromData(currencyRates)
+                .connect(env.fromData(currencyRates).broadcast(descriptor))
                 .process(new CurrencyValidationFunction())
                 .uid(CURRENCY_UID)
-                .addSink(new DiscardingSink<>());
+                .sinkTo(new DiscardingSink<>());
 
         final StreamGraph streamGraph = env.getStreamGraph();
         streamGraph.setSavepointRestoreSettings(
@@ -170,16 +170,16 @@ public class SavepointWriterITCase extends AbstractTestBase {
         env.setRuntimeMode(RuntimeExecutionMode.AUTOMATIC);
 
         StateBootstrapTransformation<Integer> transformation =
-                OperatorTransformation.bootstrapWith(env.fromElements(1, 2, 3))
+                OperatorTransformation.bootstrapWith(env.fromData(1, 2, 3))
                         .transform(new ModifyProcessFunction());
 
         SavepointWriter writer =
                 backend == null
-                        ? SavepointWriter.fromExistingSavepoint(savepointPath)
-                        : SavepointWriter.fromExistingSavepoint(savepointPath, backend);
+                        ? SavepointWriter.fromExistingSavepoint(env, savepointPath)
+                        : SavepointWriter.fromExistingSavepoint(env, savepointPath, backend);
 
-        writer.removeOperator(CURRENCY_UID)
-                .withOperator(MODIFY_UID, transformation)
+        writer.removeOperator(OperatorIdentifier.forUid(CURRENCY_UID))
+                .withOperator(getUidHashFromUid(MODIFY_UID), transformation)
                 .write(modifyPath);
 
         env.execute("Modifying");
@@ -192,7 +192,7 @@ public class SavepointWriterITCase extends AbstractTestBase {
         }
 
         DataStream<Account> stream =
-                sEnv.fromCollection(accounts)
+                sEnv.fromData(accounts)
                         .keyBy(acc -> acc.id)
                         .flatMap(new UpdateAndGetAccount())
                         .uid(ACCOUNT_UID);
@@ -202,7 +202,7 @@ public class SavepointWriterITCase extends AbstractTestBase {
         stream.map(acc -> acc.id)
                 .map(new StatefulOperator())
                 .uid(MODIFY_UID)
-                .addSink(new DiscardingSink<>());
+                .sinkTo(new DiscardingSink<>());
 
         final StreamGraph streamGraph = sEnv.getStreamGraph();
         streamGraph.setSavepointRestoreSettings(
@@ -212,6 +212,11 @@ public class SavepointWriterITCase extends AbstractTestBase {
 
         assertThat(results).toIterable().hasSize(3);
         results.close();
+    }
+
+    private static OperatorIdentifier getUidHashFromUid(String uid) {
+        return OperatorIdentifier.forUidHash(
+                OperatorIdentifier.forUid(uid).getOperatorId().toHexString());
     }
 
     /** A simple pojo. */
@@ -272,7 +277,7 @@ public class SavepointWriterITCase extends AbstractTestBase {
         ValueState<Double> state;
 
         @Override
-        public void open(Configuration parameters) {
+        public void open(OpenContext openContext) {
             ValueStateDescriptor<Double> descriptor =
                     new ValueStateDescriptor<>("total", Types.DOUBLE);
             state = getRuntimeContext().getState(descriptor);
@@ -289,8 +294,8 @@ public class SavepointWriterITCase extends AbstractTestBase {
         ValueState<Double> state;
 
         @Override
-        public void open(Configuration parameters) throws Exception {
-            super.open(parameters);
+        public void open(OpenContext openContext) throws Exception {
+            super.open(openContext);
 
             ValueStateDescriptor<Double> descriptor =
                     new ValueStateDescriptor<>("total", Types.DOUBLE);
@@ -316,7 +321,7 @@ public class SavepointWriterITCase extends AbstractTestBase {
         ListState<Integer> state;
 
         @Override
-        public void open(Configuration parameters) {
+        public void open(OpenContext openContext) {
             numbers = new ArrayList<>();
         }
 
@@ -327,8 +332,7 @@ public class SavepointWriterITCase extends AbstractTestBase {
 
         @Override
         public void snapshotState(FunctionSnapshotContext context) throws Exception {
-            state.clear();
-            state.addAll(numbers);
+            state.update(numbers);
         }
 
         @Override
@@ -347,14 +351,13 @@ public class SavepointWriterITCase extends AbstractTestBase {
         ListState<Integer> state;
 
         @Override
-        public void open(Configuration parameters) {
+        public void open(OpenContext openContext) {
             numbers = new ArrayList<>();
         }
 
         @Override
         public void snapshotState(FunctionSnapshotContext context) throws Exception {
-            state.clear();
-            state.addAll(numbers);
+            state.update(numbers);
         }
 
         @Override

@@ -67,6 +67,7 @@ class CreateTableLikeTest {
                                         + "LIKE b (\n"
                                         + "   EXCLUDING PARTITIONS\n"
                                         + "   EXCLUDING CONSTRAINTS\n"
+                                        + "   EXCLUDING DISTRIBUTION\n"
                                         + "   EXCLUDING WATERMARKS\n"
                                         + "   OVERWRITING GENERATED\n"
                                         + "   OVERWRITING OPTIONS\n"
@@ -86,6 +87,9 @@ class CreateTableLikeTest {
                                                         option(
                                                                 MergingStrategy.EXCLUDING,
                                                                 FeatureOption.CONSTRAINTS),
+                                                        option(
+                                                                MergingStrategy.EXCLUDING,
+                                                                FeatureOption.DISTRIBUTION),
                                                         option(
                                                                 MergingStrategy.EXCLUDING,
                                                                 FeatureOption.WATERMARKS),
@@ -153,6 +157,25 @@ class CreateTableLikeTest {
     }
 
     @Test
+    void testInvalidOverwritingForDistribution() throws Exception {
+        ExtendedSqlNode extendedSqlNode =
+                (ExtendedSqlNode)
+                        createFlinkParser(
+                                        "CREATE TABLE t (\n"
+                                                + "   a STRING\n"
+                                                + ")\n"
+                                                + "LIKE b (\n"
+                                                + "   OVERWRITING DISTRIBUTION"
+                                                + ")")
+                                .parseStmt();
+
+        assertThatThrownBy(extendedSqlNode::validate)
+                .isInstanceOf(SqlValidateException.class)
+                .hasMessageContaining(
+                        "Illegal merging strategy 'OVERWRITING' for 'DISTRIBUTION' option.");
+    }
+
+    @Test
     void testInvalidOverwritingForConstraints() throws Exception {
         ExtendedSqlNode extendedSqlNode =
                 (ExtendedSqlNode)
@@ -204,6 +227,7 @@ class CreateTableLikeTest {
                                 + "    <BRACKET_QUOTED_IDENTIFIER> ...\n"
                                 + "    <QUOTED_IDENTIFIER> ...\n"
                                 + "    <BACK_QUOTED_IDENTIFIER> ...\n"
+                                + "    <BIG_QUERY_BACK_QUOTED_IDENTIFIER> ...\n"
                                 + "    <HYPHENATED_IDENTIFIER> ...\n"
                                 + "    <IDENTIFIER> ...\n"
                                 + "    <UNICODE_QUOTED_IDENTIFIER> ...\n");

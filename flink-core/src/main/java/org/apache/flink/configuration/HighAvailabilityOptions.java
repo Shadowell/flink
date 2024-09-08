@@ -18,13 +18,20 @@
 
 package org.apache.flink.configuration;
 
+import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.annotation.docs.Documentation;
 import org.apache.flink.configuration.description.Description;
 import org.apache.flink.configuration.description.TextElement;
 
+import java.time.Duration;
+import java.util.Map;
+
 import static org.apache.flink.configuration.ConfigOptions.key;
+import static org.apache.flink.configuration.description.LinkElement.link;
+import static org.apache.flink.configuration.description.TextElement.text;
 
 /** The set of configuration options relating to high-availability settings. */
+@PublicEvolving
 public class HighAvailabilityOptions {
 
     // ------------------------------------------------------------------------
@@ -36,12 +43,12 @@ public class HighAvailabilityOptions {
      * highly available setup. To enable high-availability, set this mode to "ZOOKEEPER" or
      * "KUBERNETES". Can also be set to the FQN of the HighAvailability factory class.
      */
-    @Documentation.Section(Documentation.Sections.COMMON_HIGH_AVAILABILITY)
+    @Documentation.Section(value = Documentation.Sections.COMMON_HIGH_AVAILABILITY, position = 1)
     public static final ConfigOption<String> HA_MODE =
-            key("high-availability")
+            key("high-availability.type")
                     .stringType()
                     .defaultValue("NONE")
-                    .withDeprecatedKeys("recovery.mode")
+                    .withDeprecatedKeys("recovery.mode", "high-availability")
                     .withDescription(
                             "Defines high-availability mode used for cluster execution."
                                     + " To enable high-availability, set this mode to \"ZOOKEEPER\", \"KUBERNETES\", or specify the fully qualified name of the factory class.");
@@ -134,29 +141,28 @@ public class HighAvailabilityOptions {
     // ------------------------------------------------------------------------
 
     @Documentation.Section(Documentation.Sections.EXPERT_ZOOKEEPER_HIGH_AVAILABILITY)
-    public static final ConfigOption<Integer> ZOOKEEPER_SESSION_TIMEOUT =
+    public static final ConfigOption<Duration> ZOOKEEPER_SESSION_TIMEOUT =
             key("high-availability.zookeeper.client.session-timeout")
-                    .intType()
-                    .defaultValue(60000)
+                    .durationType()
+                    .defaultValue(Duration.ofMillis(60000))
                     .withDeprecatedKeys("recovery.zookeeper.client.session-timeout")
-                    .withDescription(
-                            "Defines the session timeout for the ZooKeeper session in ms.");
+                    .withDescription("Defines the session timeout for the ZooKeeper session.");
 
     @Documentation.Section(Documentation.Sections.EXPERT_ZOOKEEPER_HIGH_AVAILABILITY)
-    public static final ConfigOption<Integer> ZOOKEEPER_CONNECTION_TIMEOUT =
+    public static final ConfigOption<Duration> ZOOKEEPER_CONNECTION_TIMEOUT =
             key("high-availability.zookeeper.client.connection-timeout")
-                    .intType()
-                    .defaultValue(15000)
+                    .durationType()
+                    .defaultValue(Duration.ofMillis(15000))
                     .withDeprecatedKeys("recovery.zookeeper.client.connection-timeout")
-                    .withDescription("Defines the connection timeout for ZooKeeper in ms.");
+                    .withDescription("Defines the connection timeout for ZooKeeper.");
 
     @Documentation.Section(Documentation.Sections.EXPERT_ZOOKEEPER_HIGH_AVAILABILITY)
-    public static final ConfigOption<Integer> ZOOKEEPER_RETRY_WAIT =
+    public static final ConfigOption<Duration> ZOOKEEPER_RETRY_WAIT =
             key("high-availability.zookeeper.client.retry-wait")
-                    .intType()
-                    .defaultValue(5000)
+                    .durationType()
+                    .defaultValue(Duration.ofMillis(5000))
                     .withDeprecatedKeys("recovery.zookeeper.client.retry-wait")
-                    .withDescription("Defines the pause between consecutive retries in ms.");
+                    .withDescription("Defines the pause between consecutive retries.");
 
     @Documentation.Section(Documentation.Sections.EXPERT_ZOOKEEPER_HIGH_AVAILABILITY)
     public static final ConfigOption<Integer> ZOOKEEPER_MAX_RETRY_ATTEMPTS =
@@ -167,11 +173,16 @@ public class HighAvailabilityOptions {
                     .withDescription(
                             "Defines the number of connection retries before the client gives up.");
 
+    /** @deprecated Don't use this option anymore. It has no effect on Flink. */
+    @Deprecated
     @Documentation.Section(Documentation.Sections.EXPERT_ZOOKEEPER_HIGH_AVAILABILITY)
     public static final ConfigOption<String> ZOOKEEPER_RUNNING_JOB_REGISTRY_PATH =
             key("high-availability.zookeeper.path.running-registry")
                     .stringType()
-                    .defaultValue("/running_job_registry/");
+                    .defaultValue("/running_job_registry/")
+                    .withDescription(
+                            "Don't use this option anymore. It has no effect on Flink. The RunningJobRegistry has been "
+                                    + "replaced by the JobResultStore in Flink 1.15.");
 
     @Documentation.Section(Documentation.Sections.EXPERT_ZOOKEEPER_HIGH_AVAILABILITY)
     public static final ConfigOption<String> ZOOKEEPER_CLIENT_ACL =
@@ -197,6 +208,66 @@ public class HighAvailabilityOptions {
                                                     + "effect that Flink is more resilient against temporary connection instabilities at the cost of running "
                                                     + "more likely into timing issues with ZooKeeper.",
                                             TextElement.code("true"))
+                                    .build());
+
+    @Documentation.Section(Documentation.Sections.EXPERT_ZOOKEEPER_HIGH_AVAILABILITY)
+    public static final ConfigOption<Boolean> ZOOKEEPER_ENSEMBLE_TRACKING =
+            key("high-availability.zookeeper.client.ensemble-tracker")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription(
+                            Description.builder()
+                                    .text(
+                                            "Defines whether Curator should enable ensemble tracker. This can be useful in certain scenarios "
+                                                    + "in which CuratorFramework is accessing to ZK clusters via load balancer or Virtual IPs. "
+                                                    + "Default Curator EnsembleTracking logic watches CuratorEventType.GET_CONFIG events and "
+                                                    + "changes ZooKeeper connection string. It is not desired behaviour when ZooKeeper is running under the Virtual IPs. "
+                                                    + "Under certain configurations EnsembleTracking can lead to setting of ZooKeeper connection string "
+                                                    + "with unresolvable hostnames.")
+                                    .build());
+
+    public static final ConfigOption<Map<String, String>> ZOOKEEPER_CLIENT_AUTHORIZATION =
+            key("high-availability.zookeeper.client.authorization")
+                    .mapType()
+                    .noDefaultValue()
+                    .withDescription(
+                            Description.builder()
+                                    .text(
+                                            "Add connection authorization Subsequent calls to this method overwrite the prior calls. "
+                                                    + "In certain cases ZooKeeper requires additional Authorization information. "
+                                                    + "For example list of valid names for ensemble in order to prevent accidentally connecting to a wrong ensemble. "
+                                                    + "Each entry of type Map.Entry<String, String> will be transformed "
+                                                    + "into an AuthInfo object with the constructor AuthInfo(String, byte[]). "
+                                                    + "The field entry.key() will serve as the String scheme value, while the field entry.getValue() "
+                                                    + "will be initially converted to a byte[] using the String#getBytes() method with %s encoding. "
+                                                    + "If not set the default configuration for a Curator would be applied.",
+                                            text(ConfigConstants.DEFAULT_CHARSET.displayName()))
+                                    .build());
+
+    public static final ConfigOption<Duration> ZOOKEEPER_MAX_CLOSE_WAIT =
+            key("high-availability.zookeeper.client.max-close-wait")
+                    .durationType()
+                    .noDefaultValue()
+                    .withDescription(
+                            Description.builder()
+                                    .text(
+                                            "Defines the time Curator should wait during close to join background threads. "
+                                                    + "If not set the default configuration for a Curator would be applied.")
+                                    .build());
+
+    public static final ConfigOption<Integer> ZOOKEEPER_SIMULATED_SESSION_EXP_PERCENT =
+            key("high-availability.zookeeper.client.simulated-session-expiration-percent")
+                    .intType()
+                    .noDefaultValue()
+                    .withDescription(
+                            Description.builder()
+                                    .text(
+                                            "The percentage set by this method determines how and if Curator will check for session expiration. "
+                                                    + "See Curator documentation for %s property for more information.",
+                                            link(
+                                                    "https://curator.apache.org/apidocs/org/apache/curator/framework/"
+                                                            + "CuratorFrameworkFactory.Builder.html#simulatedSessionExpirationPercent(int)",
+                                                    "simulatedSessionExpirationPercent"))
                                     .build());
 
     // ------------------------------------------------------------------------

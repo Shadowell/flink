@@ -25,6 +25,7 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.security.FlinkSecurityManager;
 import org.apache.flink.core.security.UserSystemExitException;
 import org.apache.flink.runtime.broadcast.BroadcastVariableManager;
+import org.apache.flink.runtime.checkpoint.channel.ChannelStateWriteRequestExecutorFactory;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
 import org.apache.flink.runtime.deployment.InputGateDeploymentDescriptor;
 import org.apache.flink.runtime.deployment.ResultPartitionDeploymentDescriptor;
@@ -37,10 +38,12 @@ import org.apache.flink.runtime.filecache.FileCache;
 import org.apache.flink.runtime.io.disk.iomanager.IOManagerAsync;
 import org.apache.flink.runtime.io.network.NettyShuffleEnvironmentBuilder;
 import org.apache.flink.runtime.io.network.TaskEventDispatcher;
+import org.apache.flink.runtime.jobgraph.JobType;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.jobgraph.tasks.InputSplitProvider;
 import org.apache.flink.runtime.memory.MemoryManagerBuilder;
+import org.apache.flink.runtime.memory.SharedResources;
 import org.apache.flink.runtime.metrics.groups.UnregisteredMetricGroups;
 import org.apache.flink.runtime.operators.testutils.MockEnvironmentBuilder;
 import org.apache.flink.runtime.query.KvStateRegistry;
@@ -63,18 +66,17 @@ import org.apache.flink.streaming.api.operators.StreamOperator;
 import org.apache.flink.streaming.api.operators.StreamSource;
 import org.apache.flink.streaming.runtime.tasks.mailbox.MailboxDefaultAction;
 import org.apache.flink.util.SerializedValue;
-import org.apache.flink.util.TestLogger;
 import org.apache.flink.util.concurrent.Executors;
 
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
 
 import static org.apache.flink.runtime.executiongraph.ExecutionGraphTestUtils.createExecutionAttemptId;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 
 /**
@@ -82,7 +84,7 @@ import static org.mockito.Mockito.mock;
  * exit is enabled inside relevant methods that can call user-defined functions in {@code
  * StreamTask}.
  */
-public class StreamTaskSystemExitTest extends TestLogger {
+class StreamTaskSystemExitTest {
     private static final int TEST_EXIT_CODE = 123;
     private SecurityManager originalSecurityManager;
 
@@ -97,8 +99,8 @@ public class StreamTaskSystemExitTest extends TestLogger {
         }
     }
 
-    @Before
-    public void setUp() {
+    @BeforeEach
+    void setUp() {
         Configuration configuration = new Configuration();
         configuration.set(
                 ClusterOptions.INTERCEPT_USER_SYSTEM_EXIT, ClusterOptions.UserSystemExitMode.THROW);
@@ -106,44 +108,49 @@ public class StreamTaskSystemExitTest extends TestLogger {
         FlinkSecurityManager.setFromConfiguration(configuration);
     }
 
-    @After
-    public void tearDown() {
+    @AfterEach
+    void tearDown() {
         System.setSecurityManager(originalSecurityManager);
     }
 
     @Test
-    public void testInitSystemExitStreamTask() throws Exception {
+    void testInitSystemExitStreamTask() throws Exception {
         Task task = createSystemExitTask(InitSystemExitStreamTask.class.getName(), null);
         task.run();
-        assertNotNull(task.getFailureCause());
-        assertEquals(task.getFailureCause().getClass(), UserSystemExitException.class);
+        assertThat(task.getFailureCause())
+                .isNotNull()
+                .isExactlyInstanceOf(UserSystemExitException.class);
     }
 
     @Test
-    public void testProcessInputSystemExitStreamTask() throws Exception {
+    void testProcessInputSystemExitStreamTask() throws Exception {
         Task task = createSystemExitTask(ProcessInputSystemExitStreamTask.class.getName(), null);
         task.run();
-        assertNotNull(task.getFailureCause());
-        assertEquals(task.getFailureCause().getClass(), UserSystemExitException.class);
+        assertThat(task.getFailureCause())
+                .isNotNull()
+                .isExactlyInstanceOf(UserSystemExitException.class);
     }
 
-    @Test(expected = UserSystemExitException.class)
-    public void testCancelSystemExitStreamTask() throws Exception {
+    @Test
+    void testCancelSystemExitStreamTask() throws Exception {
         Environment mockEnvironment = new MockEnvironmentBuilder().build();
         SystemExitStreamTask systemExitStreamTask =
                 new SystemExitStreamTask(mockEnvironment, SystemExitStreamTask.ExitPoint.CANCEL);
-        systemExitStreamTask.cancel();
+
+        assertThatThrownBy(() -> systemExitStreamTask.cancel())
+                .isInstanceOf(UserSystemExitException.class);
     }
 
     @Test
-    public void testStreamSourceSystemExitStreamTask() throws Exception {
+    void testStreamSourceSystemExitStreamTask() throws Exception {
         final TestStreamSource<String, SystemExitSourceFunction> testStreamSource =
                 new TestStreamSource<>(new SystemExitSourceFunction());
         Task task =
                 createSystemExitTask(SystemExitSourceStreamTask.class.getName(), testStreamSource);
         task.run();
-        assertNotNull(task.getFailureCause());
-        assertEquals(task.getFailureCause().getClass(), UserSystemExitException.class);
+        assertThat(task.getFailureCause())
+                .isNotNull()
+                .isExactlyInstanceOf(UserSystemExitException.class);
     }
 
     private Task createSystemExitTask(final String invokableClassName, StreamOperator<?> operator)
@@ -158,6 +165,7 @@ public class StreamTaskSystemExitTest extends TestLogger {
         final JobInformation jobInformation =
                 new JobInformation(
                         new JobID(),
+                        JobType.STREAMING,
                         "Test Job",
                         new SerializedValue<>(new ExecutionConfig()),
                         new Configuration(),
@@ -186,6 +194,7 @@ public class StreamTaskSystemExitTest extends TestLogger {
                 Collections.<ResultPartitionDeploymentDescriptor>emptyList(),
                 Collections.<InputGateDeploymentDescriptor>emptyList(),
                 MemoryManagerBuilder.newBuilder().setMemorySize(32L * 1024L).build(),
+                new SharedResources(),
                 new IOManagerAsync(),
                 shuffleEnvironment,
                 new KvStateService(new KvStateRegistry(), null, null),
@@ -203,7 +212,8 @@ public class StreamTaskSystemExitTest extends TestLogger {
                 taskManagerRuntimeInfo,
                 UnregisteredMetricGroups.createUnregisteredTaskMetricGroup(),
                 mock(PartitionProducerStateChecker.class),
-                Executors.directExecutor());
+                Executors.directExecutor(),
+                new ChannelStateWriteRequestExecutorFactory(jobInformation.getJobId()));
     }
 
     /** StreamTask emulating system exit behavior from different callback functions. */

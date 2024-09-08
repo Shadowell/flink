@@ -30,7 +30,7 @@ import org.apache.flink.runtime.state.StateSnapshotTransformer;
 import org.apache.flink.runtime.state.memory.ByteStreamStateHandle;
 import org.apache.flink.runtime.state.ttl.mock.MockKeyedStateBackend.MockSnapshotSupplier;
 import org.apache.flink.runtime.state.ttl.mock.MockStateBackend;
-import org.apache.flink.test.util.AbstractTestBase;
+import org.apache.flink.test.util.AbstractTestBaseJUnit4;
 import org.apache.flink.testutils.junit.SharedObjects;
 
 import org.junit.Rule;
@@ -38,7 +38,7 @@ import org.junit.Test;
 
 import java.util.Map;
 
-import static java.util.Collections.emptyMap;
+import static java.util.Collections.emptyList;
 import static java.util.UUID.randomUUID;
 import static org.apache.flink.runtime.operators.lifecycle.command.TestCommand.FINISH_SOURCES;
 import static org.apache.flink.runtime.operators.lifecycle.command.TestCommandDispatcher.TestCommandScope.ALL_SUBTASKS;
@@ -51,7 +51,7 @@ import static org.apache.flink.runtime.state.KeyGroupRange.EMPTY_KEY_GROUP_RANGE
  * org.apache.flink.runtime.checkpoint.CheckpointCoordinator} which doesn't expect to receive the
  * same object.
  */
-public class StateHandleReuseITCase extends AbstractTestBase {
+public class StateHandleReuseITCase extends AbstractTestBaseJUnit4 {
     @Rule public final SharedObjects sharedObjects = SharedObjects.create();
 
     @Test
@@ -89,8 +89,8 @@ public class StateHandleReuseITCase extends AbstractTestBase {
                         randomUUID(),
                         EMPTY_KEY_GROUP_RANGE,
                         1L,
-                        emptyMap(),
-                        emptyMap(),
+                        emptyList(),
+                        emptyList(),
                         new ByteStreamStateHandle("meta", new byte[] {0}),
                         0L);
 

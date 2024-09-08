@@ -25,7 +25,7 @@ import org.apache.flink.runtime.state.StreamStateHandle;
 import org.apache.flink.util.clock.Clock;
 import org.apache.flink.util.clock.SystemClock;
 
-import org.apache.flink.shaded.guava30.com.google.common.io.Closer;
+import org.apache.flink.shaded.guava32.com.google.common.io.Closer;
 
 import java.io.IOException;
 import java.util.Collection;
@@ -33,7 +33,6 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.function.BiFunction;
-import java.util.stream.Collectors;
 
 /** Base implementation of StateChangeUploader. */
 public abstract class AbstractStateChangeFsUploader implements StateChangeUploader {
@@ -80,22 +79,16 @@ public abstract class AbstractStateChangeFsUploader implements StateChangeUpload
             for (UploadTask task : tasks) {
                 tasksOffsets.put(task, format.write(stream, task.changeSets));
             }
+
+            long numOfChangeSets = tasks.stream().flatMap(t -> t.getChangeSets().stream()).count();
+
             StreamStateHandle handle = stream.getHandle(handleFactory);
-            changelogRegistry.startTracking(
-                    handle,
-                    tasks.stream()
-                            .flatMap(t -> t.getChangeSets().stream())
-                            .map(StateChangeSet::getLogId)
-                            .collect(Collectors.toSet()));
+            changelogRegistry.startTracking(handle, numOfChangeSets);
+
             if (stream instanceof DuplicatingOutputStreamWithPos) {
                 StreamStateHandle localHandle =
                         ((DuplicatingOutputStreamWithPos) stream).getSecondaryHandle(handleFactory);
-                changelogRegistry.startTracking(
-                        localHandle,
-                        tasks.stream()
-                                .flatMap(t -> t.getChangeSets().stream())
-                                .map(StateChangeSet::getLogId)
-                                .collect(Collectors.toSet()));
+                changelogRegistry.startTracking(localHandle, numOfChangeSets);
                 return new UploadTasksResult(tasksOffsets, handle, localHandle);
             }
             // WARN: streams have to be closed before returning the results

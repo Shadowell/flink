@@ -20,19 +20,18 @@ from __future__ import print_function
 import io
 import os
 import platform
+import re
 import sys
-import warnings
 from distutils.command.build_ext import build_ext
 from shutil import copytree, copy, rmtree
 
 from setuptools import setup, Extension
+from xml.etree import ElementTree as ET
 
-if sys.version_info < (3, 6):
-    print("Python versions prior to 3.6 are not supported for PyFlink.",
+if sys.version_info < (3, 8):
+    print("Python versions prior to 3.8 are not supported for PyFlink.",
           file=sys.stderr)
     sys.exit(-1)
-elif sys.version_info.minor == 6:
-    warnings.warn("Python version 3.6 won't be supported for PyFlink after 1.16.")
 
 
 def remove_if_exists(file_path):
@@ -209,7 +208,16 @@ try:
             print("Temp path for symlink to parent already exists {0}".format(TEMP_PATH),
                   file=sys.stderr)
             sys.exit(-1)
-        flink_version = VERSION.replace(".dev0", "-SNAPSHOT")
+        namespace = "http://maven.apache.org/POM/4.0.0"
+        flink_version = ET.parse("../pom.xml").getroot().find(
+            'POM:version',
+            namespaces={
+                'POM': 'http://maven.apache.org/POM/4.0.0'
+            }).text
+        if not flink_version:
+            print("Not able to get flink version", file=sys.stderr)
+            sys.exit(-1)
+        print("Detected flink version: {0}".format(flink_version))
         FLINK_HOME = os.path.abspath(
             "../flink-dist/target/flink-%s-bin/flink-%s" % (flink_version, flink_version))
         FLINK_ROOT = os.path.abspath("..")
@@ -255,7 +263,7 @@ try:
                   "is complete, or do this in the flink-python directory of the flink source "
                   "directory.")
             sys.exit(-1)
-    if VERSION.find('dev0') != -1:
+    if re.search('dev.*$', VERSION) is not None:
         apache_flink_libraries_dependency = 'apache-flink-libraries==%s' % VERSION
     else:
         split_versions = VERSION.split('.')
@@ -308,24 +316,18 @@ try:
         'pyflink.examples': ['*.py', '*/*.py'],
         'pyflink.bin': ['*']}
 
-    install_requires = ['py4j==0.10.9.3', 'python-dateutil==2.8.0', 'apache-beam==2.38.0',
-                        'cloudpickle==2.1.0', 'avro-python3>=1.8.1,!=1.9.2,<1.10.0',
-                        'pytz>=2018.3', 'fastavro>=1.1.0,<1.4.8', 'requests>=2.26.0',
-                        'protobuf<3.18',
-                        'pemja==0.2.4;'
-                        'python_full_version >= "3.7" and platform_system != "Windows"',
-                        'httplib2>=0.19.0,<=0.20.4', apache_flink_libraries_dependency]
-
-    if sys.version_info < (3, 7):
-        # python 3.6 upper and lower limit
-        install_requires.append('numpy>=1.14.3,<1.20')
-        install_requires.append('pandas>=1.0,<1.2.0')
-        install_requires.append('pyarrow>=0.15.1,<7.0.0')
-    else:
-        # python 3.7, 3.8 and 3.9 upper limit and M1 chip lower limit,
-        install_requires.append('numpy>=1.21.4,<1.22.0')
-        install_requires.append('pandas>=1.3.0,<1.4.0')
-        install_requires.append('pyarrow>=5.0.0,<9.0.0')
+    install_requires = ['py4j==0.10.9.7', 'python-dateutil>=2.8.0,<3',
+                        'apache-beam>=2.43.0,<2.49.0',
+                        'cloudpickle>=2.2.0', 'avro-python3>=1.8.1,!=1.9.2',
+                        'pytz>=2018.3', 'fastavro>=1.1.0,!=1.8.0', 'requests>=2.26.0',
+                        'protobuf>=3.19.0',
+                        'numpy>=1.22.4',
+                        'pandas>=1.3.0',
+                        'pyarrow>=5.0.0',
+                        'pemja==0.4.1;platform_system != "Windows"',
+                        'httplib2>=0.19.0',
+                        'ruamel.yaml>=0.18.4',
+                        apache_flink_libraries_dependency]
 
     setup(
         name='apache-flink',
@@ -339,10 +341,9 @@ try:
         license='https://www.apache.org/licenses/LICENSE-2.0',
         author='Apache Software Foundation',
         author_email='dev@flink.apache.org',
-        python_requires='>=3.6',
+        python_requires='>=3.8',
         install_requires=install_requires,
         cmdclass={'build_ext': build_ext},
-        tests_require=['pytest==4.4.1'],
         description='Apache Flink Python API',
         long_description=long_description,
         long_description_content_type='text/markdown',
@@ -350,10 +351,10 @@ try:
         classifiers=[
             'Development Status :: 5 - Production/Stable',
             'License :: OSI Approved :: Apache Software License',
-            'Programming Language :: Python :: 3.6',
-            'Programming Language :: Python :: 3.7',
             'Programming Language :: Python :: 3.8',
-            'Programming Language :: Python :: 3.9'],
+            'Programming Language :: Python :: 3.9',
+            'Programming Language :: Python :: 3.10',
+            'Programming Language :: Python :: 3.11'],
         ext_modules=extensions
     )
 finally:

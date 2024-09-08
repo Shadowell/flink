@@ -18,6 +18,7 @@
 
 package org.apache.flink.connectors.hive;
 
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.FilterFunction;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeinfo.Types;
@@ -25,11 +26,11 @@ import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.api.java.typeutils.MapTypeInfo;
 import org.apache.flink.api.java.typeutils.RowTypeInfo;
 import org.apache.flink.configuration.ReadableConfig;
+import org.apache.flink.connector.datagen.source.TestDataGenerators;
 import org.apache.flink.core.testutils.CommonTestUtils;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.util.FiniteTestSource;
 import org.apache.flink.table.HiveVersionTestUtil;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.SqlDialect;
@@ -40,8 +41,8 @@ import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.api.internal.TableEnvironmentImpl;
 import org.apache.flink.table.catalog.CatalogPartitionSpec;
-import org.apache.flink.table.catalog.CatalogTable;
 import org.apache.flink.table.catalog.ObjectPath;
+import org.apache.flink.table.catalog.ResolvedCatalogTable;
 import org.apache.flink.table.catalog.exceptions.CatalogException;
 import org.apache.flink.table.catalog.exceptions.TableNotExistException;
 import org.apache.flink.table.catalog.exceptions.TableNotPartitionedException;
@@ -50,7 +51,6 @@ import org.apache.flink.table.catalog.hive.HiveTestUtils;
 import org.apache.flink.table.connector.ProviderContext;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.factories.DynamicTableFactory;
-import org.apache.flink.table.factories.TableSourceFactory;
 import org.apache.flink.table.module.CoreModuleFactory;
 import org.apache.flink.table.module.hive.HiveModule;
 import org.apache.flink.table.planner.delegation.PlannerBase;
@@ -313,9 +313,7 @@ public class HiveTableSourceITCase extends BatchAbstractTestBase {
             explain = query.explain().split("==.*==\n");
             assertThat(catalog.fallback).isFalse();
             optimizedPlan = explain[2];
-            assertThat(optimizedPlan)
-                    .as(optimizedPlan)
-                    .contains("table=[[test-catalog, db1, part, partitions=[], project=[x]]]");
+            assertThat(optimizedPlan).as(optimizedPlan).contains("Values(tuples=[[]], values=[x])");
             results = CollectionUtil.iteratorToList(query.execute().collect());
             assertThat(results.toString()).isEqualTo("[]");
 
@@ -358,9 +356,7 @@ public class HiveTableSourceITCase extends BatchAbstractTestBase {
             explain = query.explain().split("==.*==\n");
             assertThat(catalog.fallback).isFalse();
             optimizedPlan = explain[2];
-            assertThat(optimizedPlan)
-                    .as(optimizedPlan)
-                    .contains("table=[[test-catalog, db1, part, partitions=[], project=[x]]]");
+            assertThat(optimizedPlan).as(optimizedPlan).contains("Values(tuples=[[]], values=[x])");
             results = CollectionUtil.iteratorToList(query.execute().collect());
             assertThat(results.toString()).isEqualTo("[]");
         } finally {
@@ -854,7 +850,7 @@ public class HiveTableSourceITCase extends BatchAbstractTestBase {
 
         doAnswer(
                         invocation -> {
-                            TableSourceFactory.Context context = invocation.getArgument(0);
+                            DynamicTableFactory.Context context = invocation.getArgument(0);
                             assertThat(
                                             context.getConfiguration()
                                                     .get(
@@ -865,7 +861,7 @@ public class HiveTableSourceITCase extends BatchAbstractTestBase {
                                     new JobConf(hiveCatalog.getHiveConf()),
                                     context.getConfiguration(),
                                     context.getObjectIdentifier().toObjectPath(),
-                                    context.getTable(),
+                                    context.getCatalogTable(),
                                     inferParallelism);
                         })
                 .when(tableFactorySpy)
@@ -895,7 +891,7 @@ public class HiveTableSourceITCase extends BatchAbstractTestBase {
 
     private void testCaseInsensitive(String format) throws Exception {
         TableEnvironment tEnv = createTableEnvWithHiveCatalog(hiveCatalog);
-        String folderURI = TEMPORARY_FOLDER.newFolder().toURI().toString();
+        String folderURI = createTempFolder().toURI().toString();
 
         // Flink to write sensitive fields to parquet file
         tEnv.executeSql(
@@ -984,25 +980,28 @@ public class HiveTableSourceITCase extends BatchAbstractTestBase {
 
         List<Row> rows = generateRows();
         List<Row> expectedRows = generateExpectedRows(rows);
+
+        RowTypeInfo typeInfo =
+                new RowTypeInfo(
+                        new TypeInformation[] {
+                            Types.INT,
+                            Types.STRING,
+                            new RowTypeInfo(
+                                    new TypeInformation[] {Types.STRING, Types.INT, Types.INT},
+                                    new String[] {"c1", "c2", "c3"}),
+                            new MapTypeInfo<>(Types.STRING, Types.STRING),
+                            Types.OBJECT_ARRAY(Types.STRING),
+                            Types.STRING
+                        },
+                        new String[] {"a", "b", "c", "d", "e", "f"});
+
         DataStream<Row> stream =
-                env.addSource(
-                                new FiniteTestSource<>(rows),
-                                new RowTypeInfo(
-                                        new TypeInformation[] {
-                                            Types.INT,
-                                            Types.STRING,
-                                            new RowTypeInfo(
-                                                    new TypeInformation[] {
-                                                        Types.STRING, Types.INT, Types.INT
-                                                    },
-                                                    new String[] {"c1", "c2", "c3"}),
-                                            new MapTypeInfo<>(Types.STRING, Types.STRING),
-                                            Types.OBJECT_ARRAY(Types.STRING),
-                                            Types.STRING
-                                        },
-                                        new String[] {"a", "b", "c", "d", "e", "f"}))
+                env.fromSource(
+                                TestDataGenerators.fromDataWithSnapshotsLatch(rows, typeInfo),
+                                WatermarkStrategy.noWatermarks(),
+                                "Test Source")
                         .filter((FilterFunction<Row>) value -> true)
-                        .setParallelism(3); // to parallel tasks
+                        .setParallelism(3);
 
         tEnv.createTemporaryView("my_table", stream);
         assertResults(executeAndGetResult(tEnv), expectedRows);
@@ -1036,19 +1035,7 @@ public class HiveTableSourceITCase extends BatchAbstractTestBase {
         sortedRows.addAll(rows);
         sortedRows.addAll(rows);
         sortedRows.sort(Comparator.comparingInt(o -> (Integer) o.getField(0)));
-
-        List<Row> expectedRows = new ArrayList<>();
-        for (int i = 0; i < sortedRows.size(); i++) {
-            Row rowExpect = Row.copy(sortedRows.get(i));
-            Row nestedRow = (Row) rowExpect.getField(2);
-            if (nestedRow.getField(0) == null
-                    && nestedRow.getField(1) == null
-                    && nestedRow.getField(2) == null) {
-                rowExpect.setField(2, null);
-            }
-            expectedRows.add(rowExpect);
-        }
-        return expectedRows;
+        return sortedRows;
     }
 
     private static CloseableIterator<Row> executeAndGetResult(StreamTableEnvironment tEnv)
@@ -1097,7 +1084,7 @@ public class HiveTableSourceITCase extends BatchAbstractTestBase {
                 JobConf jobConf,
                 ReadableConfig flinkConf,
                 ObjectPath tablePath,
-                CatalogTable catalogTable,
+                ResolvedCatalogTable catalogTable,
                 boolean inferParallelism) {
             super(jobConf, flinkConf, tablePath, catalogTable);
             this.inferParallelism = inferParallelism;

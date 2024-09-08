@@ -19,6 +19,8 @@ limitations under the License.
 package org.apache.flink.runtime.operators.coordination;
 
 import org.apache.flink.annotation.VisibleForTesting;
+import org.apache.flink.metrics.groups.OperatorCoordinatorMetricGroup;
+import org.apache.flink.runtime.checkpoint.CheckpointCoordinator;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.function.ThrowingConsumer;
@@ -116,6 +118,11 @@ public class RecreateOnResetOperatorCoordinator implements OperatorCoordinator {
     }
 
     @Override
+    public void notifyCheckpointAborted(long checkpointId) {
+        coordinator.applyCall("checkpointAborted", c -> c.notifyCheckpointAborted(checkpointId));
+    }
+
+    @Override
     public void resetToCheckpoint(final long checkpointId, @Nullable final byte[] checkpointData) {
         // First bump up the coordinator epoch to fence out the active coordinator.
         LOG.info("Resetting coordinator to checkpoint.");
@@ -153,9 +160,19 @@ public class RecreateOnResetOperatorCoordinator implements OperatorCoordinator {
                 });
     }
 
+    @Override
+    public boolean supportsBatchSnapshot() {
+        try {
+            return getInternalCoordinator().supportsBatchSnapshot();
+        } catch (Exception e) {
+            String msg = "Could not get internal coordinator";
+            LOG.error(msg, e);
+            throw new RuntimeException(msg, e);
+        }
+    }
+
     // ---------------------
 
-    @VisibleForTesting
     public OperatorCoordinator getInternalCoordinator() throws Exception {
         waitForAllAsyncCallsFinish();
         return coordinator.internalCoordinator;
@@ -230,6 +247,11 @@ public class RecreateOnResetOperatorCoordinator implements OperatorCoordinator {
         }
 
         @Override
+        public OperatorCoordinatorMetricGroup metricGroup() {
+            return context.metricGroup();
+        }
+
+        @Override
         public synchronized void failJob(Throwable cause) {
             if (quiesced) {
                 return;
@@ -255,6 +277,12 @@ public class RecreateOnResetOperatorCoordinator implements OperatorCoordinator {
         @Override
         public boolean isConcurrentExecutionAttemptsSupported() {
             return context.isConcurrentExecutionAttemptsSupported();
+        }
+
+        @Override
+        @Nullable
+        public CheckpointCoordinator getCheckpointCoordinator() {
+            return context.getCheckpointCoordinator();
         }
 
         @VisibleForTesting

@@ -19,6 +19,7 @@
 package org.apache.flink.test.operators;
 
 import org.apache.flink.api.common.functions.MapFunction;
+import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.functions.RichMapFunction;
 import org.apache.flink.api.java.DataSet;
 import org.apache.flink.api.java.ExecutionEnvironment;
@@ -26,7 +27,7 @@ import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.test.operators.util.CollectionDataSets;
 import org.apache.flink.test.operators.util.CollectionDataSets.CustomType;
-import org.apache.flink.test.util.MultipleProgramsTestBase;
+import org.apache.flink.test.util.MultipleProgramsTestBaseJUnit4;
 
 import org.junit.Assert;
 import org.junit.Test;
@@ -34,6 +35,7 @@ import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 
 import static org.apache.flink.test.util.TestBaseUtils.compareResultAsText;
@@ -41,7 +43,7 @@ import static org.apache.flink.test.util.TestBaseUtils.compareResultAsTuples;
 
 /** Integration tests for {@link MapFunction} and {@link RichMapFunction}. */
 @RunWith(Parameterized.class)
-public class MapITCase extends MultipleProgramsTestBase {
+public class MapITCase extends MultipleProgramsTestBaseJUnit4 {
 
     public MapITCase(TestExecutionMode mode) {
         super(mode);
@@ -80,8 +82,11 @@ public class MapITCase extends MultipleProgramsTestBase {
          */
 
         final ExecutionEnvironment env = ExecutionEnvironment.getExecutionEnvironment();
-        env.getConfig().setNumberOfExecutionRetries(1000);
-        env.getConfig().setTaskCancellationInterval(50000);
+        env.getConfig().enableObjectReuse();
+        String key = "key";
+        String value = "value";
+        Configuration configuration = Configuration.fromMap(Collections.singletonMap(key, value));
+        env.getConfig().setGlobalJobParameters(configuration);
 
         DataSet<String> ds = CollectionDataSets.getStringDataSet(env);
         DataSet<String> identityMapDs =
@@ -89,16 +94,10 @@ public class MapITCase extends MultipleProgramsTestBase {
                         new RichMapFunction<String, String>() {
                             @Override
                             public String map(String value) throws Exception {
-                                Assert.assertTrue(
-                                        1000
-                                                == getRuntimeContext()
-                                                        .getExecutionConfig()
-                                                        .getNumberOfExecutionRetries());
-                                Assert.assertTrue(
-                                        50000
-                                                == getRuntimeContext()
-                                                        .getExecutionConfig()
-                                                        .getTaskCancellationInterval());
+                                Assert.assertTrue(getRuntimeContext().isObjectReuseEnabled());
+                                Assert.assertEquals(
+                                        getRuntimeContext().getGlobalJobParameters(),
+                                        configuration.toMap());
                                 return value;
                             }
                         });
@@ -483,7 +482,7 @@ public class MapITCase extends MultipleProgramsTestBase {
         private Integer f2Replace = 0;
 
         @Override
-        public void open(Configuration config) {
+        public void open(OpenContext openContext) {
             Collection<Integer> ints = this.getRuntimeContext().getBroadcastVariable("ints");
             int sum = 0;
             for (Integer i : ints) {
@@ -526,12 +525,6 @@ public class MapITCase extends MultipleProgramsTestBase {
     private static class RichMapper2
             extends RichMapFunction<Tuple3<Integer, Long, String>, Tuple3<Integer, Long, String>> {
         private static final long serialVersionUID = 1L;
-
-        @Override
-        public void open(Configuration config) {
-            int val = config.getInteger(TEST_KEY, -1);
-            Assert.assertEquals(TEST_VALUE, val);
-        }
 
         @Override
         public Tuple3<Integer, Long, String> map(Tuple3<Integer, Long, String> value) {

@@ -16,19 +16,35 @@
  * limitations under the License.
  */
 
+import { DatePipe, NgIf } from '@angular/common';
 import { ChangeDetectionStrategy, ChangeDetectorRef, Component, OnDestroy, OnInit } from '@angular/core';
 import { ActivatedRoute } from '@angular/router';
 import { of, Subject } from 'rxjs';
 import { catchError, mergeMap, takeUntil } from 'rxjs/operators';
 
+import { BlockedBadgeComponent } from '@flink-runtime-web/components/blocked-badge/blocked-badge.component';
+import { HumanizeBytesPipe } from '@flink-runtime-web/components/humanize-bytes.pipe';
+import { NavigationComponent } from '@flink-runtime-web/components/navigation/navigation.component';
 import { TaskManagerDetail } from '@flink-runtime-web/interfaces';
 import { StatusService, TaskManagerService } from '@flink-runtime-web/services';
+import { NzDescriptionsModule } from 'ng-zorro-antd/descriptions';
+import { NzSkeletonModule } from 'ng-zorro-antd/skeleton';
 
 @Component({
   selector: 'flink-task-manager-status',
   templateUrl: './task-manager-status.component.html',
   styleUrls: ['./task-manager-status.component.less'],
-  changeDetection: ChangeDetectionStrategy.OnPush
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [
+    NgIf,
+    BlockedBadgeComponent,
+    NzDescriptionsModule,
+    DatePipe,
+    HumanizeBytesPipe,
+    NavigationComponent,
+    NzSkeletonModule
+  ],
+  standalone: true
 })
 export class TaskManagerStatusComponent implements OnInit, OnDestroy {
   public readonly listOfNavigation = [
@@ -36,7 +52,8 @@ export class TaskManagerStatusComponent implements OnInit, OnDestroy {
     { path: 'logs', title: 'Logs' },
     { path: 'stdout', title: 'Stdout' },
     { path: 'log-list', title: 'Log List' },
-    { path: 'thread-dump', title: 'Thread Dump' }
+    { path: 'thread-dump', title: 'Thread Dump' },
+    { path: 'profiler', title: 'Profiler' }
   ];
   public taskManagerDetail?: TaskManagerDetail;
   public loading = true;

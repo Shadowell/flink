@@ -25,12 +25,8 @@ import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.typeinfo.TypeHint;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
-import org.apache.flink.api.common.typeutils.CompositeTypeSerializerConfigSnapshot;
 import org.apache.flink.api.common.typeutils.CompositeTypeSerializerSnapshot;
-import org.apache.flink.api.common.typeutils.CompositeTypeSerializerUtil;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.api.common.typeutils.TypeSerializerConfigSnapshot;
-import org.apache.flink.api.common.typeutils.TypeSerializerSchemaCompatibility;
 import org.apache.flink.api.common.typeutils.TypeSerializerSnapshot;
 import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataOutputView;
@@ -50,6 +46,7 @@ import java.time.Clock;
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -73,7 +70,10 @@ import static org.apache.flink.util.Preconditions.checkState;
  * @param <TXN> Transaction to store all of the information required to handle a transaction.
  * @param <CONTEXT> Context that will be shared across all invocations for the given {@link
  *     TwoPhaseCommitSinkFunction} instance. Context is created once
+ * @deprecated This interface will be removed in future versions. Use the new {@link
+ *     org.apache.flink.api.connector.sink2.Sink} interface instead.
  */
+@Deprecated
 @PublicEvolving
 public abstract class TwoPhaseCommitSinkFunction<IN, TXN, CONTEXT> extends RichSinkFunction<IN>
         implements CheckpointedFunction, CheckpointListener {
@@ -355,12 +355,12 @@ public abstract class TwoPhaseCommitSinkFunction<IN, TXN, CONTEXT> extends RichS
         }
         LOG.debug("{} - started new transaction '{}'", name(), currentTransactionHolder);
 
-        state.clear();
-        state.add(
-                new State<>(
-                        this.currentTransactionHolder,
-                        new ArrayList<>(pendingCommitTransactions.values()),
-                        userContext));
+        state.update(
+                Collections.singletonList(
+                        new State<>(
+                                this.currentTransactionHolder,
+                                new ArrayList<>(pendingCommitTransactions.values()),
+                                userContext)));
     }
 
     @Override
@@ -531,8 +531,8 @@ public abstract class TwoPhaseCommitSinkFunction<IN, TXN, CONTEXT> extends RichS
         return String.format(
                 "%s %s/%s",
                 this.getClass().getSimpleName(),
-                getRuntimeContext().getIndexOfThisSubtask() + 1,
-                getRuntimeContext().getNumberOfParallelSubtasks());
+                getRuntimeContext().getTaskInfo().getIndexOfThisSubtask() + 1,
+                getRuntimeContext().getTaskInfo().getNumberOfParallelSubtasks());
     }
 
     /** State POJO class coupling pendingTransaction, context and pendingCommitTransactions. */
@@ -880,49 +880,6 @@ public abstract class TwoPhaseCommitSinkFunction<IN, TXN, CONTEXT> extends RichS
         }
     }
 
-    /**
-     * {@link TypeSerializerConfigSnapshot} for sink state. This has to be public so that it can be
-     * deserialized/instantiated, should not be used anywhere outside {@code
-     * TwoPhaseCommitSinkFunction}.
-     *
-     * @deprecated this snapshot class is no longer in use, and is maintained only for backwards
-     *     compatibility purposes. It is fully replaced by {@link StateSerializerSnapshot}.
-     */
-    @Internal
-    @Deprecated
-    public static final class StateSerializerConfigSnapshot<TXN, CONTEXT>
-            extends CompositeTypeSerializerConfigSnapshot<State<TXN, CONTEXT>> {
-
-        private static final int VERSION = 1;
-
-        /** This empty nullary constructor is required for deserializing the configuration. */
-        public StateSerializerConfigSnapshot() {}
-
-        public StateSerializerConfigSnapshot(
-                TypeSerializer<TXN> transactionSerializer,
-                TypeSerializer<CONTEXT> contextSerializer) {
-            super(transactionSerializer, contextSerializer);
-        }
-
-        @Override
-        public int getVersion() {
-            return VERSION;
-        }
-
-        @Override
-        public TypeSerializerSchemaCompatibility<State<TXN, CONTEXT>> resolveSchemaCompatibility(
-                TypeSerializer<State<TXN, CONTEXT>> newSerializer) {
-
-            final TypeSerializerSnapshot<?>[] nestedSnapshots =
-                    getNestedSerializersAndConfigs().stream()
-                            .map(t -> t.f1)
-                            .toArray(TypeSerializerSnapshot[]::new);
-
-            return CompositeTypeSerializerUtil.delegateCompatibilityCheckToNewSnapshot(
-                    newSerializer, new StateSerializerSnapshot<>(), nestedSnapshots);
-        }
-    }
-
     /** Snapshot for the {@link StateSerializer}. */
     @Internal
     public static final class StateSerializerSnapshot<TXN, CONTEXT>
@@ -936,9 +893,7 @@ public abstract class TwoPhaseCommitSinkFunction<IN, TXN, CONTEXT> extends RichS
         private boolean supportsNullTransaction = true;
 
         @SuppressWarnings("WeakerAccess")
-        public StateSerializerSnapshot() {
-            super(StateSerializer.class);
-        }
+        public StateSerializerSnapshot() {}
 
         StateSerializerSnapshot(StateSerializer<TXN, CONTEXT> serializerInstance) {
             super(serializerInstance);
@@ -970,8 +925,14 @@ public abstract class TwoPhaseCommitSinkFunction<IN, TXN, CONTEXT> extends RichS
 
         @Override
         protected OuterSchemaCompatibility resolveOuterSchemaCompatibility(
-                StateSerializer<TXN, CONTEXT> newSerializer) {
-            if (supportsNullTransaction != newSerializer.supportNullPendingTransaction) {
+                TypeSerializerSnapshot<State<TXN, CONTEXT>> oldSerializerSnapshot) {
+            if (!(oldSerializerSnapshot instanceof StateSerializerSnapshot)) {
+                return OuterSchemaCompatibility.INCOMPATIBLE;
+            }
+
+            StateSerializerSnapshot<TXN, CONTEXT> oldStateSerializerSnapshot =
+                    (StateSerializerSnapshot<TXN, CONTEXT>) oldSerializerSnapshot;
+            if (supportsNullTransaction != oldStateSerializerSnapshot.supportsNullTransaction) {
                 return OuterSchemaCompatibility.COMPATIBLE_AFTER_MIGRATION;
             }
 

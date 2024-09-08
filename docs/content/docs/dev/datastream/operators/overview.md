@@ -212,7 +212,9 @@ dataStream
 ```
 {{< /tab >}}
 {{< tab "Python" >}}
-This feature is not yet supported in Python
+```python
+data_stream.key_by(lambda x: x[1]).window(TumblingEventTimeWindows.of(Time.seconds(5)))
+```
 {{< /tab >}}
 {{< /tabs>}}
 
@@ -239,7 +241,9 @@ dataStream
 ```
 {{< /tab >}}
 {{< tab "Python" >}}
-This feature is not yet supported in Python
+```python
+data_stream.window_all(TumblingEventTimeWindows.of(Time.seconds(5)))
+```
 {{< /tab >}}
 {{< /tabs>}}
 
@@ -292,7 +296,30 @@ allWindowedStream.apply { AllWindowFunction }
 ```
 {{< /tab >}}
 {{< tab "Python" >}}
-This feature is not yet supported in Python
+```python
+class MyWindowFunction(WindowFunction[tuple, int, int, TimeWindow]):
+
+    def apply(self, key: int, window: TimeWindow, inputs: Iterable[tuple]) -> Iterable[int]:
+        sum = 0
+        for input in inputs:
+            sum += input[1]
+        yield sum
+
+
+class MyAllWindowFunction(AllWindowFunction[tuple, int, TimeWindow]):
+
+    def apply(self, window: TimeWindow, inputs: Iterable[tuple]) -> Iterable[int]:
+        sum = 0
+        for input in inputs:
+            sum += input[1]
+        yield sum
+
+
+windowed_stream.apply(MyWindowFunction())
+
+# applying an AllWindowFunction on non-keyed window stream
+all_windowed_stream.apply(MyAllWindowFunction())
+```
 {{< /tab >}}
 {{< /tabs>}}
 
@@ -317,7 +344,15 @@ windowedStream.reduce { _ + _ }
 ```
 {{< /tab >}}
 {{< tab "Python" >}}
-This feature is not yet supported in Python
+```python
+class MyReduceFunction(ReduceFunction):
+
+    def reduce(self, value1, value2):
+        return value1[0], value1[1] + value2[1]
+
+
+windowed_stream.reduce(MyReduceFunction())
+```
 {{< /tab >}}
 {{< /tabs>}}
 
@@ -535,46 +570,6 @@ connectedStreams.flat_map(MyCoFlatMapFunction())
 {{< /tab >}}
 {{< /tabs>}}
 
-### Iterate
-#### DataStream &rarr; IterativeStream &rarr; ConnectedStream
-
-Creates a "feedback" loop in the flow, by redirecting the output of one operator to some previous operator. This is especially useful for defining algorithms that continuously update a model. The following code starts with a stream and applies the iteration body continuously. Elements that are greater than 0 are sent back to the feedback channel, and the rest of the elements are forwarded downstream.
-
-{{< tabs iterate >}}
-{{< tab "Java" >}}
-```java
-IterativeStream<Long> iteration = initialStream.iterate();
-DataStream<Long> iterationBody = iteration.map (/*do something*/);
-DataStream<Long> feedback = iterationBody.filter(new FilterFunction<Long>(){
-    @Override
-    public boolean filter(Long value) throws Exception {
-        return value > 0;
-    }
-});
-iteration.closeWith(feedback);
-DataStream<Long> output = iterationBody.filter(new FilterFunction<Long>(){
-    @Override
-    public boolean filter(Long value) throws Exception {
-        return value <= 0;
-    }
-});
-```
-{{< /tab >}}
-{{< tab "Scala" >}}
-```scala
-initialStream.iterate {
-  iteration => {
-    val iterationBody = iteration.map {/*do something*/}
-    (iterationBody.filter(_ > 0), iterationBody.filter(_ <= 0))
-  }
-}
-```
-{{< /tab >}}
-{{< tab "Python" >}}
-This feature is not yet supported in Python
-{{< /tab >}}
-{{< /tabs>}}
-
 ### Cache
 #### DataStream &rarr; CachedDataStream
 
@@ -621,6 +616,34 @@ env.execute()
 ```
 {{< /tab >}}
 {{< /tabs>}}
+
+### Full Window Partition
+#### DataStream &rarr; PartitionWindowedStream
+
+Collects all records of each partition separately into a full window and processes them. The window 
+emission will be triggered at the end of inputs. 
+This approach is primarily applicable to batch processing scenarios.
+For non-keyed DataStream, a partition contains all records of a subtask. 
+For KeyedStream, a partition contains all records of a key. 
+
+```java
+DataStream<Integer> dataStream = //...
+PartitionWindowedStream<Integer> partitionWindowedDataStream = dataStream.fullWindowPartition();
+// do full window partition processing with PartitionWindowedStream
+DataStream<Integer> resultStream = partitionWindowedDataStream.mapPartition(
+    new MapPartitionFunction<Integer, Integer>() {
+        @Override
+        public void mapPartition(
+                Iterable<Integer> values, Collector<Integer> out) {
+            int result = 0;
+            for (Integer value : values) {
+                result += value;
+            }
+            out.collect(result);
+        }
+    }
+);
+```
 
 ## Physical Partitioning
 
@@ -820,12 +843,12 @@ The description can contain detail information about operators to facilitate deb
 {{< tabs namedescription >}}
 {{< tab "Java" >}}
 ```java
-someStream.filter(...).setName("filter").setDescription("x in (1, 2, 3, 4) and y > 1");
+someStream.filter(...).name("filter").setDescription("x in (1, 2, 3, 4) and y > 1");
 ```
 {{< /tab >}}
 {{< tab "Scala" >}}
 ```scala
-someStream.filter(...).setName("filter").setDescription("x in (1, 2, 3, 4) and y > 1")
+someStream.filter(...).name("filter").setDescription("x in (1, 2, 3, 4) and y > 1")
 ```
 {{< /tab >}}
 {{< tab "Python" >}}
@@ -839,7 +862,7 @@ The format of description of a job vertex is a tree format string by default.
 Users can set `pipeline.vertex-description-mode` to `CASCADING`, if they want to set description to be the cascading format as in former versions.
 
 Operators generated by Flink SQL will have a name consisted by type of operator and id, and a detailed description, by default.
-Users can set `table.optimizer.simplify-operator-name-enabled` to `false`, if they want to set name to be the detailed description as in former versions.
+Users can set `table.exec.simplify-operator-name-enabled` to `false`, if they want to set name to be the detailed description as in former versions.
 
 When the topology of the pipeline is complex, users can add a topological index in the name of vertex by set `pipeline.vertex-name-include-index-prefix` to `true`,
 so that we can easily find the vertex in the graph according to logs or metrics tags.

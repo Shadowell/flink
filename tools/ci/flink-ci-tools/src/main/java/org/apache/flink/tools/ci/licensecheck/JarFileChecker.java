@@ -207,10 +207,15 @@ public class JarFileChecker {
                     // contained in hadoop/presto S3 FS and flink-dist
                     .filter(path -> !pathStartsWith(path, "/META-INF/versions/11/javax/xml/bind"))
                     .filter(path -> !isJavaxManifest(jar, path))
+                    .filter(
+                            path ->
+                                    !pathStartsWith(
+                                            path, "/org/apache/pulsar/shade/javax/xml/bind/"))
                     // dual-licensed under GPL 2 and EPL 2.0
                     // contained in sql-avro-confluent-registry
                     .filter(path -> !pathStartsWith(path, "/org/glassfish/jersey/internal"))
                     // contained in sql-connector-pulsar
+                    // while the Pulsar connector is externalized, this is still needed for PyFlink
                     .filter(
                             path ->
                                     !pathStartsWith(

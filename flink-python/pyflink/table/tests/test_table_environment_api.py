@@ -27,8 +27,8 @@ from pyflink.common import RowKind, WatermarkStrategy, Configuration
 from pyflink.common.serializer import TypeSerializer
 from pyflink.common.typeinfo import Types
 from pyflink.common.watermark_strategy import TimestampAssigner
-from pyflink.datastream import MergingWindowAssigner, TimeWindow, Trigger, TriggerResult
-from pyflink.datastream.functions import WindowFunction
+from pyflink.datastream import MergingWindowAssigner, TimeWindow, Trigger, TriggerResult, OutputTag
+from pyflink.datastream.functions import WindowFunction, ProcessFunction
 from pyflink.datastream.tests.test_util import DataStreamTestSinkFunction
 from pyflink.datastream.window import TimeWindowSerializer
 from pyflink.java_gateway import get_gateway
@@ -67,6 +67,11 @@ class TableEnvironmentTest(PyFlinkUTTestCase):
 
         assert isinstance(actual, str)
 
+    def test_explain_sql(self):
+        t_env = self.t_env
+        actual = t_env.explain_sql("SELECT * FROM (VALUES ('a', 1))")
+        assert isinstance(actual, str)
+
     def test_explain_with_extended(self):
         schema = RowType() \
             .add('a', DataTypes.INT()) \
@@ -77,8 +82,19 @@ class TableEnvironmentTest(PyFlinkUTTestCase):
         result = t.select(t.a + 1, t.b, t.c)
 
         actual = result.explain(ExplainDetail.ESTIMATED_COST, ExplainDetail.CHANGELOG_MODE,
-                                ExplainDetail.JSON_EXECUTION_PLAN)
+                                ExplainDetail.JSON_EXECUTION_PLAN, ExplainDetail.PLAN_ADVICE)
 
+        assert isinstance(actual, str)
+
+    def test_explain_sql_extended(self):
+        t_env = self.t_env
+        actual = t_env.explain_sql(
+            "SELECT * FROM (VALUES ('a', 1))",
+            ExplainDetail.ESTIMATED_COST,
+            ExplainDetail.CHANGELOG_MODE,
+            ExplainDetail.JSON_EXECUTION_PLAN,
+            ExplainDetail.PLAN_ADVICE
+        )
         assert isinstance(actual, str)
 
     def test_register_functions(self):
@@ -318,7 +334,7 @@ class DataStreamConversionTestCases(PyFlinkUTTestCase):
 
         super(DataStreamConversionTestCases, self).setUp()
         config = Configuration()
-        config.set_string("akka.ask.timeout", "20 s")
+        config.set_string("pekko.ask.timeout", "20 s")
         self.env = StreamExecutionEnvironment.get_execution_environment(config)
         self.t_env = StreamTableEnvironment.create(self.env)
 
@@ -336,7 +352,8 @@ class DataStreamConversionTestCases(PyFlinkUTTestCase):
                          result._j_table_result.getResolvedSchema().toString())
         with result.collect() as result:
             collected_result = [str(item) for item in result]
-            expected_result = [item for item in map(str, [Row(1), Row(2), Row(3), Row(4), Row(5)])]
+            expected_result = [item for item
+                               in map(str, [Row((1,)), Row((2,)), Row((3,)), Row((4,)), Row((5,))])]
             expected_result.sort()
             collected_result.sort()
             self.assertEqual(expected_result, collected_result)
@@ -349,6 +366,23 @@ class DataStreamConversionTestCases(PyFlinkUTTestCase):
         results = self.test_sink.get_results(False)
         results.sort()
         expected = ['+I[1]', '+I[2]', '+I[3]']
+        self.assertEqual(expected, results)
+
+    def test_to_data_stream_local_time(self):
+        self.t_env.execute_sql("""
+        CREATE TEMPORARY VIEW v0 AS
+        SELECT f0, f1, f2, f3 FROM ( VALUES
+            ( 1, DATE'1970-01-02', TIME'03:04:05', TIMESTAMP'1970-01-02 03:04:05' ),
+            ( 2, DATE'1970-06-07', TIME'08:09:10', TIMESTAMP'1970-06-07 08:09:10' )
+        ) AS t0 ( f0, f1, f2, f3 )
+        """)
+        v0 = self.t_env.from_path("v0")
+        self.t_env.to_data_stream(v0).key_by(lambda r: r['f0']).add_sink(self.test_sink)
+        self.env.execute()
+        results = self.test_sink.get_results(False)
+        results.sort()
+        expected = ['+I[1, 1970-01-02, 03:04:05, 1970-01-02T03:04:05]',
+                    '+I[2, 1970-06-07, 08:09:10, 1970-06-07T08:09:10]']
         self.assertEqual(expected, results)
 
     def test_from_data_stream(self):
@@ -542,6 +576,30 @@ class DataStreamConversionTestCases(PyFlinkUTTestCase):
         expected = ["(True, Row(f0=1, f1='Hello'))", "(False, Row(f0=1, f1='Hello'))",
                     "(True, Row(f0=2, f1='Hello'))"]
         self.assertEqual(result, expected)
+
+    def test_side_output_stream_to_table(self):
+        tag = OutputTag("side", Types.ROW([Types.INT()]))
+
+        class MyProcessFunction(ProcessFunction):
+
+            def process_element(self, value, ctx):
+                yield Row(value)
+                yield tag, Row(value * 2)
+
+        ds = self.env.from_collection([1, 2, 3], Types.INT()).process(MyProcessFunction())
+        ds_side = ds.get_side_output(tag)
+        expected = ['<Row(2)>', '<Row(4)>', '<Row(6)>']
+
+        t = self.t_env.from_data_stream(ds_side)
+        result = [str(i) for i in t.execute().collect()]
+        result.sort()
+        self.assertEqual(expected, result)
+
+        self.t_env.create_temporary_view("side_table", ds_side)
+        table_result = self.t_env.execute_sql("SELECT * FROM side_table")
+        result = [str(i) for i in table_result.collect()]
+        result.sort()
+        self.assertEqual(expected, result)
 
 
 class StreamTableEnvironmentTests(PyFlinkStreamTableTestCase):

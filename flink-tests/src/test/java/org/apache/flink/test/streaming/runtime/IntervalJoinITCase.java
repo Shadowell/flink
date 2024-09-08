@@ -31,15 +31,17 @@ import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.api.windowing.time.Time;
 import org.apache.flink.util.Collector;
 
-import org.apache.flink.shaded.guava30.com.google.common.collect.Lists;
+import org.apache.flink.shaded.guava32.com.google.common.collect.Lists;
 
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
+import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.function.Consumer;
 
 /** Integration tests for interval joins. */
 public class IntervalJoinITCase {
@@ -58,7 +60,7 @@ public class IntervalJoinITCase {
         env.setParallelism(1);
 
         KeyedStream<Tuple2<String, Integer>, String> streamOne =
-                env.fromElements(
+                env.fromData(
                                 Tuple2.of("key", 0),
                                 Tuple2.of("key", 1),
                                 Tuple2.of("key", 2),
@@ -69,7 +71,7 @@ public class IntervalJoinITCase {
                         .keyBy(new Tuple2KeyExtractor());
 
         KeyedStream<Tuple2<String, Integer>, String> streamTwo =
-                env.fromElements(
+                env.fromData(
                                 Tuple2.of("key", 0),
                                 Tuple2.of("key", 1),
                                 Tuple2.of("key", 2),
@@ -114,7 +116,7 @@ public class IntervalJoinITCase {
         env.setParallelism(1);
 
         KeyedStream<Tuple2<String, Integer>, String> streamOne =
-                env.fromElements(
+                env.fromData(
                                 Tuple2.of("key1", 0),
                                 Tuple2.of("key2", 1),
                                 Tuple2.of("key1", 2),
@@ -125,7 +127,7 @@ public class IntervalJoinITCase {
                         .keyBy(new Tuple2KeyExtractor());
 
         KeyedStream<Tuple2<String, Integer>, String> streamTwo =
-                env.fromElements(
+                env.fromData(
                                 Tuple2.of("key1", 0),
                                 Tuple2.of("key2", 1),
                                 Tuple2.of("key1", 2),
@@ -153,6 +155,28 @@ public class IntervalJoinITCase {
                 "(key2,3):(key2,3)",
                 "(key1,4):(key1,4)",
                 "(key2,5):(key2,5)");
+    }
+
+    private DataStream<Tuple2<String, Integer>> buildSourceStream(
+            final StreamExecutionEnvironment env, final SourceConsumer sourceConsumer) {
+        return env.addSource(
+                new SourceFunction<Tuple2<String, Integer>>() {
+                    @Override
+                    public void run(SourceContext<Tuple2<String, Integer>> ctx) {
+                        sourceConsumer.accept(ctx);
+                    }
+
+                    @Override
+                    public void cancel() {
+                        // do nothing
+                    }
+                });
+    }
+
+    // Ensure consumer func is serializable
+    private interface SourceConsumer
+            extends Serializable, Consumer<SourceFunction.SourceContext<Tuple2<String, Integer>>> {
+        long serialVersionUID = 1L;
     }
 
     @Test
@@ -249,8 +273,8 @@ public class IntervalJoinITCase {
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         env.setParallelism(1);
 
-        DataStream<Tuple2<String, Integer>> streamOne = env.fromElements(Tuple2.of("1", 1));
-        DataStream<Tuple2<String, Integer>> streamTwo = env.fromElements(Tuple2.of("1", 1));
+        DataStream<Tuple2<String, Integer>> streamOne = env.fromData(Tuple2.of("1", 1));
+        DataStream<Tuple2<String, Integer>> streamTwo = env.fromData(Tuple2.of("1", 1));
 
         streamOne
                 .keyBy(new Tuple2KeyExtractor())
@@ -263,8 +287,8 @@ public class IntervalJoinITCase {
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         env.setParallelism(1);
 
-        DataStream<Tuple2<String, Integer>> streamOne = env.fromElements(Tuple2.of("1", 1));
-        DataStream<Tuple2<String, Integer>> streamTwo = env.fromElements(Tuple2.of("1", 1));
+        DataStream<Tuple2<String, Integer>> streamOne = env.fromData(Tuple2.of("1", 1));
+        DataStream<Tuple2<String, Integer>> streamTwo = env.fromData(Tuple2.of("1", 1));
 
         streamOne
                 .keyBy(new Tuple2KeyExtractor())
@@ -278,11 +302,11 @@ public class IntervalJoinITCase {
         env.setParallelism(1);
 
         DataStream<Tuple2<String, Integer>> streamOne =
-                env.fromElements(Tuple2.of("key", 0), Tuple2.of("key", 1), Tuple2.of("key", 2))
+                env.fromData(Tuple2.of("key", 0), Tuple2.of("key", 1), Tuple2.of("key", 2))
                         .assignTimestampsAndWatermarks(new AscendingTuple2TimestampExtractor());
 
         DataStream<Tuple2<String, Integer>> streamTwo =
-                env.fromElements(Tuple2.of("key", 0), Tuple2.of("key", 1), Tuple2.of("key", 2))
+                env.fromData(Tuple2.of("key", 0), Tuple2.of("key", 1), Tuple2.of("key", 2))
                         .assignTimestampsAndWatermarks(new AscendingTuple2TimestampExtractor());
 
         streamOne
@@ -305,11 +329,11 @@ public class IntervalJoinITCase {
         env.setParallelism(1);
 
         DataStream<Tuple2<String, Integer>> streamOne =
-                env.fromElements(Tuple2.of("key", 0), Tuple2.of("key", 1), Tuple2.of("key", 2))
+                env.fromData(Tuple2.of("key", 0), Tuple2.of("key", 1), Tuple2.of("key", 2))
                         .assignTimestampsAndWatermarks(new AscendingTuple2TimestampExtractor());
 
         DataStream<Tuple2<String, Integer>> streamTwo =
-                env.fromElements(Tuple2.of("key", 0), Tuple2.of("key", 1), Tuple2.of("key", 2))
+                env.fromData(Tuple2.of("key", 0), Tuple2.of("key", 1), Tuple2.of("key", 2))
                         .assignTimestampsAndWatermarks(new AscendingTuple2TimestampExtractor());
 
         streamOne
@@ -336,11 +360,11 @@ public class IntervalJoinITCase {
         env.setParallelism(1);
 
         DataStream<Tuple2<String, Integer>> streamOne =
-                env.fromElements(Tuple2.of("key", 0), Tuple2.of("key", 1), Tuple2.of("key", 2))
+                env.fromData(Tuple2.of("key", 0), Tuple2.of("key", 1), Tuple2.of("key", 2))
                         .assignTimestampsAndWatermarks(new AscendingTuple2TimestampExtractor());
 
         DataStream<Tuple2<String, Integer>> streamTwo =
-                env.fromElements(Tuple2.of("key", 0), Tuple2.of("key", 1), Tuple2.of("key", 2))
+                env.fromData(Tuple2.of("key", 0), Tuple2.of("key", 1), Tuple2.of("key", 2))
                         .assignTimestampsAndWatermarks(new AscendingTuple2TimestampExtractor());
 
         streamOne
@@ -366,8 +390,8 @@ public class IntervalJoinITCase {
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         env.setParallelism(1);
 
-        DataStream<Tuple2<String, Integer>> streamOne = env.fromElements(Tuple2.of("1", 1));
-        DataStream<Tuple2<String, Integer>> streamTwo = env.fromElements(Tuple2.of("1", 1));
+        DataStream<Tuple2<String, Integer>> streamOne = env.fromData(Tuple2.of("1", 1));
+        DataStream<Tuple2<String, Integer>> streamTwo = env.fromData(Tuple2.of("1", 1));
 
         streamOne
                 .keyBy(new Tuple2KeyExtractor())

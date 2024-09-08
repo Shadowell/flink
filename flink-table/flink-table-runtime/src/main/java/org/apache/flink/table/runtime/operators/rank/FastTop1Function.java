@@ -18,12 +18,12 @@
 
 package org.apache.flink.table.runtime.operators.rank;
 
-import org.apache.flink.api.common.ExecutionConfig;
+import org.apache.flink.api.common.functions.OpenContext;
+import org.apache.flink.api.common.serialization.SerializerConfigImpl;
 import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
 import org.apache.flink.runtime.state.FunctionSnapshotContext;
 import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
@@ -33,11 +33,8 @@ import org.apache.flink.table.runtime.keyselector.RowDataKeySelector;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import org.apache.flink.util.Collector;
 
-import org.apache.flink.shaded.guava30.com.google.common.cache.Cache;
-import org.apache.flink.shaded.guava30.com.google.common.cache.CacheBuilder;
-import org.apache.flink.shaded.guava30.com.google.common.cache.RemovalCause;
-import org.apache.flink.shaded.guava30.com.google.common.cache.RemovalListener;
-import org.apache.flink.shaded.guava30.com.google.common.cache.RemovalNotification;
+import org.apache.flink.shaded.guava32.com.google.common.cache.Cache;
+import org.apache.flink.shaded.guava32.com.google.common.cache.CacheBuilder;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -86,13 +83,13 @@ public class FastTop1Function extends AbstractTopNFunction implements Checkpoint
                 generateUpdateBefore,
                 outputRankNumber);
 
-        this.inputRowSer = inputRowType.createSerializer(new ExecutionConfig());
+        this.inputRowSer = inputRowType.createSerializer(new SerializerConfigImpl());
         this.cacheSize = cacheSize;
     }
 
     @Override
-    public void open(Configuration parameters) throws Exception {
-        super.open(parameters);
+    public void open(OpenContext openContext) throws Exception {
+        super.open(openContext);
         int lruCacheSize = Math.max(1, (int) (cacheSize / getDefaultTopNSize()));
         CacheBuilder<Object, Object> cacheBuilder = CacheBuilder.newBuilder();
         if (ttlConfig.isEnabled()) {
@@ -102,7 +99,9 @@ public class FastTop1Function extends AbstractTopNFunction implements Checkpoint
         kvCache =
                 cacheBuilder
                         .maximumSize(lruCacheSize)
-                        .removalListener(new CacheRemovalListener())
+                        .removalListener(
+                                new TopNBufferCacheRemovalListener<>(
+                                        keyContext, this::flushBufferToState))
                         .build();
         LOG.info("Top-1 operator is using LRU caches key-size: {}", lruCacheSize);
 
@@ -163,7 +162,7 @@ public class FastTop1Function extends AbstractTopNFunction implements Checkpoint
     public void snapshotState(FunctionSnapshotContext context) throws Exception {
         for (Map.Entry<RowData, RowData> entry : kvCache.asMap().entrySet()) {
             keyContext.setCurrentKey(entry.getKey());
-            dataState.update(entry.getValue());
+            flushBufferToState(entry.getValue());
         }
     }
 
@@ -172,25 +171,7 @@ public class FastTop1Function extends AbstractTopNFunction implements Checkpoint
         // nothing to do
     }
 
-    private class CacheRemovalListener implements RemovalListener<RowData, RowData> {
-        @Override
-        public void onRemoval(RemovalNotification<RowData, RowData> notification) {
-            if (notification.getCause() != RemovalCause.SIZE || notification.getValue() == null) {
-                // Don't flush values to state if cause is ttl expired
-                return;
-            }
-
-            RowData previousKey = (RowData) keyContext.getCurrentKey();
-            RowData partitionKey = notification.getKey();
-            keyContext.setCurrentKey(partitionKey);
-            try {
-                dataState.update(notification.getValue());
-            } catch (Throwable e) {
-                LOG.error("Fail to synchronize state!", e);
-                throw new RuntimeException(e);
-            } finally {
-                keyContext.setCurrentKey(previousKey);
-            }
-        }
+    private void flushBufferToState(RowData rowData) throws Exception {
+        dataState.update(rowData);
     }
 }

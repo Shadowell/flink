@@ -18,6 +18,7 @@
 
 package org.apache.flink.table.endpoint.hive.util;
 
+import org.apache.flink.table.api.ResultKind;
 import org.apache.flink.table.catalog.CatalogBaseTable.TableKind;
 import org.apache.flink.table.catalog.Column;
 import org.apache.flink.table.catalog.ObjectIdentifier;
@@ -41,6 +42,7 @@ import org.apache.flink.table.functions.hive.HiveFunction;
 import org.apache.flink.table.gateway.api.SqlGatewayService;
 import org.apache.flink.table.gateway.api.results.FunctionInfo;
 import org.apache.flink.table.gateway.api.results.ResultSet;
+import org.apache.flink.table.gateway.api.results.ResultSetImpl;
 import org.apache.flink.table.gateway.api.results.TableInfo;
 import org.apache.flink.table.gateway.api.session.SessionHandle;
 import org.apache.flink.table.types.logical.DecimalType;
@@ -65,6 +67,7 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static org.apache.flink.table.api.internal.StaticResultProvider.SIMPLE_ROW_DATA_TO_STRING_CONVERTER;
 import static org.apache.flink.table.endpoint.hive.HiveServer2Schemas.GET_CATALOGS_SCHEMA;
 import static org.apache.flink.table.endpoint.hive.HiveServer2Schemas.GET_COLUMNS_SCHEMA;
 import static org.apache.flink.table.endpoint.hive.HiveServer2Schemas.GET_FUNCTIONS_SCHEMA;
@@ -97,6 +100,10 @@ import static org.apache.hadoop.hive.serde2.thrift.Type.VARCHAR_TYPE;
 
 /** Factory to create the operation executor. */
 public class OperationExecutorFactory {
+
+    // Hive dialect doesn't support materialized table currently.
+    private static final Set<TableKind> TABLE_KINDS =
+            new HashSet<>(Arrays.asList(TableKind.TABLE, TableKind.VIEW));
 
     public static Callable<ResultSet> createGetCatalogsExecutor(
             SqlGatewayService service, SessionHandle sessionHandle) {
@@ -288,14 +295,13 @@ public class OperationExecutorFactory {
         Set<String> schemaNames =
                 filterAndSort(
                         service.listDatabases(sessionHandle, specifiedCatalogName), schemaName);
-        Set<TableKind> tableKinds = new HashSet<>(Arrays.asList(TableKind.values()));
 
         List<RowData> results = new ArrayList<>();
         for (String schema : schemaNames) {
             Set<TableInfo> tableInfos =
                     filterAndSort(
                             service.listTables(
-                                    sessionHandle, specifiedCatalogName, schema, tableKinds),
+                                    sessionHandle, specifiedCatalogName, schema, TABLE_KINDS),
                             candidates -> candidates.getIdentifier().getObjectName(),
                             tableName);
 
@@ -366,10 +372,7 @@ public class OperationExecutorFactory {
             Set<TableInfo> tableInfos =
                     filterAndSort(
                             service.listTables(
-                                    sessionHandle,
-                                    specifiedCatalogName,
-                                    schema,
-                                    new HashSet<>(Arrays.asList(TableKind.values()))),
+                                    sessionHandle, specifiedCatalogName, schema, TABLE_KINDS),
                             candidate -> candidate.getIdentifier().getObjectName(),
                             tableName);
 
@@ -537,7 +540,15 @@ public class OperationExecutorFactory {
     }
 
     private static ResultSet buildResultSet(ResolvedSchema schema, List<RowData> data) {
-        return new ResultSet(EOS, null, schema, data);
+        return new ResultSetImpl(
+                EOS,
+                null,
+                schema,
+                data,
+                SIMPLE_ROW_DATA_TO_STRING_CONVERTER,
+                false,
+                null,
+                ResultKind.SUCCESS_WITH_CONTENT);
     }
 
     private static List<Type> getSupportedHiveType() {

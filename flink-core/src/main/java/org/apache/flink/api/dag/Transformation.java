@@ -19,6 +19,8 @@
 package org.apache.flink.api.dag;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.annotation.VisibleForTesting;
+import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.functions.InvalidTypesException;
 import org.apache.flink.api.common.operators.ResourceSpec;
 import org.apache.flink.api.common.operators.SlotSharingGroup;
@@ -26,15 +28,16 @@ import org.apache.flink.api.common.operators.util.OperatorValidationUtils;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.java.typeutils.MissingTypeInfo;
 import org.apache.flink.core.memory.ManagedMemoryUseCase;
-import org.apache.flink.util.Preconditions;
 
 import javax.annotation.Nullable;
 
 import java.util.Collections;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -111,6 +114,10 @@ public abstract class Transformation<T> {
     // This is used to assign a unique ID to every Transformation
     private static final AtomicInteger ID_COUNTER = new AtomicInteger(0);
 
+    // If true, the parallelism of the transformation is explicitly set and should be respected.
+    // Otherwise the parallelism can be changed at runtime.
+    private boolean parallelismConfigured;
+
     public static int getNewNodeId() {
         return ID_COUNTER.incrementAndGet();
     }
@@ -154,6 +161,13 @@ public abstract class Transformation<T> {
      * will be shared by all the declaring transformations within a slot according to this weight.
      */
     private final Map<ManagedMemoryUseCase, Integer> managedMemoryOperatorScopeUseCaseWeights =
+            new EnumMap<>(ManagedMemoryUseCase.class);
+
+    /**
+     * This map is a cache that stores transitive predecessors and used in {@code
+     * getTransitivePredecessors()}.
+     */
+    private final Map<Transformation<T>, List<Transformation<?>>> predecessorsCache =
             new HashMap<>();
 
     /** Slot scope use cases that this transformation needs managed memory for. */
@@ -183,11 +197,31 @@ public abstract class Transformation<T> {
      * @param parallelism The parallelism of this {@code Transformation}
      */
     public Transformation(String name, TypeInformation<T> outputType, int parallelism) {
+        this(name, outputType, parallelism, true);
+    }
+
+    /**
+     * Creates a new {@code Transformation} with the given name, output type and parallelism.
+     *
+     * @param name The name of the {@code Transformation}, this will be shown in Visualizations and
+     *     the Log
+     * @param outputType The output type of this {@code Transformation}
+     * @param parallelism The parallelism of this {@code Transformation}
+     * @param parallelismConfigured If true, the parallelism of the transformation is explicitly set
+     *     and should be respected. Otherwise the parallelism can be changed at runtime.
+     */
+    public Transformation(
+            String name,
+            TypeInformation<T> outputType,
+            int parallelism,
+            boolean parallelismConfigured) {
         this.id = getNewNodeId();
-        this.name = Preconditions.checkNotNull(name);
+        this.name = checkNotNull(name);
         this.outputType = outputType;
         this.parallelism = parallelism;
         this.slotSharingGroup = Optional.empty();
+        this.parallelismConfigured =
+                parallelismConfigured && parallelism != ExecutionConfig.PARALLELISM_DEFAULT;
     }
 
     /** Returns the unique ID of this {@code Transformation}. */
@@ -205,9 +239,15 @@ public abstract class Transformation<T> {
         return name;
     }
 
+    /** Returns the predecessorsCache of this {@code Transformation}. */
+    @VisibleForTesting
+    Map<Transformation<T>, List<Transformation<?>>> getPredecessorsCache() {
+        return predecessorsCache;
+    }
+
     /** Changes the description of this {@code Transformation}. */
     public void setDescription(String description) {
-        this.description = Preconditions.checkNotNull(description);
+        this.description = checkNotNull(description);
     }
 
     /** Returns the description of this {@code Transformation}. */
@@ -226,8 +266,18 @@ public abstract class Transformation<T> {
      * @param parallelism The new parallelism to set on this {@code Transformation}.
      */
     public void setParallelism(int parallelism) {
+        setParallelism(parallelism, true);
+    }
+
+    public void setParallelism(int parallelism, boolean parallelismConfigured) {
         OperatorValidationUtils.validateParallelism(parallelism);
         this.parallelism = parallelism;
+        this.parallelismConfigured =
+                parallelismConfigured && parallelism != ExecutionConfig.PARALLELISM_DEFAULT;
+    }
+
+    public boolean isParallelismConfigured() {
+        return parallelismConfigured;
     }
 
     /**
@@ -257,8 +307,8 @@ public abstract class Transformation<T> {
      */
     public void setResources(ResourceSpec minResources, ResourceSpec preferredResources) {
         OperatorValidationUtils.validateMinAndPreferredResources(minResources, preferredResources);
-        this.minResources = checkNotNull(minResources);
-        this.preferredResources = checkNotNull(preferredResources);
+        this.minResources = minResources;
+        this.preferredResources = preferredResources;
     }
 
     /**
@@ -291,12 +341,11 @@ public abstract class Transformation<T> {
      */
     public Optional<Integer> declareManagedMemoryUseCaseAtOperatorScope(
             ManagedMemoryUseCase managedMemoryUseCase, int weight) {
-        Preconditions.checkNotNull(managedMemoryUseCase);
-        Preconditions.checkArgument(
+        checkNotNull(managedMemoryUseCase);
+        checkArgument(
                 managedMemoryUseCase.scope == ManagedMemoryUseCase.Scope.OPERATOR,
                 "Use case is not operator scope.");
-        Preconditions.checkArgument(
-                weight > 0, "Weights for operator scope use cases must be greater than 0.");
+        checkArgument(weight > 0, "Weights for operator scope use cases must be greater than 0.");
 
         return Optional.ofNullable(
                 managedMemoryOperatorScopeUseCaseWeights.put(managedMemoryUseCase, weight));
@@ -309,8 +358,8 @@ public abstract class Transformation<T> {
      *     memory for.
      */
     public void declareManagedMemoryUseCaseAtSlotScope(ManagedMemoryUseCase managedMemoryUseCase) {
-        Preconditions.checkNotNull(managedMemoryUseCase);
-        Preconditions.checkArgument(managedMemoryUseCase.scope == ManagedMemoryUseCase.Scope.SLOT);
+        checkNotNull(managedMemoryUseCase);
+        checkArgument(managedMemoryUseCase.scope == ManagedMemoryUseCase.Scope.SLOT);
 
         managedMemorySlotScopeUseCases.add(managedMemoryUseCase);
     }
@@ -361,8 +410,8 @@ public abstract class Transformation<T> {
      */
     public void setUidHash(String uidHash) {
 
-        Preconditions.checkNotNull(uidHash);
-        Preconditions.checkArgument(
+        checkNotNull(uidHash);
+        checkArgument(
                 uidHash.matches("^[0-9A-Fa-f]{32}$"),
                 "Node hash must be a 32 character String that describes a hex code. Found: "
                         + uidHash);
@@ -543,7 +592,19 @@ public abstract class Transformation<T> {
      *
      * @return The list of transitive predecessors.
      */
-    public abstract List<Transformation<?>> getTransitivePredecessors();
+    protected abstract List<Transformation<?>> getTransitivePredecessorsInternal();
+
+    /**
+     * Returns all transitive predecessor {@code Transformation}s of this {@code Transformation}.
+     * This is, for example, used when determining whether a feedback edge of an iteration actually
+     * has the iteration head as a predecessor. This method is just a wrapper on top of {@code
+     * getTransitivePredecessorsInternal} method with public access. It uses caching internally.
+     *
+     * @return The list of transitive predecessors.
+     */
+    public final List<Transformation<?>> getTransitivePredecessors() {
+        return predecessorsCache.computeIfAbsent(this, key -> getTransitivePredecessorsInternal());
+    }
 
     /**
      * Returns the {@link Transformation transformations} that are the immediate predecessors of the
@@ -577,29 +638,15 @@ public abstract class Transformation<T> {
         }
 
         Transformation<?> that = (Transformation<?>) o;
-
-        if (bufferTimeout != that.bufferTimeout) {
-            return false;
-        }
-        if (id != that.id) {
-            return false;
-        }
-        if (parallelism != that.parallelism) {
-            return false;
-        }
-        if (!name.equals(that.name)) {
-            return false;
-        }
-        return outputType != null ? outputType.equals(that.outputType) : that.outputType == null;
+        return Objects.equals(bufferTimeout, that.bufferTimeout)
+                && Objects.equals(id, that.id)
+                && Objects.equals(parallelism, that.parallelism)
+                && Objects.equals(name, that.name)
+                && Objects.equals(outputType, that.outputType);
     }
 
     @Override
     public int hashCode() {
-        int result = id;
-        result = 31 * result + name.hashCode();
-        result = 31 * result + (outputType != null ? outputType.hashCode() : 0);
-        result = 31 * result + parallelism;
-        result = 31 * result + (int) (bufferTimeout ^ (bufferTimeout >>> 32));
-        return result;
+        return Objects.hash(id, name, outputType, parallelism, bufferTimeout);
     }
 }

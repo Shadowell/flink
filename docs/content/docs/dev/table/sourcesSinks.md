@@ -40,6 +40,10 @@ for more information about built-in table sources and sinks.
 
 This page focuses on how to develop a custom, user-defined connector.
 
+{{< hint warning >}}Since Flink v1.16, TableEnvironment introduces a user class loader to have a consistent class loading behavior in table programs, SQL Client and SQL Gateway. The user classloader manages all user jars such as jar added by `ADD JAR` or `CREATE FUNCTION .. USING JAR ..` statements.
+User-defined connectors should replace `Thread.currentThread().getContextClassLoader()` with the user class loader to load classes. Otherwise, `ClassNotFoundException` maybe thrown. The user class loader can be accessed via `DynamicTableFactory.Context`.
+{{< /hint >}}
+
 Overview
 --------
 
@@ -193,9 +197,16 @@ A table source can implement further ability interfaces such as `SupportsProject
 mutate an instance during planning. All abilities can be found in the `org.apache.flink.table.connector.source.abilities`
 package and are listed in the [source abilities table](#source-abilities).
 
-The runtime implementation of a `ScanTableSource` must produce internal data structures. Thus, records
-must be emitted as `org.apache.flink.table.data.RowData`. The framework provides runtime converters such
+The returned _scan runtime provider_ provides the runtime implementation for reading the data. There are
+different interfaces for runtime implementation, among which `SourceProvider` is the recommended core interface.
+
+Independent of the provider interface, the source runtime implementation must produce internal data structures.
+Thus, records must be emitted as `org.apache.flink.table.data.RowData`. The framework provides runtime converters such
 that a source can still work on common data structures and perform a conversion at the end.
+
+To support parallelism setting, the dynamic table factory should support the optional `scan.parallelism` option
+defined in `org.apache.flink.table.factories.FactoryUtil` and pass its value to a provider that also implements
+the `ParallelismProvider` interface. 
 
 #### Lookup Table Source
 
@@ -262,6 +273,11 @@ will be called with values for the given lookup keys during runtime.
         is a built-in marker function that will be detected by the planner and translated into a call
         to this interface if available.</td>
     </tr>
+    <tr>
+        <td>{{< gh_link file="flink-table/flink-table-common/src/main/java/org/apache/flink/table/connector/source/abilities/SupportsRowLevelModificationScan.java" name="SupportsRowLevelModificationScan" >}}</td>
+        <td>Enables to pass a scan context described by <code>RowLevelModificationScanContext</code> from <code>ScanTableSource</code> 
+        to sink which implements <code>SupportsRowLevelDelete</code>, <code>SupportsRowLevelUpdate</code>.
+    </tr>
     </tbody>
 </table>
 
@@ -287,9 +303,16 @@ A table sink can implement further ability interfaces such as `SupportsOverwrite
 instance during planning. All abilities can be found in the `org.apache.flink.table.connector.sink.abilities`
 package and are listed in the [sink abilities table](#sink-abilities).
 
-The runtime implementation of a `DynamicTableSink` must consume internal data structures. Thus, records
-must be accepted as `org.apache.flink.table.data.RowData`. The framework provides runtime converters such
+The returned _sink runtime provider_ provides the runtime implementation for writing the data. There are
+different interfaces for runtime implementation, among which `SinkV2Provider` is the recommended core interface.
+
+Independent of the provider interface, the sink runtime implementation must consume internal data structures.
+Thus, records must be accepted as `org.apache.flink.table.data.RowData`. The framework provides runtime converters such
 that a sink can still work on common data structures and perform a conversion at the beginning.
+
+To support parallelism setting, the dynamic table factory should support the optional `sink.parallelism` option
+defined in `org.apache.flink.table.factories.FactoryUtil` and pass its value to a provider that also implements
+the `ParallelismProvider` interface.
 
 #### Sink Abilities
 
@@ -312,10 +335,37 @@ that a sink can still work on common data structures and perform a conversion at
         <td>Enables to write partitioned data in a <code>DynamicTableSink</code>.</td>
     </tr>
     <tr>
+        <td>{{< gh_link file="flink-table/flink-table-common/src/main/java/org/apache/flink/table/connector/source/abilities/SupportsBucketing.java" name="SupportsBucketing" >}}</td>
+        <td>Enables bucketing for a <code>DynamicTableSink</code>.</td>
+    </tr>
+    <tr>
         <td>{{< gh_link file="flink-table/flink-table-common/src/main/java/org/apache/flink/table/connector/sink/abilities/SupportsWritingMetadata.java" name="SupportsWritingMetadata" >}}</td>
-        <td>Enables to write metadata columns into a <code>DynamicTableSource</code>. A table sink is
+        <td>Enables to write metadata columns into a <code>DynamicTableSink</code>. A table sink is
         responsible for accepting requested metadata columns at the end of consumed rows and persist
         them. This includes potentially forwarding metadata columns to contained formats.</td>
+    </tr>
+    <tr>
+        <td>{{< gh_link file="flink-table/flink-table-common/src/main/java/org/apache/flink/table/connector/sink/abilities/SupportsDeletePushDown.java" name="SupportsDeletePushDown" >}}</td>
+        <td>Enables to push down filters decomposed from the <code>WHERE</code> clause in <code>DELETE</code> statement to <code>DynamicTableSink</code>.
+        The table sink can delete existing data directly according to the filters.
+        </td>
+    </tr>
+    <tr>
+        <td>{{< gh_link file="flink-table/flink-table-common/src/main/java/org/apache/flink/table/connector/sink/abilities/SupportsRowLevelDelete.java" name="SupportsRowLevelDelete" >}}</td>
+        <td>Enables to delete existing data according to row-level changes in a <code>DynamicTableSink</code>. The table sink is responsible for telling planner how to produce the row changes, 
+        and consuming them to achieve the purpose of row(s) deletion.
+        </td>
+    </tr>
+    <tr>
+        <td>{{< gh_link file="flink-table/flink-table-common/src/main/java/org/apache/flink/table/connector/sink/abilities/SupportsRowLevelUpdate.java" name="SupportsRowLevelUpdate" >}}</td>
+        <td>Enables to update existing data according to row-level changes in a <code>DynamicTableSink</code>. The table sink is responsible for telling planner how to produce the row changes, 
+        and consuming them to achieve the purpose of row(s) update.
+        </td>
+    </tr>
+    <tr>
+        <td>{{< gh_link file="flink-table/flink-table-common/src/main/java/org/apache/flink/table/connector/sink/abilities/SupportsStaging.java" name="SupportsStaging" >}}</td>
+        <td>Enables to support atomic semantic for CTAS(CREATE TABLE AS SELECT) or RTAS([CREATE OR] REPLACE TABLE AS SELECT) in a <code>DynamicTableSink</code>. The table sink is responsible for returning <code>StagedTable</code> object that provides atomic semantics.
+        </td>
     </tr>
     </tbody>
 </table>
@@ -803,7 +853,7 @@ public class SocketSourceFunction extends RichSourceFunction<RowData> implements
   }
 
   @Override
-  public void open(Configuration parameters) throws Exception {
+  public void open(OpenContext openContext) throws Exception {
     deserializer.open(() -> getRuntimeContext().getMetricGroup());
   }
 

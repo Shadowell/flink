@@ -735,12 +735,23 @@ public class DateTimeUtils {
 
     public static String formatTimestampString(
             String dateStr, String fromFormat, String toFormat, TimeZone tz) {
+        return formatTimestampStringWithOffset(dateStr, fromFormat, toFormat, tz, 0);
+    }
+
+    public static String formatTimestampStringWithOffset(
+            String dateStr, String fromFormat, String toFormat, TimeZone tz, long offsetMills) {
         SimpleDateFormat fromFormatter = FORMATTER_CACHE.get(fromFormat);
         fromFormatter.setTimeZone(tz);
         SimpleDateFormat toFormatter = FORMATTER_CACHE.get(toFormat);
         toFormatter.setTimeZone(tz);
         try {
-            return toFormatter.format(fromFormatter.parse(dateStr));
+            Date date = fromFormatter.parse(dateStr);
+
+            if (offsetMills != 0) {
+                date = new Date(date.getTime() + offsetMills);
+            }
+
+            return toFormatter.format(date);
         } catch (ParseException e) {
             LOG.error(
                     "Exception when formatting: '"
@@ -749,6 +760,8 @@ public class DateTimeUtils {
                             + fromFormat
                             + "' to: '"
                             + toFormat
+                            + "' with offsetMills: '"
+                            + offsetMills
                             + "'",
                     e);
             return null;
@@ -1713,6 +1726,7 @@ public class DateTimeUtils {
      * use internally, when converting to and from UNIX timestamps. And also may be arguments to the
      * {@code EXTRACT}, {@code TIMESTAMPADD} and {@code TIMESTAMPDIFF} functions.
      */
+    @Internal
     public enum TimeUnit {
         YEAR(true, ' ', BigDecimal.valueOf(12) /* months */, null),
         MONTH(true, '-', BigDecimal.ONE /* months */, BigDecimal.valueOf(12)),
@@ -1774,6 +1788,7 @@ public class DateTimeUtils {
      * A range of time units. The first is more significant than the other (e.g. year-to-day) or the
      * same as the other (e.g. month).
      */
+    @Internal
     public enum TimeUnitRange {
         YEAR(TimeUnit.YEAR, null),
         YEAR_TO_MONTH(TimeUnit.YEAR, TimeUnit.MONTH),

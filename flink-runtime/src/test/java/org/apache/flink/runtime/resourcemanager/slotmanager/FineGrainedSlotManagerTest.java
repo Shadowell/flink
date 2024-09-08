@@ -18,7 +18,6 @@
 package org.apache.flink.runtime.resourcemanager.slotmanager;
 
 import org.apache.flink.api.common.JobID;
-import org.apache.flink.api.common.time.Time;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.tuple.Tuple6;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
@@ -37,6 +36,7 @@ import org.apache.flink.runtime.slots.ResourceRequirements;
 import org.apache.flink.runtime.taskexecutor.SlotReport;
 import org.apache.flink.runtime.taskexecutor.SlotStatus;
 import org.apache.flink.runtime.taskexecutor.TaskExecutorGateway;
+import org.apache.flink.runtime.taskexecutor.TestingTaskExecutorGateway;
 import org.apache.flink.runtime.taskexecutor.TestingTaskExecutorGatewayBuilder;
 import org.apache.flink.util.function.ThrowingConsumer;
 
@@ -52,6 +52,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
+import static org.apache.flink.core.testutils.FlinkAssertions.assertThatFuture;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNoException;
 import static org.assertj.core.api.Assumptions.assumeThat;
@@ -65,7 +66,8 @@ class FineGrainedSlotManagerTest extends FineGrainedSlotManagerTestBase {
             LARGE_SLOT_RESOURCE_PROFILE.multiply(2);
 
     @Override
-    protected Optional<ResourceAllocationStrategy> getResourceAllocationStrategy() {
+    protected Optional<ResourceAllocationStrategy> getResourceAllocationStrategy(
+            SlotManagerConfiguration slotManagerConfiguration) {
         return Optional.empty();
     }
 
@@ -82,8 +84,17 @@ class FineGrainedSlotManagerTest extends FineGrainedSlotManagerTestBase {
         };
     }
 
+    @Test
+    void testCloseAfterSuspendDoesNotThrowException() throws Exception {
+        new Context() {
+            {
+                runTest(() -> getSlotManager().suspend());
+            }
+        };
+    }
+
     // ---------------------------------------------------------------------------------------------
-    // Register / unregister TaskManager and and slot status reconciliation
+    // Register / unregister TaskManager and slot status reconciliation
     // ---------------------------------------------------------------------------------------------
 
     /** Tests that we can register task manager at the slot manager. */
@@ -94,8 +105,8 @@ class FineGrainedSlotManagerTest extends FineGrainedSlotManagerTestBase {
             {
                 runTest(
                         () -> {
-                            final CompletableFuture<Boolean> registerTaskManagerFuture =
-                                    new CompletableFuture<>();
+                            final CompletableFuture<SlotManager.RegistrationResult>
+                                    registerTaskManagerFuture = new CompletableFuture<>();
                             runInMainThread(
                                     () ->
                                             registerTaskManagerFuture.complete(
@@ -106,7 +117,7 @@ class FineGrainedSlotManagerTest extends FineGrainedSlotManagerTestBase {
                                                                     DEFAULT_TOTAL_RESOURCE_PROFILE,
                                                                     DEFAULT_SLOT_RESOURCE_PROFILE)));
                             assertThat(assertFutureCompleteAndReturn(registerTaskManagerFuture))
-                                    .isTrue();
+                                    .isEqualTo(SlotManager.RegistrationResult.SUCCESS);
                             assertThat(getSlotManager().getNumberRegisteredSlots())
                                     .isEqualTo(DEFAULT_NUM_SLOTS_PER_WORKER);
                             assertThat(getTaskManagerTracker().getRegisteredTaskManagers())
@@ -147,13 +158,14 @@ class FineGrainedSlotManagerTest extends FineGrainedSlotManagerTestBase {
         final AllocationID allocationId = new AllocationID();
         final SlotReport slotReport =
                 new SlotReport(
-                        createAllocatedSlotStatus(allocationId, DEFAULT_SLOT_RESOURCE_PROFILE));
+                        createAllocatedSlotStatus(
+                                new JobID(), allocationId, DEFAULT_SLOT_RESOURCE_PROFILE));
         new Context() {
             {
                 runTest(
                         () -> {
-                            final CompletableFuture<Boolean> registerTaskManagerFuture =
-                                    new CompletableFuture<>();
+                            final CompletableFuture<SlotManager.RegistrationResult>
+                                    registerTaskManagerFuture = new CompletableFuture<>();
                             final CompletableFuture<Boolean> unRegisterTaskManagerFuture =
                                     new CompletableFuture<>();
                             runInMainThread(
@@ -166,7 +178,7 @@ class FineGrainedSlotManagerTest extends FineGrainedSlotManagerTestBase {
                                                                     DEFAULT_TOTAL_RESOURCE_PROFILE,
                                                                     DEFAULT_SLOT_RESOURCE_PROFILE)));
                             assertThat(assertFutureCompleteAndReturn(registerTaskManagerFuture))
-                                    .isTrue();
+                                    .isEqualTo(SlotManager.RegistrationResult.SUCCESS);
                             assertThat(getTaskManagerTracker().getRegisteredTaskManagers())
                                     .hasSize(1);
                             final Optional<TaskManagerSlotInformation> slot =
@@ -205,24 +217,51 @@ class FineGrainedSlotManagerTest extends FineGrainedSlotManagerTestBase {
         final SlotReport slotReportWithAllocatedSlot =
                 new SlotReport(
                         createAllocatedSlotStatus(
-                                new AllocationID(), DEFAULT_SLOT_RESOURCE_PROFILE));
+                                new JobID(), new AllocationID(), DEFAULT_SLOT_RESOURCE_PROFILE));
         new Context() {
             {
+                resourceAllocationStrategyBuilder.setTryFulfillRequirementsFunction(
+                        (jobRequirements, ignore) -> {
+                            assertThat(jobRequirements).hasSize(1);
+                            JobID jobID = jobRequirements.keySet().stream().findFirst().get();
+                            ResourceAllocationResult.Builder builder =
+                                    ResourceAllocationResult.builder();
+                            final PendingTaskManager pendingTaskManager;
+                            if (getTaskManagerTracker().getPendingTaskManagers().isEmpty()) {
+                                pendingTaskManager =
+                                        new PendingTaskManager(
+                                                DEFAULT_TOTAL_RESOURCE_PROFILE,
+                                                DEFAULT_NUM_SLOTS_PER_WORKER);
+                            } else {
+                                pendingTaskManager =
+                                        getTaskManagerTracker()
+                                                .getPendingTaskManagers()
+                                                .iterator()
+                                                .next();
+                            }
+                            builder.addPendingTaskManagerAllocate(pendingTaskManager);
+                            builder.addAllocationOnPendingResource(
+                                    jobID,
+                                    pendingTaskManager.getPendingTaskManagerId(),
+                                    DEFAULT_SLOT_RESOURCE_PROFILE);
+                            return builder.build();
+                        });
+
+                slotManagerConfigurationBuilder.setRequirementCheckDelay(Duration.ZERO);
+
                 runTest(
                         () -> {
-                            final CompletableFuture<Boolean> registerTaskManagerFuture1 =
-                                    new CompletableFuture<>();
-                            final CompletableFuture<Boolean> registerTaskManagerFuture2 =
-                                    new CompletableFuture<>();
-                            final CompletableFuture<Boolean> registerTaskManagerFuture3 =
-                                    new CompletableFuture<>();
+                            final CompletableFuture<SlotManager.RegistrationResult>
+                                    registerTaskManagerFuture1 = new CompletableFuture<>();
+                            final CompletableFuture<SlotManager.RegistrationResult>
+                                    registerTaskManagerFuture2 = new CompletableFuture<>();
+                            final CompletableFuture<SlotManager.RegistrationResult>
+                                    registerTaskManagerFuture3 = new CompletableFuture<>();
                             runInMainThread(
                                     () -> {
-                                        getTaskManagerTracker()
-                                                .addPendingTaskManager(
-                                                        new PendingTaskManager(
-                                                                DEFAULT_TOTAL_RESOURCE_PROFILE,
-                                                                DEFAULT_NUM_SLOTS_PER_WORKER));
+                                        getSlotManager()
+                                                .processResourceRequirements(
+                                                        createResourceRequirementsForSingleSlot());
                                         // task manager with allocated slot cannot deduct pending
                                         // task manager
                                         registerTaskManagerFuture1.complete(
@@ -235,7 +274,7 @@ class FineGrainedSlotManagerTest extends FineGrainedSlotManagerTestBase {
                                     });
 
                             assertThat(assertFutureCompleteAndReturn(registerTaskManagerFuture1))
-                                    .isTrue();
+                                    .isEqualTo(SlotManager.RegistrationResult.SUCCESS);
                             assertThat(getTaskManagerTracker().getPendingTaskManagers()).hasSize(1);
 
                             // task manager with mismatched resource cannot deduct
@@ -251,7 +290,7 @@ class FineGrainedSlotManagerTest extends FineGrainedSlotManagerTestBase {
                                                                     LARGE_SLOT_RESOURCE_PROFILE)));
 
                             assertThat(assertFutureCompleteAndReturn(registerTaskManagerFuture2))
-                                    .isTrue();
+                                    .isEqualTo(SlotManager.RegistrationResult.SUCCESS);
                             assertThat(getTaskManagerTracker().getPendingTaskManagers()).hasSize(1);
 
                             runInMainThread(
@@ -264,7 +303,7 @@ class FineGrainedSlotManagerTest extends FineGrainedSlotManagerTestBase {
                                                                     DEFAULT_TOTAL_RESOURCE_PROFILE,
                                                                     DEFAULT_SLOT_RESOURCE_PROFILE)));
                             assertThat(assertFutureCompleteAndReturn(registerTaskManagerFuture3))
-                                    .isTrue();
+                                    .isEqualTo(SlotManager.RegistrationResult.SUCCESS);
                             assertThat(getTaskManagerTracker().getPendingTaskManagers()).isEmpty();
                         });
             }
@@ -373,26 +412,32 @@ class FineGrainedSlotManagerTest extends FineGrainedSlotManagerTestBase {
     @Test
     void testRequestNewResourcesAccordingToStrategyResult() throws Exception {
         final JobID jobId = new JobID();
+        final AtomicInteger requestCount = new AtomicInteger(0);
         final List<CompletableFuture<Void>> allocateResourceFutures = new ArrayList<>();
         allocateResourceFutures.add(new CompletableFuture<>());
         allocateResourceFutures.add(new CompletableFuture<>());
         new Context() {
             {
-                resourceActionsBuilder.setAllocateResourceConsumer(
-                        ignored -> {
-                            if (allocateResourceFutures.get(0).isDone()) {
-                                allocateResourceFutures.get(1).complete(null);
-                            } else {
-                                allocateResourceFutures.get(0).complete(null);
+                PendingTaskManager pendingTaskManager =
+                        new PendingTaskManager(
+                                DEFAULT_TOTAL_RESOURCE_PROFILE, DEFAULT_NUM_SLOTS_PER_WORKER);
+                resourceAllocatorBuilder.setDeclareResourceNeededConsumer(
+                        (resourceDeclarations) -> {
+                            assertThat(requestCount).hasValueLessThan(2);
+                            if (!resourceDeclarations.isEmpty()) {
+                                allocateResourceFutures
+                                        .get(requestCount.getAndIncrement())
+                                        .complete(null);
                             }
                         });
                 resourceAllocationStrategyBuilder.setTryFulfillRequirementsFunction(
                         ((jobIDCollectionMap, taskManagerResourceInfoProvider) ->
                                 ResourceAllocationResult.builder()
-                                        .addPendingTaskManagerAllocate(
-                                                new PendingTaskManager(
-                                                        DEFAULT_TOTAL_RESOURCE_PROFILE,
-                                                        DEFAULT_NUM_SLOTS_PER_WORKER))
+                                        .addPendingTaskManagerAllocate(pendingTaskManager)
+                                        .addAllocationOnPendingResource(
+                                                jobId,
+                                                pendingTaskManager.getPendingTaskManagerId(),
+                                                DEFAULT_SLOT_RESOURCE_PROFILE)
                                         .build()));
                 runTest(
                         () -> {
@@ -403,6 +448,7 @@ class FineGrainedSlotManagerTest extends FineGrainedSlotManagerTestBase {
                                                             createResourceRequirements(jobId, 1)));
                             assertFutureCompleteAndReturn(allocateResourceFutures.get(0));
                             assertFutureNotComplete(allocateResourceFutures.get(1));
+                            assertThat(requestCount).hasValue(1);
                         });
             }
         };
@@ -445,8 +491,12 @@ class FineGrainedSlotManagerTest extends FineGrainedSlotManagerTestBase {
                                                 pendingTaskManager.getPendingTaskManagerId(),
                                                 DEFAULT_SLOT_RESOURCE_PROFILE)
                                         .build()));
-                resourceActionsBuilder.setAllocateResourceConsumer(
-                        ignored -> requestResourceFuture.complete(null));
+                resourceAllocatorBuilder.setDeclareResourceNeededConsumer(
+                        (resourceDeclarations) -> {
+                            if (!resourceDeclarations.isEmpty()) {
+                                requestResourceFuture.complete(null);
+                            }
+                        });
                 runTest(
                         () -> {
                             runInMainThread(
@@ -496,7 +546,7 @@ class FineGrainedSlotManagerTest extends FineGrainedSlotManagerTestBase {
         final CompletableFuture<Void> notifyNotEnoughResourceFuture = new CompletableFuture<>();
         new Context() {
             {
-                resourceActionsBuilder.setNotEnoughResourcesConsumer(
+                resourceEventListenerBuilder.setNotEnoughResourceAvailableConsumer(
                         (jobId1, acquiredResources) -> {
                             notEnoughResourceNotifications.add(
                                     Tuple2.of(jobId1, acquiredResources));
@@ -565,7 +615,7 @@ class FineGrainedSlotManagerTest extends FineGrainedSlotManagerTestBase {
                             }
                             return ResourceAllocationResult.builder().build();
                         });
-                setRequirementCheckDelay(requirementCheckDelay);
+                slotManagerConfigurationBuilder.setRequirementCheckDelay(requirementCheckDelay);
                 runTest(
                         () -> {
                             final ResourceRequirements resourceRequirements1 =
@@ -621,91 +671,6 @@ class FineGrainedSlotManagerTest extends FineGrainedSlotManagerTestBase {
         };
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // Task manager timeout
-    // ---------------------------------------------------------------------------------------------
-
-    /**
-     * Tests that formerly used task managers can timeout after all of their slots have been freed.
-     */
-    @Test
-    void testTimeoutForUnusedTaskManager() throws Exception {
-        final Time taskManagerTimeout = Time.milliseconds(50L);
-
-        final CompletableFuture<InstanceID> releaseResourceFuture = new CompletableFuture<>();
-        final AllocationID allocationId = new AllocationID();
-        final TaskExecutorConnection taskExecutionConnection = createTaskExecutorConnection();
-        final InstanceID instanceId = taskExecutionConnection.getInstanceID();
-        new Context() {
-            {
-                resourceActionsBuilder.setReleaseResourceConsumer(
-                        (instanceID, e) -> releaseResourceFuture.complete(instanceID));
-                slotManagerConfigurationBuilder.setTaskManagerTimeout(taskManagerTimeout);
-                runTest(
-                        () -> {
-                            final CompletableFuture<Boolean> registerTaskManagerFuture =
-                                    new CompletableFuture<>();
-                            runInMainThread(
-                                    () ->
-                                            registerTaskManagerFuture.complete(
-                                                    getSlotManager()
-                                                            .registerTaskManager(
-                                                                    taskExecutionConnection,
-                                                                    new SlotReport(
-                                                                            createAllocatedSlotStatus(
-                                                                                    allocationId,
-                                                                                    DEFAULT_SLOT_RESOURCE_PROFILE)),
-                                                                    DEFAULT_TOTAL_RESOURCE_PROFILE,
-                                                                    DEFAULT_SLOT_RESOURCE_PROFILE)));
-                            assertThat(assertFutureCompleteAndReturn(registerTaskManagerFuture))
-                                    .isTrue();
-                            assertThat(getSlotManager().getTaskManagerIdleSince(instanceId))
-                                    .isEqualTo(Long.MAX_VALUE);
-
-                            final CompletableFuture<Long> idleSinceFuture =
-                                    new CompletableFuture<>();
-                            runInMainThread(
-                                    () -> {
-                                        getSlotManager()
-                                                .freeSlot(
-                                                        new SlotID(
-                                                                taskExecutionConnection
-                                                                        .getResourceID(),
-                                                                0),
-                                                        allocationId);
-                                        idleSinceFuture.complete(
-                                                getSlotManager()
-                                                        .getTaskManagerIdleSince(instanceId));
-                                    });
-
-                            assertThat(assertFutureCompleteAndReturn(idleSinceFuture))
-                                    .isNotEqualTo(Long.MAX_VALUE);
-                            assertThat(assertFutureCompleteAndReturn(releaseResourceFuture))
-                                    .isEqualTo(instanceId);
-                            // A task manager timeout does not remove the slots from the
-                            // SlotManager. The receiver of the callback can then decide what to do
-                            // with the TaskManager.
-                            assertThat(getSlotManager().getNumberRegisteredSlots())
-                                    .isEqualTo(DEFAULT_NUM_SLOTS_PER_WORKER);
-
-                            final CompletableFuture<Boolean> unregisterTaskManagerFuture =
-                                    new CompletableFuture<>();
-                            runInMainThread(
-                                    () ->
-                                            unregisterTaskManagerFuture.complete(
-                                                    getSlotManager()
-                                                            .unregisterTaskManager(
-                                                                    taskExecutionConnection
-                                                                            .getInstanceID(),
-                                                                    TEST_EXCEPTION)));
-                            assertThat(assertFutureCompleteAndReturn(unregisterTaskManagerFuture))
-                                    .isTrue();
-                            assertThat(getSlotManager().getNumberRegisteredSlots()).isEqualTo(0);
-                        });
-            }
-        };
-    }
-
     @Test
     void testMaxTotalResourceCpuExceeded() throws Exception {
         Consumer<SlotManagerConfigurationBuilder> maxTotalResourceSetter =
@@ -741,10 +706,10 @@ class FineGrainedSlotManagerTest extends FineGrainedSlotManagerTestBase {
             {
                 runTest(
                         () -> {
-                            final CompletableFuture<Boolean> registerTaskManagerFuture1 =
-                                    new CompletableFuture<>();
-                            final CompletableFuture<Boolean> registerTaskManagerFuture2 =
-                                    new CompletableFuture<>();
+                            final CompletableFuture<SlotManager.RegistrationResult>
+                                    registerTaskManagerFuture1 = new CompletableFuture<>();
+                            final CompletableFuture<SlotManager.RegistrationResult>
+                                    registerTaskManagerFuture2 = new CompletableFuture<>();
                             runInMainThread(
                                     () -> {
                                         registerTaskManagerFuture1.complete(
@@ -763,9 +728,9 @@ class FineGrainedSlotManagerTest extends FineGrainedSlotManagerTestBase {
                                                                 resourceProfile2));
                                     });
                             assertThat(assertFutureCompleteAndReturn(registerTaskManagerFuture1))
-                                    .isTrue();
+                                    .isEqualTo(SlotManager.RegistrationResult.SUCCESS);
                             assertThat(assertFutureCompleteAndReturn(registerTaskManagerFuture2))
-                                    .isTrue();
+                                    .isEqualTo(SlotManager.RegistrationResult.SUCCESS);
                             assertThat(getSlotManager().getFreeResource())
                                     .isEqualTo(resourceProfile1.merge(resourceProfile2));
                             assertThat(
@@ -814,6 +779,7 @@ class FineGrainedSlotManagerTest extends FineGrainedSlotManagerTestBase {
     private void testMaxTotalResourceExceededAllocateResource(
             Consumer<SlotManagerConfigurationBuilder> maxTotalResourceSetter) throws Exception {
         final JobID jobId = new JobID();
+        final AtomicInteger requestCount = new AtomicInteger(0);
         final List<CompletableFuture<Void>> allocateResourceFutures = new ArrayList<>();
         allocateResourceFutures.add(new CompletableFuture<>());
         allocateResourceFutures.add(new CompletableFuture<>());
@@ -827,12 +793,13 @@ class FineGrainedSlotManagerTest extends FineGrainedSlotManagerTestBase {
             {
                 maxTotalResourceSetter.accept(slotManagerConfigurationBuilder);
 
-                resourceActionsBuilder.setAllocateResourceConsumer(
-                        ignored -> {
-                            if (allocateResourceFutures.get(0).isDone()) {
-                                allocateResourceFutures.get(1).complete(null);
-                            } else {
-                                allocateResourceFutures.get(0).complete(null);
+                resourceAllocatorBuilder.setDeclareResourceNeededConsumer(
+                        (resourceDeclarations) -> {
+                            if (!resourceDeclarations.isEmpty()) {
+                                assertThat(requestCount).hasValueLessThan(2);
+                                allocateResourceFutures
+                                        .get(requestCount.getAndIncrement())
+                                        .complete(null);
                             }
                         });
 
@@ -868,16 +835,14 @@ class FineGrainedSlotManagerTest extends FineGrainedSlotManagerTestBase {
             Consumer<SlotManagerConfigurationBuilder> maxTotalResourceSetter) throws Exception {
         final TaskExecutorConnection taskManagerConnection1 = createTaskExecutorConnection();
         final TaskExecutorConnection taskManagerConnection2 = createTaskExecutorConnection();
-        final CompletableFuture<Boolean> registerTaskManagerFuture1 = new CompletableFuture<>();
-        final CompletableFuture<Boolean> registerTaskManagerFuture2 = new CompletableFuture<>();
-        final CompletableFuture<InstanceID> releaseResourceFuture = new CompletableFuture<>();
+        final CompletableFuture<SlotManager.RegistrationResult> registerTaskManagerFuture1 =
+                new CompletableFuture<>();
+        final CompletableFuture<SlotManager.RegistrationResult> registerTaskManagerFuture2 =
+                new CompletableFuture<>();
 
         new Context() {
             {
                 maxTotalResourceSetter.accept(slotManagerConfigurationBuilder);
-
-                resourceActionsBuilder.setReleaseResourceConsumer(
-                        (instanceId, ignore) -> releaseResourceFuture.complete(instanceId));
 
                 runTest(
                         () -> {
@@ -891,8 +856,7 @@ class FineGrainedSlotManagerTest extends FineGrainedSlotManagerTestBase {
                                                                     DEFAULT_TOTAL_RESOURCE_PROFILE,
                                                                     DEFAULT_SLOT_RESOURCE_PROFILE)));
                             assertThat(assertFutureCompleteAndReturn(registerTaskManagerFuture1))
-                                    .isTrue();
-                            assertFutureNotComplete(releaseResourceFuture);
+                                    .isEqualTo(SlotManager.RegistrationResult.SUCCESS);
                             assertThat(getTaskManagerTracker().getRegisteredTaskManagers())
                                     .hasSize(1);
                             assertThat(
@@ -911,9 +875,7 @@ class FineGrainedSlotManagerTest extends FineGrainedSlotManagerTestBase {
                                                                     DEFAULT_TOTAL_RESOURCE_PROFILE,
                                                                     DEFAULT_SLOT_RESOURCE_PROFILE)));
                             assertThat(assertFutureCompleteAndReturn(registerTaskManagerFuture2))
-                                    .isFalse();
-                            assertThat(releaseResourceFuture.get())
-                                    .isEqualTo(taskManagerConnection2.getInstanceID());
+                                    .isEqualTo(SlotManager.RegistrationResult.REJECTED);
                             assertThat(getTaskManagerTracker().getRegisteredTaskManagers())
                                     .hasSize(1);
                             assertThat(
@@ -952,13 +914,148 @@ class FineGrainedSlotManagerTest extends FineGrainedSlotManagerTestBase {
         context.runTest(
                 () -> {
                     // sanity check to ensure metrics were actually registered
-                    assertThat(registeredMetrics.get()).isGreaterThan(0);
+                    assertThat(registeredMetrics).hasValueGreaterThan(0);
                     context.runInMainThreadAndWait(
-                            () -> {
-                                assertThatNoException()
-                                        .isThrownBy(() -> closeFn.accept(context.getSlotManager()));
-                            });
-                    assertThat(registeredMetrics.get()).isEqualTo(0);
+                            () ->
+                                    assertThatNoException()
+                                            .isThrownBy(
+                                                    () ->
+                                                            closeFn.accept(
+                                                                    context.getSlotManager())));
+                    assertThat(registeredMetrics).hasValue(0);
                 });
+    }
+
+    @Test
+    void testReclaimInactiveSlotsOnClearRequirements() throws Exception {
+        new Context() {
+            {
+                runTest(
+                        () -> {
+                            final CompletableFuture<JobID> freeInactiveSlotsJobIdFuture =
+                                    new CompletableFuture<>();
+
+                            final JobID jobId = new JobID();
+                            final TestingTaskExecutorGateway taskExecutorGateway =
+                                    new TestingTaskExecutorGatewayBuilder()
+                                            .setFreeInactiveSlotsConsumer(
+                                                    freeInactiveSlotsJobIdFuture::complete)
+                                            .createTestingTaskExecutorGateway();
+                            final TaskExecutorConnection taskExecutionConnection =
+                                    createTaskExecutorConnection(taskExecutorGateway);
+
+                            final CompletableFuture<SlotManager.RegistrationResult>
+                                    registerTaskManagerFuture = new CompletableFuture<>();
+                            runInMainThread(
+                                    () ->
+                                            registerTaskManagerFuture.complete(
+                                                    getSlotManager()
+                                                            .registerTaskManager(
+                                                                    taskExecutionConnection,
+                                                                    new SlotReport(
+                                                                            createAllocatedSlotStatus(
+                                                                                    jobId,
+                                                                                    new AllocationID(),
+                                                                                    DEFAULT_SLOT_RESOURCE_PROFILE)),
+                                                                    DEFAULT_TOTAL_RESOURCE_PROFILE,
+                                                                    DEFAULT_SLOT_RESOURCE_PROFILE)));
+                            assertThat(assertFutureCompleteAndReturn(registerTaskManagerFuture))
+                                    .isEqualTo(SlotManager.RegistrationResult.SUCCESS);
+
+                            // setup initial requirements, which should not trigger slots being
+                            // reclaimed
+                            runInMainThreadAndWait(
+                                    () ->
+                                            getSlotManager()
+                                                    .processResourceRequirements(
+                                                            createResourceRequirements(jobId, 2)));
+                            assertFutureNotComplete(freeInactiveSlotsJobIdFuture);
+
+                            // set requirements to 0, which should not trigger slots being reclaimed
+                            runInMainThreadAndWait(
+                                    () ->
+                                            getSlotManager()
+                                                    .processResourceRequirements(
+                                                            ResourceRequirements.empty(
+                                                                    jobId, "foobar")));
+                            assertFutureNotComplete(freeInactiveSlotsJobIdFuture);
+
+                            // clear requirements, which should trigger slots being reclaimed
+                            runInMainThreadAndWait(
+                                    () -> getSlotManager().clearResourceRequirements(jobId));
+                            assertThatFuture(freeInactiveSlotsJobIdFuture)
+                                    .eventuallySucceeds()
+                                    .isEqualTo(jobId);
+                        });
+            }
+        };
+    }
+
+    @Test
+    void testClearResourceRequirementsWithPendingTaskManager() throws Exception {
+        new Context() {
+            {
+                final JobID jobId = new JobID();
+                final CompletableFuture<Void> allocateResourceFuture = new CompletableFuture<>();
+
+                resourceAllocatorBuilder.setDeclareResourceNeededConsumer(
+                        (resourceDeclarations) -> allocateResourceFuture.complete(null));
+
+                final PendingTaskManager pendingTaskManager1 =
+                        new PendingTaskManager(
+                                DEFAULT_TOTAL_RESOURCE_PROFILE, DEFAULT_NUM_SLOTS_PER_WORKER);
+                final PendingTaskManager pendingTaskManager2 =
+                        new PendingTaskManager(
+                                DEFAULT_TOTAL_RESOURCE_PROFILE, DEFAULT_NUM_SLOTS_PER_WORKER);
+                resourceAllocationStrategyBuilder.setTryFulfillRequirementsFunction(
+                        ((jobIDCollectionMap, taskManagerResourceInfoProvider) ->
+                                ResourceAllocationResult.builder()
+                                        .addPendingTaskManagerAllocate(pendingTaskManager1)
+                                        .addPendingTaskManagerAllocate(pendingTaskManager2)
+                                        .addAllocationOnPendingResource(
+                                                jobId,
+                                                pendingTaskManager1.getPendingTaskManagerId(),
+                                                DEFAULT_SLOT_RESOURCE_PROFILE)
+                                        .addAllocationOnPendingResource(
+                                                jobId,
+                                                pendingTaskManager2.getPendingTaskManagerId(),
+                                                DEFAULT_SLOT_RESOURCE_PROFILE)
+                                        .build()));
+                runTest(
+                        () -> {
+                            // assign allocations to pending task managers
+                            runInMainThread(
+                                    () ->
+                                            getSlotManager()
+                                                    .processResourceRequirements(
+                                                            createResourceRequirements(jobId, 2)));
+                            assertFutureCompleteAndReturn(allocateResourceFuture);
+
+                            // cancel all slot requests, will trigger
+                            // PendingTaskManager#clearPendingAllocationsOfJob
+                            runInMainThreadAndWait(
+                                    () ->
+                                            getSlotManager()
+                                                    .processResourceRequirements(
+                                                            ResourceRequirements.empty(
+                                                                    jobId, "foobar")));
+
+                            // disconnect to job master,will trigger
+                            // PendingTaskManager#clearPendingAllocationsOfJob again
+                            CompletableFuture<Void> clearFuture = new CompletableFuture<>();
+                            runInMainThread(
+                                    () -> {
+                                        try {
+                                            getSlotManager().clearResourceRequirements(jobId);
+                                        } catch (Exception e) {
+                                            clearFuture.completeExceptionally(e);
+                                        }
+                                        clearFuture.complete(null);
+                                    });
+
+                            assertFutureCompleteAndReturn(clearFuture);
+                        });
+            }
+        };
     }
 }

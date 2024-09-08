@@ -41,7 +41,6 @@ import org.apache.flink.table.runtime.types.PlannerTypeUtils.isInteroperable
 import org.apache.flink.table.runtime.typeutils.TypeCheckUtils
 import org.apache.flink.table.runtime.typeutils.TypeCheckUtils.{isNumeric, isTemporal, isTimeInterval}
 import org.apache.flink.table.types.logical._
-import org.apache.flink.table.types.logical.utils.LogicalTypeChecks.{getFieldCount, isCompositeType}
 import org.apache.flink.table.typeutils.TimeIndicatorTypeInfo
 
 import org.apache.calcite.rex._
@@ -120,14 +119,6 @@ class ExprCodeGenerator(ctx: CodeGeneratorContext, nullableInput: Boolean)
         case Some(input) => fieldIndices(input)
         case _ => Array[Int]()
       }
-  }
-
-  private def fieldIndices(t: LogicalType): Array[Int] = {
-    if (isCompositeType(t)) {
-      (0 until getFieldCount(t)).toArray
-    } else {
-      Array(0)
-    }
   }
 
   /**
@@ -440,8 +431,8 @@ class ExprCodeGenerator(ctx: CodeGeneratorContext, nullableInput: Boolean)
       case None =>
         val pType = primitiveTypeTermForType(value.internalType)
         val defaultValue = primitiveDefaultValue(value.internalType)
-        val resultTerm = newName("field")
-        val nullTerm = newName("isNull")
+        val resultTerm = newName(ctx, "field")
+        val nullTerm = newName(ctx, "isNull")
         val code =
           s"""
              |$pType $resultTerm = $defaultValue;
@@ -546,8 +537,7 @@ class ExprCodeGenerator(ctx: CodeGeneratorContext, nullableInput: Boolean)
       case MULTIPLY if isTimeInterval(resultType) =>
         val left = operands.head
         val right = operands(1)
-        requireTimeInterval(left)
-        requireNumeric(right)
+        requireNumericAndTimeInterval(left, right)
         generateBinaryArithmeticOperator(ctx, "*", resultType, left, right)
 
       case DIVIDE | DIVIDE_INTEGER if isNumeric(resultType) =>
@@ -635,11 +625,11 @@ class ExprCodeGenerator(ctx: CodeGeneratorContext, nullableInput: Boolean)
 
       case IS_NULL =>
         val operand = operands.head
-        generateIsNull(operand, resultType)
+        generateIsNull(ctx, operand, resultType)
 
       case IS_NOT_NULL =>
         val operand = operands.head
-        generateIsNotNull(operand, resultType)
+        generateIsNotNull(ctx, operand, resultType)
 
       // logic
       case AND =>
@@ -647,7 +637,7 @@ class ExprCodeGenerator(ctx: CodeGeneratorContext, nullableInput: Boolean)
           (left: GeneratedExpression, right: GeneratedExpression) =>
             requireBoolean(left)
             requireBoolean(right)
-            generateAnd(left, right, resultType)
+            generateAnd(ctx, left, right, resultType)
         }
 
       case OR =>
@@ -655,7 +645,7 @@ class ExprCodeGenerator(ctx: CodeGeneratorContext, nullableInput: Boolean)
           (left: GeneratedExpression, right: GeneratedExpression) =>
             requireBoolean(left)
             requireBoolean(right)
-            generateOr(left, right, resultType)
+            generateOr(ctx, left, right, resultType)
         }
 
       case NOT =>
@@ -726,7 +716,7 @@ class ExprCodeGenerator(ctx: CodeGeneratorContext, nullableInput: Boolean)
             val array = operands.head
             val index = operands(1)
             requireInteger(index)
-            generateArrayElementAt(array, index)
+            generateArrayElementAt(ctx, array, index)
 
           case LogicalTypeRoot.MAP =>
             val key = operands(1)
@@ -754,7 +744,7 @@ class ExprCodeGenerator(ctx: CodeGeneratorContext, nullableInput: Boolean)
       case ELEMENT =>
         val array = operands.head
         requireArray(array)
-        generateArrayElement(array)
+        generateArrayElement(ctx, array)
 
       case DOT =>
         generateDot(ctx, operands)
@@ -772,6 +762,8 @@ class ExprCodeGenerator(ctx: CodeGeneratorContext, nullableInput: Boolean)
 
       case JSON_VALUE => new JsonValueCallGen().generate(ctx, operands, resultType)
 
+      case JSON_QUERY => new JsonQueryCallGen().generate(ctx, operands, resultType)
+
       case JSON_OBJECT => new JsonObjectCallGen(call).generate(ctx, operands, resultType)
 
       case JSON_ARRAY => new JsonArrayCallGen(call).generate(ctx, operands, resultType)
@@ -783,7 +775,7 @@ class ExprCodeGenerator(ctx: CodeGeneratorContext, nullableInput: Boolean)
              |${operands.map(_.code).mkString("\n")}
              |${nullValue.code}
              |org.apache.flink.util.ExceptionUtils.rethrow(
-             |  new RuntimeException(${operands.head.resultTerm}.toString()));
+             |  new org.apache.flink.table.api.TableRuntimeException(${operands.head.resultTerm}.toString()));
              |""".stripMargin
         GeneratedExpression(nullValue.resultTerm, nullValue.nullTerm, code, resultType)
 
@@ -815,7 +807,11 @@ class ExprCodeGenerator(ctx: CodeGeneratorContext, nullableInput: Boolean)
           case BuiltInFunctionDefinitions.JSON_STRING =>
             new JsonStringCallGen(call).generate(ctx, operands, resultType)
 
-          case BuiltInFunctionDefinitions.AGG_DECIMAL_PLUS =>
+          case BuiltInFunctionDefinitions.INTERNAL_HASHCODE =>
+            new HashCodeCallGen().generate(ctx, operands, resultType)
+
+          case BuiltInFunctionDefinitions.AGG_DECIMAL_PLUS |
+              BuiltInFunctionDefinitions.HIVE_AGG_DECIMAL_PLUS =>
             val left = operands.head
             val right = operands(1)
             generateBinaryArithmeticOperator(ctx, "+", resultType, left, right)

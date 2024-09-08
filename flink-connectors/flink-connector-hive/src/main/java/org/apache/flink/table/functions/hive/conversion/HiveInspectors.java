@@ -33,6 +33,7 @@ import org.apache.flink.table.types.logical.MapType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.types.logical.VarCharType;
 import org.apache.flink.types.Row;
+import org.apache.flink.util.CollectionUtil;
 
 import org.apache.hadoop.hive.common.type.HiveChar;
 import org.apache.hadoop.hive.common.type.HiveDecimal;
@@ -85,6 +86,7 @@ import org.apache.hadoop.hive.serde2.objectinspector.primitive.WritableConstantL
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.WritableConstantShortObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.WritableConstantStringObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.WritableConstantTimestampObjectInspector;
+import org.apache.hadoop.hive.serde2.objectinspector.primitive.WritableVoidObjectInspector;
 import org.apache.hadoop.hive.serde2.typeinfo.CharTypeInfo;
 import org.apache.hadoop.hive.serde2.typeinfo.DecimalTypeInfo;
 import org.apache.hadoop.hive.serde2.typeinfo.ListTypeInfo;
@@ -109,7 +111,6 @@ import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Period;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -295,7 +296,7 @@ public class HiveInspectors {
                     return null;
                 }
                 Map<Object, Object> map = (Map) o;
-                Map<Object, Object> result = new HashMap<>(map.size());
+                Map<Object, Object> result = CollectionUtil.newHashMapWithExpectedSize(map.size());
 
                 for (Map.Entry<Object, Object> entry : map.entrySet()) {
                     result.put(
@@ -417,7 +418,7 @@ public class HiveInspectors {
                 return null;
             }
 
-            Map<Object, Object> result = new HashMap<>(map.size());
+            Map<Object, Object> result = CollectionUtil.newHashMapWithExpectedSize(map.size());
             for (Map.Entry<?, ?> entry : map.entrySet()) {
                 result.put(
                         toFlinkObject(
@@ -549,9 +550,18 @@ public class HiveInspectors {
                 className = WritableConstantBinaryObjectInspector.class.getName();
                 return HiveReflectionUtils.createConstantObjectInspector(
                         className, BytesWritable.class, value);
-            case UNKNOWN:
             case VOID:
-                // If type is null, we use the Constant String to replace
+                try {
+                    Constructor<WritableVoidObjectInspector> constructor =
+                            WritableVoidObjectInspector.class.getDeclaredConstructor();
+                    constructor.setAccessible(true);
+                    return constructor.newInstance();
+                } catch (Exception e) {
+                    throw new FlinkHiveUDFException(
+                            "Failed to create writable constant object inspector", e);
+                }
+            case UNKNOWN:
+                // If type is unknown, we use the Constant String to replace
                 className = WritableConstantStringObjectInspector.class.getName();
                 return HiveReflectionUtils.createConstantObjectInspector(
                         className, Text.class, value == null ? null : value.toString());

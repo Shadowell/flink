@@ -20,17 +20,16 @@ package org.apache.flink.table.runtime.hashtable;
 
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeinfo.Types;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.io.disk.iomanager.IOManager;
 import org.apache.flink.runtime.io.disk.iomanager.IOManagerAsync;
 import org.apache.flink.runtime.memory.MemoryAllocationException;
 import org.apache.flink.runtime.memory.MemoryManager;
 import org.apache.flink.runtime.memory.MemoryManagerBuilder;
 import org.apache.flink.runtime.operators.testutils.UnionIterator;
-import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.binary.BinaryRowData;
 import org.apache.flink.table.runtime.typeutils.BinaryRowDataSerializer;
+import org.apache.flink.table.runtime.util.ConstantsKeyValuePairsIterator;
 import org.apache.flink.table.runtime.util.RowIterator;
 import org.apache.flink.table.runtime.util.UniformBinaryRowGenerator;
 import org.apache.flink.testutils.junit.extensions.parameterized.ParameterizedTestExtension;
@@ -48,12 +47,13 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static org.apache.flink.table.api.config.ExecutionConfigOptions.TABLE_EXEC_SPILL_COMPRESSION_BLOCK_SIZE;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Fail.fail;
 
 /** Test for {@link LongHashPartition}. */
 @ExtendWith(ParameterizedTestExtension.class)
-public class LongHashTableTest {
+class LongHashTableTest {
 
     private static final int PAGE_SIZE = 32 * 1024;
     private IOManager ioManager;
@@ -63,34 +63,31 @@ public class LongHashTableTest {
             MemoryManagerBuilder.newBuilder().setMemorySize(896 * PAGE_SIZE).build();
 
     private boolean useCompress;
-    private Configuration conf;
 
     public LongHashTableTest(boolean useCompress) {
         this.useCompress = useCompress;
     }
 
     @Parameters(name = "useCompress-{0}")
-    public static List<Boolean> getVarSeg() {
+    private static List<Boolean> getVarSeg() {
         return Arrays.asList(true, false);
     }
 
     @BeforeEach
-    public void init() {
+    void init() {
         TypeInformation[] types = new TypeInformation[] {Types.INT, Types.INT};
         this.buildSideSerializer = new BinaryRowDataSerializer(types.length);
         this.probeSideSerializer = new BinaryRowDataSerializer(types.length);
         this.ioManager = new IOManagerAsync();
-
-        conf = new Configuration();
-        conf.setBoolean(ExecutionConfigOptions.TABLE_EXEC_SPILL_COMPRESSION_ENABLED, useCompress);
     }
 
     private class MyHashTable extends LongHybridHashTable {
 
         public MyHashTable(long memorySize) {
             super(
-                    conf,
                     LongHashTableTest.this,
+                    useCompress,
+                    (int) TABLE_EXEC_SPILL_COMPRESSION_BLOCK_SIZE.defaultValue().getBytes(),
                     buildSideSerializer,
                     probeSideSerializer,
                     memManager,
@@ -274,11 +271,9 @@ public class LongHashTableTest {
         MutableObjectIterator<BinaryRowData> build1 =
                 new UniformBinaryRowGenerator(numKeys, buildValsPerKey, false);
         MutableObjectIterator<BinaryRowData> build2 =
-                new BinaryHashTableTest.ConstantsKeyValuePairsIterator(
-                        repeatedValue1, 17, repeatedValueCountBuild);
+                new ConstantsKeyValuePairsIterator(repeatedValue1, 17, repeatedValueCountBuild);
         MutableObjectIterator<BinaryRowData> build3 =
-                new BinaryHashTableTest.ConstantsKeyValuePairsIterator(
-                        repeatedValue2, 23, repeatedValueCountBuild);
+                new ConstantsKeyValuePairsIterator(repeatedValue2, 23, repeatedValueCountBuild);
         List<MutableObjectIterator<BinaryRowData>> builds = new ArrayList<>();
         builds.add(build1);
         builds.add(build2);
@@ -289,9 +284,9 @@ public class LongHashTableTest {
         MutableObjectIterator<BinaryRowData> probe1 =
                 new UniformBinaryRowGenerator(numKeys, probeValsPerKey, true);
         MutableObjectIterator<BinaryRowData> probe2 =
-                new BinaryHashTableTest.ConstantsKeyValuePairsIterator(repeatedValue1, 17, 5);
+                new ConstantsKeyValuePairsIterator(repeatedValue1, 17, 5);
         MutableObjectIterator<BinaryRowData> probe3 =
-                new BinaryHashTableTest.ConstantsKeyValuePairsIterator(repeatedValue2, 23, 5);
+                new ConstantsKeyValuePairsIterator(repeatedValue2, 23, 5);
         List<MutableObjectIterator<BinaryRowData>> probes = new ArrayList<>();
         probes.add(probe1);
         probes.add(probe2);
@@ -360,11 +355,9 @@ public class LongHashTableTest {
         MutableObjectIterator<BinaryRowData> build1 =
                 new UniformBinaryRowGenerator(numKeys, buildValsPerKey, false);
         MutableObjectIterator<BinaryRowData> build2 =
-                new BinaryHashTableTest.ConstantsKeyValuePairsIterator(
-                        repeatedValue1, 17, repeatedValueCountBuild);
+                new ConstantsKeyValuePairsIterator(repeatedValue1, 17, repeatedValueCountBuild);
         MutableObjectIterator<BinaryRowData> build3 =
-                new BinaryHashTableTest.ConstantsKeyValuePairsIterator(
-                        repeatedValue2, 23, repeatedValueCountBuild);
+                new ConstantsKeyValuePairsIterator(repeatedValue2, 23, repeatedValueCountBuild);
         List<MutableObjectIterator<BinaryRowData>> builds = new ArrayList<>();
         builds.add(build1);
         builds.add(build2);
@@ -375,9 +368,9 @@ public class LongHashTableTest {
         MutableObjectIterator<BinaryRowData> probe1 =
                 new UniformBinaryRowGenerator(numKeys, probeValsPerKey, true);
         MutableObjectIterator<BinaryRowData> probe2 =
-                new BinaryHashTableTest.ConstantsKeyValuePairsIterator(repeatedValue1, 17, 5);
+                new ConstantsKeyValuePairsIterator(repeatedValue1, 17, 5);
         MutableObjectIterator<BinaryRowData> probe3 =
-                new BinaryHashTableTest.ConstantsKeyValuePairsIterator(repeatedValue2, 23, 5);
+                new ConstantsKeyValuePairsIterator(repeatedValue2, 23, 5);
         List<MutableObjectIterator<BinaryRowData>> probes = new ArrayList<>();
         probes.add(probe1);
         probes.add(probe2);
@@ -450,11 +443,9 @@ public class LongHashTableTest {
         MutableObjectIterator<BinaryRowData> build1 =
                 new UniformBinaryRowGenerator(numKeys, buildValsPerKey, false);
         MutableObjectIterator<BinaryRowData> build2 =
-                new BinaryHashTableTest.ConstantsKeyValuePairsIterator(
-                        repeatedValue1, 17, repeatedValueCount);
+                new ConstantsKeyValuePairsIterator(repeatedValue1, 17, repeatedValueCount);
         MutableObjectIterator<BinaryRowData> build3 =
-                new BinaryHashTableTest.ConstantsKeyValuePairsIterator(
-                        repeatedValue2, 23, repeatedValueCount);
+                new ConstantsKeyValuePairsIterator(repeatedValue2, 23, repeatedValueCount);
         List<MutableObjectIterator<BinaryRowData>> builds = new ArrayList<>();
         builds.add(build1);
         builds.add(build2);
@@ -465,11 +456,9 @@ public class LongHashTableTest {
         MutableObjectIterator<BinaryRowData> probe1 =
                 new UniformBinaryRowGenerator(numKeys, probeValsPerKey, true);
         MutableObjectIterator<BinaryRowData> probe2 =
-                new BinaryHashTableTest.ConstantsKeyValuePairsIterator(
-                        repeatedValue1, 17, repeatedValueCount);
+                new ConstantsKeyValuePairsIterator(repeatedValue1, 17, repeatedValueCount);
         MutableObjectIterator<BinaryRowData> probe3 =
-                new BinaryHashTableTest.ConstantsKeyValuePairsIterator(
-                        repeatedValue2, 23, repeatedValueCount);
+                new ConstantsKeyValuePairsIterator(repeatedValue2, 23, repeatedValueCount);
         List<MutableObjectIterator<BinaryRowData>> probes = new ArrayList<>();
         probes.add(probe1);
         probes.add(probe2);

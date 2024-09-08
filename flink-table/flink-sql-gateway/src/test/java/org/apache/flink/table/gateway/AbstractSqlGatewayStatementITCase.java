@@ -21,23 +21,27 @@ package org.apache.flink.table.gateway;
 import org.apache.flink.table.catalog.ResolvedSchema;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.gateway.api.SqlGatewayService;
+import org.apache.flink.table.gateway.service.utils.Constants;
 import org.apache.flink.table.gateway.service.utils.SqlGatewayServiceExtension;
 import org.apache.flink.table.gateway.utils.SqlScriptReader;
 import org.apache.flink.table.gateway.utils.TestSqlStatement;
 import org.apache.flink.table.utils.print.PrintStyle;
 import org.apache.flink.table.utils.print.RowDataToStringConverter;
 import org.apache.flink.test.junit5.MiniClusterExtension;
-import org.apache.flink.test.util.AbstractTestBase;
+import org.apache.flink.test.util.AbstractTestBaseJUnit4;
+import org.apache.flink.testutils.junit.extensions.parameterized.Parameter;
+import org.apache.flink.testutils.junit.extensions.parameterized.ParameterizedTestExtension;
+import org.apache.flink.testutils.junit.extensions.parameterized.Parameters;
 
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.TestTemplate;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.api.io.TempDir;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.MethodSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -59,8 +63,9 @@ import java.util.Map;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.regex.Pattern;
-import java.util.stream.Stream;
+import java.util.stream.Collectors;
 
+import static org.apache.flink.configuration.RestOptions.PORT;
 import static org.apache.flink.table.gateway.utils.SqlScriptReader.HINT_START_OF_OUTPUT;
 import static org.apache.flink.table.planner.utils.TableTestUtil.replaceNodeIdInOperator;
 import static org.apache.flink.table.planner.utils.TableTestUtil.replaceStreamNodeId;
@@ -68,7 +73,8 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** Base ITCase tests for statements. */
-public abstract class AbstractSqlGatewayStatementITCase extends AbstractTestBase {
+@ExtendWith(ParameterizedTestExtension.class)
+public abstract class AbstractSqlGatewayStatementITCase extends AbstractTestBaseJUnit4 {
 
     private static final Logger LOG =
             LoggerFactory.getLogger(AbstractSqlGatewayStatementITCase.class);
@@ -89,8 +95,15 @@ public abstract class AbstractSqlGatewayStatementITCase extends AbstractTestBase
 
     private final Map<String, String> replaceVars = new HashMap<>();
 
+    @Parameter public TestParameters parameters;
+
+    @Parameters(name = "parameters={0}")
+    public static List<TestParameters> parameters() throws Exception {
+        return listFlinkSqlTests().stream().map(TestParameters::new).collect(Collectors.toList());
+    }
+
     @BeforeAll
-    public static void setUp() {
+    static void setUp() {
         service = SQL_GATEWAY_SERVICE_EXTENSION.getService();
     }
 
@@ -101,15 +114,37 @@ public abstract class AbstractSqlGatewayStatementITCase extends AbstractTestBase
                 "$VAR_STREAMING_PATH",
                 Files.createDirectory(temporaryFolder.resolve("streaming")).toFile().getPath());
         replaceVars.put(
+                "$VAR_STREAMING_PATH2",
+                Files.createDirectory(temporaryFolder.resolve("streaming2")).toFile().getPath());
+        replaceVars.put(
+                "$VAR_STREAMING_PATH3",
+                Files.createDirectory(temporaryFolder.resolve("streaming3")).toFile().getPath());
+        replaceVars.put(
                 "$VAR_BATCH_PATH",
                 Files.createDirectory(temporaryFolder.resolve("batch")).toFile().getPath());
+        replaceVars.put(
+                "$VAR_BATCH_CTAS_PATH",
+                Files.createDirectory(temporaryFolder.resolve("batch_ctas")).toFile().getPath());
+        replaceVars.put(
+                "$VAR_REST_PORT", MINI_CLUSTER.getClientConfiguration().get(PORT).toString());
+        replaceVars.put(
+                "$VAR_STREAMING_PLAN_PATH",
+                Files.createDirectory(temporaryFolder.resolve("streaming_compiled_plan"))
+                        .toFile()
+                        .getPath());
+        replaceVars.put(
+                "$VAR_STREAMING_PLAN_RELATIVE_PATH",
+                new File(".")
+                        .getCanonicalFile()
+                        .toPath()
+                        .relativize(Paths.get(replaceVars.get("$VAR_STREAMING_PLAN_PATH")))
+                        .toString());
     }
 
-    @ParameterizedTest
-    @MethodSource("listFlinkSqlTests")
-    public void testFlinkSqlStatements(String sqlPath) throws Exception {
-        resetSessionForFlinkSqlStatements();
-        runTest(sqlPath);
+    @TestTemplate
+    public void testFlinkSqlStatements() throws Exception {
+        prepareEnvironment();
+        runTest(parameters.getSqlPath());
     }
 
     /**
@@ -146,6 +181,25 @@ public abstract class AbstractSqlGatewayStatementITCase extends AbstractTestBase
     // -------------------------------------------------------------------------------------------
     // Utility
     // -------------------------------------------------------------------------------------------
+
+    /** Parameters of the test spec. */
+    protected static class TestParameters {
+
+        protected final String sqlPath;
+
+        public TestParameters(String sqlPath) {
+            this.sqlPath = sqlPath;
+        }
+
+        public String getSqlPath() {
+            return sqlPath;
+        }
+
+        @Override
+        public String toString() {
+            return "TestParameters{" + "sqlPath='" + sqlPath + '\'' + '}';
+        }
+    }
 
     /** Mark the output type. */
     public enum Tag {
@@ -216,7 +270,7 @@ public abstract class AbstractSqlGatewayStatementITCase extends AbstractTestBase
                 values);
     }
 
-    private static Stream<String> listFlinkSqlTests() throws Exception {
+    protected static List<String> listFlinkSqlTests() throws Exception {
         final File jarFile =
                 new File(
                         AbstractSqlGatewayStatementITCase.class
@@ -238,14 +292,13 @@ public abstract class AbstractSqlGatewayStatementITCase extends AbstractTestBase
                     }
                 }
             }
-            return files.stream();
+            return files;
         } else {
             return listTestSpecInTheSameModule(RESOURCE_DIR);
         }
     }
 
-    protected static Stream<String> listTestSpecInTheSameModule(String resourceDir)
-            throws Exception {
+    protected static List<String> listTestSpecInTheSameModule(String resourceDir) throws Exception {
         return IOUtils.readLines(
                         checkNotNull(
                                 AbstractSqlGatewayStatementITCase.class
@@ -253,7 +306,8 @@ public abstract class AbstractSqlGatewayStatementITCase extends AbstractTestBase
                                         .getResourceAsStream(resourceDir)),
                         StandardCharsets.UTF_8)
                 .stream()
-                .map(name -> Paths.get(resourceDir, name).toString());
+                .map(name -> Paths.get(resourceDir, name).toString())
+                .collect(Collectors.toList());
     }
 
     protected void runTest(String sqlPath) throws Exception {
@@ -263,7 +317,7 @@ public abstract class AbstractSqlGatewayStatementITCase extends AbstractTestBase
         assertThat(String.join("", runStatements(testSqlStatements))).isEqualTo(in);
     }
 
-    protected void resetSessionForFlinkSqlStatements() throws Exception {}
+    protected void prepareEnvironment() throws Exception {}
 
     /**
      * Returns printed results for each ran SQL statements.
@@ -284,11 +338,17 @@ public abstract class AbstractSqlGatewayStatementITCase extends AbstractTestBase
             Iterator<RowData> iterator)
             throws Exception {
         if (type.equals(StatementType.EXPLAIN) || type.equals(StatementType.SHOW_CREATE)) {
+            StringBuilder sb = new StringBuilder();
+            while (iterator.hasNext()) {
+                sb.append(iterator.next().getString(0).toString());
+            }
             return Tag.OK.addTag(
-                    replaceStreamNodeId(
-                                    replaceNodeIdInOperator(
-                                            iterator.next().getString(0).toString()))
-                            + "\n");
+                    replaceStreamNodeId(replaceNodeIdInOperator(sb.toString())) + "\n");
+        } else if (schema.getColumn(0)
+                .map(col -> col.getName().equals(Constants.JOB_ID))
+                .orElse(false)) {
+            // ignore output of the job id
+            return Tag.INFO.addTag("Job ID:\n");
         } else {
             ByteArrayOutputStream outContent = new ByteArrayOutputStream();
             PrintStyle style =

@@ -20,7 +20,7 @@ package org.apache.flink.runtime.dispatcher.runner;
 
 import org.apache.flink.runtime.clusterframework.ApplicationStatus;
 import org.apache.flink.runtime.leaderelection.LeaderContender;
-import org.apache.flink.runtime.leaderelection.LeaderElectionService;
+import org.apache.flink.runtime.leaderelection.LeaderElection;
 import org.apache.flink.runtime.rpc.FatalErrorHandler;
 import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.concurrent.FutureUtils;
@@ -42,7 +42,7 @@ public final class DefaultDispatcherRunner implements DispatcherRunner, LeaderCo
 
     private final Object lock = new Object();
 
-    private final LeaderElectionService leaderElectionService;
+    private final LeaderElection leaderElection;
 
     private final FatalErrorHandler fatalErrorHandler;
 
@@ -59,10 +59,10 @@ public final class DefaultDispatcherRunner implements DispatcherRunner, LeaderCo
     private CompletableFuture<Void> previousDispatcherLeaderProcessTerminationFuture;
 
     private DefaultDispatcherRunner(
-            LeaderElectionService leaderElectionService,
+            LeaderElection leaderElection,
             FatalErrorHandler fatalErrorHandler,
             DispatcherLeaderProcessFactory dispatcherLeaderProcessFactory) {
-        this.leaderElectionService = leaderElectionService;
+        this.leaderElection = leaderElection;
         this.fatalErrorHandler = fatalErrorHandler;
         this.dispatcherLeaderProcessFactory = dispatcherLeaderProcessFactory;
         this.terminationFuture = new CompletableFuture<>();
@@ -72,6 +72,10 @@ public final class DefaultDispatcherRunner implements DispatcherRunner, LeaderCo
         this.dispatcherLeaderProcess = StoppedDispatcherLeaderProcess.INSTANCE;
         this.previousDispatcherLeaderProcessTerminationFuture =
                 CompletableFuture.completedFuture(null);
+    }
+
+    void start() throws Exception {
+        leaderElection.startLeaderElection(this);
     }
 
     @Override
@@ -89,11 +93,14 @@ public final class DefaultDispatcherRunner implements DispatcherRunner, LeaderCo
             }
         }
 
+        final CompletableFuture<Void> stopLeaderElectionServiceFuture = stopLeaderElectionService();
+
         stopDispatcherLeaderProcess();
 
         FutureUtils.forward(previousDispatcherLeaderProcessTerminationFuture, terminationFuture);
 
-        return terminationFuture;
+        return FutureUtils.completeAll(
+                Arrays.asList(terminationFuture, stopLeaderElectionServiceFuture));
     }
 
     // ---------------------------------------------------------------
@@ -171,8 +178,8 @@ public final class DefaultDispatcherRunner implements DispatcherRunner, LeaderCo
                         .getLeaderAddressFuture()
                         .thenAccept(
                                 leaderAddress -> {
-                                    if (leaderElectionService.hasLeadership(leaderSessionID)) {
-                                        leaderElectionService.confirmLeadership(
+                                    if (leaderElection.hasLeadership(leaderSessionID)) {
+                                        leaderElection.confirmLeadership(
                                                 leaderSessionID, leaderAddress);
                                     }
                                 }));
@@ -189,6 +196,15 @@ public final class DefaultDispatcherRunner implements DispatcherRunner, LeaderCo
                             DispatcherLeaderProcess.class.getSimpleName());
                     this.stopDispatcherLeaderProcess();
                 });
+    }
+
+    private CompletableFuture<Void> stopLeaderElectionService() {
+        try {
+            leaderElection.close();
+            return FutureUtils.completedVoidFuture();
+        } catch (Exception e) {
+            return FutureUtils.completedExceptionally(e);
+        }
     }
 
     private void runActionIfRunning(Runnable runnable) {
@@ -214,14 +230,14 @@ public final class DefaultDispatcherRunner implements DispatcherRunner, LeaderCo
     }
 
     public static DispatcherRunner create(
-            LeaderElectionService leaderElectionService,
+            LeaderElection leaderElection,
             FatalErrorHandler fatalErrorHandler,
             DispatcherLeaderProcessFactory dispatcherLeaderProcessFactory)
             throws Exception {
         final DefaultDispatcherRunner dispatcherRunner =
                 new DefaultDispatcherRunner(
-                        leaderElectionService, fatalErrorHandler, dispatcherLeaderProcessFactory);
-        return DispatcherRunnerLeaderElectionLifecycleManager.createFor(
-                dispatcherRunner, leaderElectionService);
+                        leaderElection, fatalErrorHandler, dispatcherLeaderProcessFactory);
+        dispatcherRunner.start();
+        return dispatcherRunner;
     }
 }

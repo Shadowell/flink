@@ -16,10 +16,16 @@
  * limitations under the License.
  */
 
+import { DecimalPipe, NgForOf, NgIf } from '@angular/common';
 import { ChangeDetectionStrategy, ChangeDetectorRef, Component, Inject, OnDestroy, OnInit, Type } from '@angular/core';
 import { of, Subject } from 'rxjs';
 import { catchError, mergeMap, takeUntil } from 'rxjs/operators';
 
+import { DynamicHostComponent } from '@flink-runtime-web/components/dynamic/dynamic-host.component';
+import { HumanizeBytesPipe } from '@flink-runtime-web/components/humanize-bytes.pipe';
+import { HumanizeDatePipe } from '@flink-runtime-web/components/humanize-date.pipe';
+import { HumanizeDurationPipe } from '@flink-runtime-web/components/humanize-duration.pipe';
+import { TableAggregatedMetricsComponent } from '@flink-runtime-web/components/table-aggregated-metrics/table-aggregated-metrics.component';
 import {
   JobVertexAggregated,
   JobVertexStatus,
@@ -34,7 +40,9 @@ import {
 } from '@flink-runtime-web/pages/job/overview/job-overview.config';
 import { JobService } from '@flink-runtime-web/services';
 import { typeDefinition } from '@flink-runtime-web/utils/strong-type';
+import { NzTableModule } from 'ng-zorro-antd/table';
 import { NzTableSortFn } from 'ng-zorro-antd/table/src/table.types';
+import { NzTabsModule } from 'ng-zorro-antd/tabs';
 
 import { JobLocalService } from '../../job-local.service';
 
@@ -46,7 +54,20 @@ function createSortFn(selector: (item: JobVertexSubTask) => number | string): Nz
   selector: 'flink-job-overview-drawer-subtasks',
   templateUrl: './job-overview-drawer-subtasks.component.html',
   styleUrls: ['./job-overview-drawer-subtasks.component.less'],
-  changeDetection: ChangeDetectionStrategy.OnPush
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [
+    NzTabsModule,
+    NzTableModule,
+    NgIf,
+    HumanizeBytesPipe,
+    DecimalPipe,
+    HumanizeDatePipe,
+    HumanizeDurationPipe,
+    DynamicHostComponent,
+    NgForOf,
+    TableAggregatedMetricsComponent
+  ],
+  standalone: true
 })
 export class JobOverviewDrawerSubtasksComponent implements OnInit, OnDestroy {
   readonly trackBySubtask = (_: number, node: JobVertexSubTask): number => node.subtask;
@@ -57,7 +78,7 @@ export class JobOverviewDrawerSubtasksComponent implements OnInit, OnDestroy {
   readonly sortWriteBytesFn = createSortFn(item => item.metrics?.['write-bytes']);
   readonly sortWriteRecordsFn = createSortFn(item => item.metrics?.['write-records']);
   readonly sortAttemptFn = createSortFn(item => item.attempt);
-  readonly sortHostFn = createSortFn(item => item.host);
+  readonly sortEndpointFn = createSortFn(item => item.endpoint);
   readonly sortStartTimeFn = createSortFn(item => item['start_time']);
   readonly sortDurationFn = createSortFn(item => item.duration);
   readonly sortEndTimeFn = createSortFn(item => item['end-time']);

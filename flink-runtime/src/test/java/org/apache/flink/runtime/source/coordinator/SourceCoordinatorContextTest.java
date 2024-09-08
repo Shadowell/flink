@@ -25,6 +25,7 @@ import org.apache.flink.api.connector.source.mocks.MockSourceSplitSerializer;
 import org.apache.flink.core.testutils.ManuallyTriggeredScheduledExecutorService;
 import org.apache.flink.runtime.operators.coordination.OperatorEvent;
 import org.apache.flink.runtime.source.event.AddSplitEvent;
+import org.apache.flink.runtime.source.event.IsProcessingBacklogEvent;
 import org.apache.flink.runtime.source.event.ReaderRegistrationEvent;
 
 import org.junit.jupiter.api.Test;
@@ -96,7 +97,7 @@ class SourceCoordinatorContextTest extends SourceCoordinatorTestBase {
         // Assign splits to the readers.
         SplitsAssignment<MockSourceSplit> splitsAssignment = getSplitsAssignment(2, 0);
         if (fromCoordinatorExecutor) {
-            coordinatorExecutor.submit(() -> context.assignSplits(splitsAssignment)).get();
+            context.submitTask(() -> context.assignSplits(splitsAssignment)).get();
         } else {
             context.assignSplits(splitsAssignment);
         }
@@ -141,9 +142,7 @@ class SourceCoordinatorContextTest extends SourceCoordinatorTestBase {
         verifyException(
                 () -> {
                     if (fromCoordinatorExecutor) {
-                        coordinatorExecutor
-                                .submit(() -> context.assignSplits(splitsAssignment))
-                                .get();
+                        context.submitTask(() -> context.assignSplits(splitsAssignment)).get();
                     } else {
                         context.assignSplits(splitsAssignment);
                     }
@@ -163,7 +162,8 @@ class SourceCoordinatorContextTest extends SourceCoordinatorTestBase {
                 new SourceCoordinatorContext<>(
                         coordinatorExecutorWithExceptionHandler,
                         manualWorkerExecutor,
-                        coordinatorThreadFactory,
+                        new SourceCoordinatorProvider.CoordinatorExecutorThreadFactory(
+                                coordinatorThreadName, operatorCoordinatorContext),
                         operatorCoordinatorContext,
                         new MockSourceSplitSerializer(),
                         splitSplitAssignmentTracker,
@@ -223,6 +223,26 @@ class SourceCoordinatorContextTest extends SourceCoordinatorTestBase {
         assertThat(operatorCoordinatorContext.isJobFailed()).isFalse();
     }
 
+    @Test
+    void testSupportsIntermediateNoMoreSplits() throws Exception {
+        sourceReady();
+        registerReaders();
+
+        SplitsAssignment<MockSourceSplit> splitsAssignment = getSplitsAssignment(2, 0);
+        context.assignSplits(splitsAssignment);
+        context.signalIntermediateNoMoreSplits(0);
+        context.signalIntermediateNoMoreSplits(1);
+        assertThat(context.hasNoMoreSplits(0)).isFalse();
+        assertThat(context.hasNoMoreSplits(1)).isFalse();
+        assertThat(context.hasNoMoreSplits(2)).isFalse();
+
+        context.signalNoMoreSplits(0);
+        context.signalNoMoreSplits(1);
+        assertThat(context.hasNoMoreSplits(0)).isTrue();
+        assertThat(context.hasNoMoreSplits(1)).isTrue();
+        assertThat(context.hasNoMoreSplits(2)).isFalse();
+    }
+
     // ------------------------
 
     private List<ReaderInfo> registerReaders() {
@@ -241,5 +261,27 @@ class SourceCoordinatorContextTest extends SourceCoordinatorTestBase {
         waitForCoordinatorToProcessActions();
 
         return infos;
+    }
+
+    @Test
+    void testSetIsProcessingBacklog() throws Exception {
+        sourceReady();
+        registerReader(0, 0);
+        context.setIsProcessingBacklog(true);
+
+        for (int i = 0; i < context.currentParallelism(); ++i) {
+            final List<OperatorEvent> events = receivingTasks.getSentEventsForSubtask(i);
+            assertThat(events.get(events.size() - 1)).isEqualTo(new IsProcessingBacklogEvent(true));
+        }
+
+        registerReader(1, 0);
+        context.setIsProcessingBacklog(false);
+        registerReader(2, 0);
+
+        for (int i = 0; i < context.currentParallelism(); ++i) {
+            final List<OperatorEvent> events = receivingTasks.getSentEventsForSubtask(i);
+            assertThat(events.get(events.size() - 1))
+                    .isEqualTo(new IsProcessingBacklogEvent(false));
+        }
     }
 }

@@ -35,6 +35,10 @@ import org.apache.flink.runtime.metrics.groups.ReporterScopedSettings;
 import org.apache.flink.runtime.metrics.scope.ScopeFormats;
 import org.apache.flink.runtime.rpc.RpcService;
 import org.apache.flink.runtime.webmonitor.retriever.MetricQueryServiceGateway;
+import org.apache.flink.traces.Span;
+import org.apache.flink.traces.SpanBuilder;
+import org.apache.flink.traces.reporter.TraceReporter;
+import org.apache.flink.util.AutoCloseableAsync;
 import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.ExecutorUtils;
 import org.apache.flink.util.FlinkException;
@@ -67,13 +71,15 @@ import java.util.stream.Collectors;
  * A MetricRegistry keeps track of all registered {@link Metric Metrics}. It serves as the
  * connection between {@link MetricGroup MetricGroups} and {@link MetricReporter MetricReporters}.
  */
-public class MetricRegistryImpl implements MetricRegistry {
+public class MetricRegistryImpl implements MetricRegistry, AutoCloseableAsync {
     private static final Logger LOG = LoggerFactory.getLogger(MetricRegistryImpl.class);
 
     private final Object lock = new Object();
 
     private final List<ReporterAndSettings> reporters;
-    private final ScheduledExecutorService executor;
+    private final List<TraceReporter> traceReporters;
+    private final ScheduledExecutorService reporterScheduledExecutor;
+    private final ScheduledExecutorService viewUpdaterScheduledExecutor;
 
     private final ScopeFormats scopeFormats;
     private final char globalDelimiter;
@@ -91,17 +97,27 @@ public class MetricRegistryImpl implements MetricRegistry {
     private boolean isShutdown;
 
     public MetricRegistryImpl(MetricRegistryConfiguration config) {
-        this(config, Collections.emptyList());
+        this(config, Collections.emptyList(), Collections.emptyList());
+    }
+
+    public MetricRegistryImpl(
+            MetricRegistryConfiguration config, Collection<ReporterSetup> reporterConfigurations) {
+        this(config, reporterConfigurations, Collections.emptyList());
     }
 
     /** Creates a new MetricRegistry and starts the configured reporter. */
     public MetricRegistryImpl(
-            MetricRegistryConfiguration config, Collection<ReporterSetup> reporterConfigurations) {
+            MetricRegistryConfiguration config,
+            Collection<ReporterSetup> reporterConfigurations,
+            Collection<TraceReporterSetup> traceReporterConfigurations) {
         this(
                 config,
                 reporterConfigurations,
+                traceReporterConfigurations,
                 Executors.newSingleThreadScheduledExecutor(
-                        new ExecutorThreadFactory("Flink-MetricRegistry")));
+                        new ExecutorThreadFactory("Flink-Metric-Reporter")),
+                Executors.newSingleThreadScheduledExecutor(
+                        new ExecutorThreadFactory("Flink-Metric-View-Updater")));
     }
 
     @VisibleForTesting
@@ -109,6 +125,29 @@ public class MetricRegistryImpl implements MetricRegistry {
             MetricRegistryConfiguration config,
             Collection<ReporterSetup> reporterConfigurations,
             ScheduledExecutorService scheduledExecutor) {
+        this(config, reporterConfigurations, Collections.emptyList(), scheduledExecutor);
+    }
+
+    @VisibleForTesting
+    MetricRegistryImpl(
+            MetricRegistryConfiguration config,
+            Collection<ReporterSetup> reporterConfigurations,
+            Collection<TraceReporterSetup> traceReporterConfigurations,
+            ScheduledExecutorService scheduledExecutor) {
+        this(
+                config,
+                reporterConfigurations,
+                traceReporterConfigurations,
+                scheduledExecutor,
+                scheduledExecutor);
+    }
+
+    MetricRegistryImpl(
+            MetricRegistryConfiguration config,
+            Collection<ReporterSetup> reporterConfigurations,
+            Collection<TraceReporterSetup> traceReporterConfigurations,
+            ScheduledExecutorService reporterScheduledExecutor,
+            ScheduledExecutorService viewUpdaterScheduledExecutor) {
         this.maximumFramesize = config.getQueryServiceMessageSizeLimit();
         this.scopeFormats = config.getScopeFormats();
         this.globalDelimiter = config.getDelimiter();
@@ -117,71 +156,101 @@ public class MetricRegistryImpl implements MetricRegistry {
 
         // second, instantiate any custom configured reporters
         this.reporters = new ArrayList<>(4);
+        this.traceReporters = new ArrayList<>(4);
 
-        this.executor = scheduledExecutor;
+        this.reporterScheduledExecutor = reporterScheduledExecutor;
+        this.viewUpdaterScheduledExecutor = viewUpdaterScheduledExecutor;
 
         this.queryService = null;
         this.metricQueryServiceRpcService = null;
 
+        initMetricReporters(reporterConfigurations, reporterScheduledExecutor);
+        initTraceReporters(traceReporterConfigurations);
+    }
+
+    private void initMetricReporters(
+            Collection<ReporterSetup> reporterConfigurations,
+            ScheduledExecutorService reporterScheduledExecutor) {
+
         if (reporterConfigurations.isEmpty()) {
-            // no reporters defined
-            // by default, don't report anything
+            // no reporters defined by default, don't report anything
             LOG.info("No metrics reporter configured, no metrics will be exposed/reported.");
-        } else {
-            for (ReporterSetup reporterSetup : reporterConfigurations) {
-                final String namedReporter = reporterSetup.getName();
+            return;
+        }
+        for (ReporterSetup reporterSetup : reporterConfigurations) {
+            final String namedReporter = reporterSetup.getName();
 
-                try {
-                    final MetricReporter reporterInstance = reporterSetup.getReporter();
-                    final String className = reporterInstance.getClass().getName();
+            try {
+                final MetricReporter reporterInstance = reporterSetup.getReporter();
+                final String className = reporterInstance.getClass().getName();
 
-                    if (reporterInstance instanceof Scheduled) {
-                        final Duration period = getConfiguredIntervalOrDefault(reporterSetup);
+                if (reporterInstance instanceof Scheduled) {
+                    final Duration period = getConfiguredIntervalOrDefault(reporterSetup);
 
-                        LOG.info(
-                                "Periodically reporting metrics in intervals of {} for reporter {} of type {}.",
-                                TimeUtils.formatWithHighestUnit(period),
-                                namedReporter,
-                                className);
-
-                        executor.scheduleWithFixedDelay(
-                                new MetricRegistryImpl.ReporterTask((Scheduled) reporterInstance),
-                                period.toMillis(),
-                                period.toMillis(),
-                                TimeUnit.MILLISECONDS);
-                    } else {
-                        LOG.info(
-                                "Reporting metrics for reporter {} of type {}.",
-                                namedReporter,
-                                className);
-                    }
-
-                    String delimiterForReporter =
-                            reporterSetup.getDelimiter().orElse(String.valueOf(globalDelimiter));
-                    if (delimiterForReporter.length() != 1) {
-                        LOG.warn(
-                                "Failed to parse delimiter '{}' for reporter '{}', using global delimiter '{}'.",
-                                delimiterForReporter,
-                                namedReporter,
-                                globalDelimiter);
-                        delimiterForReporter = String.valueOf(globalDelimiter);
-                    }
-
-                    reporters.add(
-                            new ReporterAndSettings(
-                                    reporterInstance,
-                                    new ReporterScopedSettings(
-                                            reporters.size(),
-                                            delimiterForReporter.charAt(0),
-                                            reporterSetup.getFilter(),
-                                            reporterSetup.getExcludedVariables(),
-                                            reporterSetup.getAdditionalVariables())));
-                } catch (Throwable t) {
-                    LOG.error(
-                            "Could not instantiate metrics reporter {}. Metrics might not be exposed/reported.",
+                    LOG.info(
+                            "Periodically reporting metrics in intervals of {} for reporter {} of type {}.",
+                            TimeUtils.formatWithHighestUnit(period),
                             namedReporter,
-                            t);
+                            className);
+
+                    reporterScheduledExecutor.scheduleWithFixedDelay(
+                            new MetricRegistryImpl.ReporterTask((Scheduled) reporterInstance),
+                            period.toMillis(),
+                            period.toMillis(),
+                            TimeUnit.MILLISECONDS);
+                } else {
+                    LOG.info(
+                            "Reporting metrics for reporter {} of type {}.",
+                            namedReporter,
+                            className);
                 }
+
+                String delimiterForReporter =
+                        reporterSetup.getDelimiter().orElse(String.valueOf(globalDelimiter));
+                if (delimiterForReporter.length() != 1) {
+                    LOG.warn(
+                            "Failed to parse delimiter '{}' for reporter '{}', using global delimiter '{}'.",
+                            delimiterForReporter,
+                            namedReporter,
+                            globalDelimiter);
+                    delimiterForReporter = String.valueOf(globalDelimiter);
+                }
+
+                reporters.add(
+                        new ReporterAndSettings(
+                                reporterInstance,
+                                new ReporterScopedSettings(
+                                        reporters.size(),
+                                        delimiterForReporter.charAt(0),
+                                        reporterSetup.getFilter(),
+                                        reporterSetup.getExcludedVariables(),
+                                        reporterSetup.getAdditionalVariables())));
+            } catch (Throwable t) {
+                LOG.error(
+                        "Could not instantiate metrics reporter {}. Metrics might not be exposed/reported.",
+                        namedReporter,
+                        t);
+            }
+        }
+    }
+
+    private void initTraceReporters(Collection<TraceReporterSetup> traceReporterConfigurations) {
+        if (traceReporterConfigurations.isEmpty()) {
+            // no reporters defined by default, don't report anything
+            LOG.info("No trace reporter configured, no metrics will be exposed/reported.");
+            return;
+        }
+        for (TraceReporterSetup reporterSetup : traceReporterConfigurations) {
+            final String namedReporter = reporterSetup.getName();
+
+            try {
+                final TraceReporter reporterInstance = reporterSetup.getReporter();
+                traceReporters.add(reporterInstance);
+            } catch (Throwable t) {
+                LOG.error(
+                        "Could not instantiate metrics reporter {}. Metrics might not be exposed/reported.",
+                        namedReporter,
+                        t);
             }
         }
     }
@@ -312,7 +381,8 @@ public class MetricRegistryImpl implements MetricRegistry {
      *
      * @return Future which is completed once the {@link MetricRegistryImpl} is shut down.
      */
-    public CompletableFuture<Void> shutdown() {
+    @Override
+    public CompletableFuture<Void> closeAsync() {
         synchronized (lock) {
             if (isShutdown) {
                 return terminationFuture;
@@ -323,7 +393,7 @@ public class MetricRegistryImpl implements MetricRegistry {
 
                 if (metricQueryServiceRpcService != null) {
                     final CompletableFuture<Void> metricQueryServiceRpcServiceTerminationFuture =
-                            metricQueryServiceRpcService.stopService();
+                            metricQueryServiceRpcService.closeAsync();
                     terminationFutures.add(metricQueryServiceRpcServiceTerminationFuture);
                 }
 
@@ -345,11 +415,20 @@ public class MetricRegistryImpl implements MetricRegistry {
                                             throwable)));
                 }
 
-                final CompletableFuture<Void> executorShutdownFuture =
+                final CompletableFuture<Void> reporterExecutorShutdownFuture =
                         ExecutorUtils.nonBlockingShutdown(
-                                gracePeriod.toMilliseconds(), TimeUnit.MILLISECONDS, executor);
+                                gracePeriod.toMilliseconds(),
+                                TimeUnit.MILLISECONDS,
+                                reporterScheduledExecutor);
+                terminationFutures.add(reporterExecutorShutdownFuture);
 
-                terminationFutures.add(executorShutdownFuture);
+                final CompletableFuture<Void> viewUpdaterExecutorShutdownFuture =
+                        ExecutorUtils.nonBlockingShutdown(
+                                gracePeriod.toMilliseconds(),
+                                TimeUnit.MILLISECONDS,
+                                viewUpdaterScheduledExecutor);
+
+                terminationFutures.add(viewUpdaterExecutorShutdownFuture);
 
                 FutureUtils.completeAll(terminationFutures)
                         .whenComplete(
@@ -369,6 +448,26 @@ public class MetricRegistryImpl implements MetricRegistry {
     @Override
     public ScopeFormats getScopeFormats() {
         return scopeFormats;
+    }
+
+    // ------------------------------------------------------------------------
+    //  Spans
+    // ------------------------------------------------------------------------
+
+    @Override
+    public void addSpan(SpanBuilder spanBuilder) {
+        synchronized (lock) {
+            if (isShutdown()) {
+                LOG.warn("Cannot add span, because the MetricRegistry has already been shut down.");
+                return;
+            }
+            if (LOG.isTraceEnabled()) {
+                LOG.trace("addSpan");
+            }
+            if (reporters != null) {
+                notifyTraceReportersOfAddedSpan(spanBuilder.build());
+            }
+        }
     }
 
     // ------------------------------------------------------------------------
@@ -401,7 +500,7 @@ public class MetricRegistryImpl implements MetricRegistry {
                 try {
                     if (metric instanceof View) {
                         if (viewUpdater == null) {
-                            viewUpdater = new ViewUpdater(executor);
+                            viewUpdater = new ViewUpdater(viewUpdaterScheduledExecutor);
                         }
                         viewUpdater.notifyOfAddedView((View) metric);
                     }
@@ -439,6 +538,17 @@ public class MetricRegistryImpl implements MetricRegistry {
                 } catch (Exception e) {
                     LOG.warn("Error while unregistering metric: {}", metricName, e);
                 }
+            }
+        }
+    }
+
+    @GuardedBy("lock")
+    private void notifyTraceReportersOfAddedSpan(Span span) {
+        for (int i = 0; i < traceReporters.size(); i++) {
+            try {
+                traceReporters.get(i).notifyOfAddedSpan(span);
+            } catch (Exception e) {
+                LOG.warn("Error while handling span: {}.", span, e);
             }
         }
     }

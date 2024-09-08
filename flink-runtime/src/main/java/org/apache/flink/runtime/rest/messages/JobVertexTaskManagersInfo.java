@@ -30,6 +30,8 @@ import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonPro
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.annotation.JsonSerialize;
 
+import io.swagger.v3.oas.annotations.media.Schema;
+
 import java.util.Collection;
 import java.util.Map;
 import java.util.Objects;
@@ -96,8 +98,10 @@ public class JobVertexTaskManagersInfo implements ResponseBody {
     // ---------------------------------------------------
 
     /** Detailed information about task managers. */
+    @Schema(name = "JobVertexTaskManagerInfo")
     public static class TaskManagersInfo {
-        public static final String TASK_MANAGERS_FIELD_HOST = "host";
+        @Deprecated public static final String TASK_MANAGERS_FIELD_HOST = "host";
+        public static final String TASK_MANAGERS_FIELD_ENDPOINT = "endpoint";
         public static final String TASK_MANAGERS_FIELD_STATUS = "status";
         public static final String TASK_MANAGERS_FIELD_START_TIME = "start-time";
         public static final String TASK_MANAGERS_FIELD_END_TIME = "end-time";
@@ -109,6 +113,9 @@ public class JobVertexTaskManagersInfo implements ResponseBody {
 
         @JsonProperty(TASK_MANAGERS_FIELD_HOST)
         private final String host;
+
+        @JsonProperty(TASK_MANAGERS_FIELD_ENDPOINT)
+        private final String endpoint;
 
         @JsonProperty(TASK_MANAGERS_FIELD_STATUS)
         private final ExecutionState status;
@@ -137,6 +144,7 @@ public class JobVertexTaskManagersInfo implements ResponseBody {
         @JsonCreator
         public TaskManagersInfo(
                 @JsonProperty(TASK_MANAGERS_FIELD_HOST) String host,
+                @JsonProperty(TASK_MANAGERS_FIELD_ENDPOINT) String endpoint,
                 @JsonProperty(TASK_MANAGERS_FIELD_STATUS) ExecutionState status,
                 @JsonProperty(TASK_MANAGERS_FIELD_START_TIME) long startTime,
                 @JsonProperty(TASK_MANAGERS_FIELD_END_TIME) long endTime,
@@ -148,6 +156,7 @@ public class JobVertexTaskManagersInfo implements ResponseBody {
                 @JsonProperty(TASK_MANAGERS_FIELD_AGGREGATED)
                         AggregatedTaskDetailsInfo aggregated) {
             this.host = checkNotNull(host);
+            this.endpoint = checkNotNull(endpoint);
             this.status = checkNotNull(status);
             this.startTime = startTime;
             this.endTime = endTime;
@@ -168,6 +177,7 @@ public class JobVertexTaskManagersInfo implements ResponseBody {
             }
             TaskManagersInfo that = (TaskManagersInfo) o;
             return Objects.equals(host, that.host)
+                    && Objects.equals(endpoint, that.endpoint)
                     && Objects.equals(status, that.status)
                     && startTime == that.startTime
                     && endTime == that.endTime
@@ -182,6 +192,7 @@ public class JobVertexTaskManagersInfo implements ResponseBody {
         public int hashCode() {
             return Objects.hash(
                     host,
+                    endpoint,
                     status,
                     startTime,
                     endTime,

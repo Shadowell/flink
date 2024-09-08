@@ -46,6 +46,7 @@ import org.slf4j.LoggerFactory;
 import javax.annotation.Nonnull;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 
 /** RocksDB compaction filter utils for state with TTL. */
@@ -57,9 +58,31 @@ public class RocksDbTtlCompactFiltersManager {
     /** Registered compaction filter factories. */
     private final LinkedHashMap<String, FlinkCompactionFilterFactory> compactionFilterFactories;
 
-    public RocksDbTtlCompactFiltersManager(TtlTimeProvider ttlTimeProvider) {
+    /** Created column family options. */
+    private final LinkedHashMap<String, ColumnFamilyOptions> columnFamilyOptionsMap;
+
+    /**
+     * Number of state entries to process by compaction filter before updating current timestamp.
+     */
+    private final long queryTimeAfterNumEntries;
+
+    /**
+     * Periodic compaction could speed up expired state entries cleanup, especially for state
+     * entries rarely accessed. Files older than this value will be picked up for compaction, and
+     * re-written to the same level as they were before. It makes sure a file goes through
+     * compaction filters periodically. 0 means turning off periodic compaction.
+     */
+    private final Duration periodicCompactionTime;
+
+    public RocksDbTtlCompactFiltersManager(
+            TtlTimeProvider ttlTimeProvider,
+            long queryTimeAfterNumEntries,
+            Duration periodicCompactionTime) {
         this.ttlTimeProvider = ttlTimeProvider;
+        this.queryTimeAfterNumEntries = queryTimeAfterNumEntries;
+        this.periodicCompactionTime = periodicCompactionTime;
         this.compactionFilterFactories = new LinkedHashMap<>();
+        this.columnFamilyOptionsMap = new LinkedHashMap<>();
     }
 
     public void setAndRegisterCompactFilterIfStateTtl(
@@ -85,6 +108,7 @@ public class RocksDbTtlCompactFiltersManager {
         //noinspection resource
         options.setCompactionFilterFactory(compactionFilterFactory);
         compactionFilterFactories.put(stateName, compactionFilterFactory);
+        columnFamilyOptionsMap.put(stateName, options);
     }
 
     private static org.rocksdb.Logger createRocksDbNativeLogger() {
@@ -113,11 +137,26 @@ public class RocksDbTtlCompactFiltersManager {
             Preconditions.checkNotNull(compactionFilterFactory);
             long ttl = ttlConfig.getTtl().toMilliseconds();
 
+            ColumnFamilyOptions columnFamilyOptions =
+                    columnFamilyOptionsMap.get(stateDesc.getName());
+            Preconditions.checkNotNull(columnFamilyOptions);
+
             StateTtlConfig.RocksdbCompactFilterCleanupStrategy rocksdbCompactFilterCleanupStrategy =
                     ttlConfig.getCleanupStrategies().getRocksdbCompactFilterCleanupStrategy();
-            Preconditions.checkNotNull(rocksdbCompactFilterCleanupStrategy);
-            long queryTimeAfterNumEntries =
-                    rocksdbCompactFilterCleanupStrategy.getQueryTimeAfterNumEntries();
+
+            Duration periodicCompactionTime = this.periodicCompactionTime;
+            long queryTimeAfterNumEntries = this.queryTimeAfterNumEntries;
+
+            if (rocksdbCompactFilterCleanupStrategy != null) {
+                periodicCompactionTime =
+                        rocksdbCompactFilterCleanupStrategy.getPeriodicCompactionTime();
+                queryTimeAfterNumEntries =
+                        rocksdbCompactFilterCleanupStrategy.getQueryTimeAfterNumEntries();
+            }
+            if (periodicCompactionTime != null) {
+                columnFamilyOptions.setPeriodicCompactionSeconds(
+                        periodicCompactionTime.getSeconds());
+            }
 
             FlinkCompactionFilter.Config config;
             if (stateDesc instanceof ListStateDescriptor) {
@@ -215,5 +254,6 @@ public class RocksDbTtlCompactFiltersManager {
             IOUtils.closeQuietly(factory);
         }
         compactionFilterFactories.clear();
+        columnFamilyOptionsMap.clear();
     }
 }

@@ -105,9 +105,9 @@ resultStream.print();
 env.execute();
 
 // prints:
-// +I[Alice]
-// +I[Bob]
-// +I[John]
+// +I[ALICE]
+// +I[BOB]
+// +I[JOHN]
 ```
 {{< /tab >}}
 {{< tab "Scala" >}}
@@ -138,9 +138,9 @@ resultStream.print()
 env.execute()
 
 // prints:
-// +I[Alice]
-// +I[Bob]
-// +I[John]
+// +I[ALICE]
+// +I[BOB]
+// +I[JOHN]
 ```
 {{< /tab >}}
 {{< tab "Python" >}}
@@ -171,9 +171,9 @@ res_ds.print()
 env.execute()
 
 # prints:
-# +I[Alice]
-# +I[Bob]
-# +I[John]
+# +I[ALICE]
+# +I[BOB]
+# +I[JOHN]
 ```
 {{< /tab >}}
 {{< /tabs >}}
@@ -521,7 +521,7 @@ We recommend setting all configuration options in DataStream API early before sw
 {{< tab "Java" >}}
 ```java
 import java.time.ZoneId;
-import org.apache.flink.streaming.api.CheckpointingMode;
+import org.apache.flink.core.execution.CheckpointingMode;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 
@@ -535,7 +535,7 @@ env.setMaxParallelism(256);
 
 env.getConfig().addDefaultKryoSerializer(MyCustomType.class, CustomKryoSerializer.class);
 
-env.getCheckpointConfig().setCheckpointingMode(CheckpointingMode.EXACTLY_ONCE);
+env.getCheckpointConfig().setCheckpointingConsistencyMode(CheckpointingMode.EXACTLY_ONCE);
 
 // then switch to Java Table API
 
@@ -551,9 +551,9 @@ tableEnv.getConfig().setLocalTimeZone(ZoneId.of("Europe/Berlin"));
 {{< tab "Scala" >}}
 ```scala
 import java.time.ZoneId
+import org.apache.flink.core.execution.CheckpointingMode
 import org.apache.flink.api.scala._
 import org.apache.flink.streaming.api.scala.StreamExecutionEnvironment
-import org.apache.flink.streaming.api.CheckpointingMode
 import org.apache.flink.table.api.bridge.scala._
 
 // create Scala DataStream API
@@ -566,7 +566,7 @@ env.setMaxParallelism(256)
 
 env.getConfig.addDefaultKryoSerializer(classOf[MyCustomType], classOf[CustomKryoSerializer])
 
-env.getCheckpointConfig.setCheckpointingMode(CheckpointingMode.EXACTLY_ONCE)
+env.getCheckpointConfig.setCheckpointingConsistencyMode(CheckpointingMode.EXACTLY_ONCE)
 
 // then switch to Scala Table API
 
@@ -973,6 +973,7 @@ import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.Collector;
+import java.time.LocalDateTime;
 
 // setup DataStream API
 StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
@@ -1046,7 +1047,7 @@ joinedStream
           ValueState<String> seen;
 
           @Override
-          public void open(Configuration parameters) {
+          public void open(OpenContext openContext) {
               seen = getRuntimeContext().getState(
                   new ValueStateDescriptor<>("seen", String.class));
           }
@@ -1714,7 +1715,7 @@ table.printSchema();
 
 // data types can be extracted reflectively as above or explicitly defined
 
-Table table3 = tableEnv
+Table table = tableEnv
     .fromDataStream(
         dataStream,
         Schema.newBuilder()
@@ -1756,6 +1757,7 @@ The following code shows how to use `createTemporaryView` for different scenario
 ```java
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.table.api.Schema;
 
 // create some DataStream
 DataStream<Tuple2<Long, String>> dataStream = env.fromElements(
@@ -2014,6 +2016,8 @@ DataStream<Row> dataStream = tableEnv.toDataStream(table);
 
 DataStream<User> dataStream = tableEnv.toDataStream(table, User.class);
 
+// === EXAMPLE 3 ===
+
 // data types can be extracted reflectively as above or explicitly defined
 
 DataStream<User> dataStream =
@@ -2068,6 +2072,8 @@ val dataStream: DataStream[Row] = tableEnv.toDataStream(table)
 // metadata and watermarks are propagated
 
 val dataStream: DataStream[User] = tableEnv.toDataStream(table, classOf[User])
+
+// === EXAMPLE 3 ===
 
 // data types can be extracted reflectively as above or explicitly defined
 
@@ -2784,7 +2790,7 @@ The following example shows how to add table programs to a DataStream API progra
 ```java
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.sink.DiscardingSink;
+import org.apache.flink.streaming.api.functions.sink.v2.DiscardingSink;
 import org.apache.flink.table.api.*;
 import org.apache.flink.table.api.bridge.java.*;
 
@@ -2821,7 +2827,7 @@ statementSet.add(tableFromStream.insertInto(sinkDescriptor));
 statementSet.attachAsDataStream();
 
 // define other DataStream API parts
-env.fromElements(4, 5, 6).addSink(new DiscardingSink<>());
+env.fromElements(4, 5, 6).sinkTo(new DiscardingSink<>());
 
 // use DataStream API to submit the pipelines
 env.execute();
@@ -2837,7 +2843,7 @@ env.execute();
 {{< /tab >}}
 {{< tab "Scala" >}}
 ```scala
-import org.apache.flink.streaming.api.functions.sink.DiscardingSink
+import org.apache.flink.streaming.api.functions.sink.v2.DiscardingSink
 import org.apache.flink.streaming.api.scala._
 import org.apache.flink.table.api._
 import org.apache.flink.table.api.bridge.scala.StreamTableEnvironment
@@ -2872,7 +2878,7 @@ statementSet.add(tableFromStream.insertInto(sinkDescriptor))
 statementSet.attachAsDataStream()
 
 // define other DataStream API parts
-env.fromElements(4, 5, 6).addSink(new DiscardingSink[Int]())
+env.fromElements(4, 5, 6).sinkTo(new DiscardingSink[Int]())
 
 // now use DataStream API to submit the pipelines
 env.execute()
@@ -2892,7 +2898,7 @@ from pyflink.common import Encoder
 from pyflink.datastream import StreamExecutionEnvironment
 from pyflink.datastream.connectors.file_system import FileSink
 from pyflink.table import StreamTableEnvironment, TableDescriptor, Schema, DataTypes
-    
+
 env = StreamExecutionEnvironment.get_execution_environment()
 table_env = StreamTableEnvironment.create(env)
 
@@ -3384,7 +3390,7 @@ table = t_env.from_data_stream(stream, col('my_long'))
 {{< tabs "27c312af-7427-401c-a1b1-de9fe39f7b59" >}}
 {{< tab "Java" >}}
 Flink provides its own tuple classes for Java.
-DataStreams of the the Java tuple classes can be converted into tables.
+DataStreams of the Java tuple classes can be converted into tables.
 Fields can be renamed by providing names for all fields (mapping based on position).
 If no field names are specified, the default field names are used.
 If the original field names (`f0`, `f1`, ... for Flink Tuples) are referenced, the API assumes that the mapping is name-based instead of position-based.

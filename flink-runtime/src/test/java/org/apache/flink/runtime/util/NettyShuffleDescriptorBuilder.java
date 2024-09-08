@@ -19,8 +19,8 @@
 package org.apache.flink.runtime.util;
 
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
-import org.apache.flink.runtime.io.network.ConnectionID;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionID;
+import org.apache.flink.runtime.io.network.partition.hybrid.tiered.tier.TierShuffleDescriptor;
 import org.apache.flink.runtime.jobgraph.IntermediateResultPartitionID;
 import org.apache.flink.runtime.shuffle.NettyShuffleDescriptor;
 import org.apache.flink.runtime.shuffle.NettyShuffleDescriptor.LocalExecutionPartitionConnectionInfo;
@@ -29,6 +29,8 @@ import org.apache.flink.runtime.taskmanager.TaskManagerLocation;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.apache.flink.runtime.executiongraph.ExecutionGraphTestUtils.createExecutionAttemptId;
 
@@ -73,15 +75,22 @@ public class NettyShuffleDescriptorBuilder {
     }
 
     public NettyShuffleDescriptor buildRemote() {
-        ConnectionID connectionID =
-                new ConnectionID(new InetSocketAddress(address, dataPort), connectionIndex);
         return new NettyShuffleDescriptor(
-                producerLocation, new NetworkPartitionConnectionInfo(connectionID), id);
+                producerLocation,
+                new NetworkPartitionConnectionInfo(
+                        new InetSocketAddress(address, dataPort), connectionIndex),
+                id);
     }
 
     public NettyShuffleDescriptor buildLocal() {
+        List<TierShuffleDescriptor> tierShuffleDescriptors = new ArrayList<>();
+        tierShuffleDescriptors.add(NoOpTierShuffleDescriptor.INSTANCE);
+        tierShuffleDescriptors.add(NoOpTierShuffleDescriptor.INSTANCE);
         return new NettyShuffleDescriptor(
-                producerLocation, LocalExecutionPartitionConnectionInfo.INSTANCE, id);
+                producerLocation,
+                LocalExecutionPartitionConnectionInfo.INSTANCE,
+                id,
+                tierShuffleDescriptors);
     }
 
     public static NettyShuffleDescriptorBuilder newBuilder() {

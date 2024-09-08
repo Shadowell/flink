@@ -56,26 +56,10 @@ create table StreamingTable (
 1 row in set
 !ok
 
-# test only to verify the test job id.
-SET '$internal.pipeline.job-id' = 'e68e7fabddfade4f42910980652582dc';
-!output
-+--------+
-| result |
-+--------+
-|     OK |
-+--------+
-1 row in set
-!ok
-
 INSERT INTO StreamingTable SELECT * FROM (VALUES (1, 'Hello World'), (2, 'Hi'), (2, 'Hi'), (3, 'Hello'), (3, 'World'), (4, 'ADD'), (5, 'LINE'));
 !output
-+----------------------------------+
-|                           job id |
-+----------------------------------+
-| e68e7fabddfade4f42910980652582dc |
-+----------------------------------+
-1 row in set
-!ok
+Job ID:
+!info
 
 RESET '$internal.pipeline.job-id';
 !output
@@ -101,6 +85,92 @@ SELECT * FROM StreamingTable;
 | +I |  5 |        LINE |
 +----+----+-------------+
 7 rows in set
+!ok
+
+# ==========================================================================
+# test streaming insert through compiled plan
+# ==========================================================================
+
+create table StreamingTableForPlan (
+  id int,
+  str string
+) with (
+  'connector' = 'filesystem',
+  'path' = '$VAR_STREAMING_PATH3',
+  'format' = 'csv'
+);
+!output
++--------+
+| result |
++--------+
+|     OK |
++--------+
+1 row in set
+!ok
+
+# test path with scheme
+COMPILE AND EXECUTE PLAN 'file://$VAR_STREAMING_PLAN_PATH/plan1.json' FOR INSERT INTO StreamingTableForPlan SELECT * FROM (VALUES (1, 'Hello'));
+!output
+Job ID:
+!info
+
+RESET '$internal.pipeline.job-id';
+!output
++--------+
+| result |
++--------+
+|     OK |
++--------+
+1 row in set
+!ok
+
+SELECT * FROM StreamingTableForPlan;
+!output
++----+----+-------+
+| op | id |   str |
++----+----+-------+
+| +I |  1 | Hello |
++----+----+-------+
+1 row in set
+!ok
+
+
+# test absolute path without scheme
+COMPILE PLAN '$VAR_STREAMING_PLAN_PATH/plan2.json' FOR INSERT INTO StreamingTableForPlan SELECT * FROM (VALUES (1, 'Hello'));
+!output
++--------+
+| result |
++--------+
+|     OK |
++--------+
+1 row in set
+!ok
+
+# test relative path without scheme
+EXECUTE PLAN '$VAR_STREAMING_PLAN_RELATIVE_PATH/plan2.json';
+!output
+Job ID:
+!info
+
+RESET '$internal.pipeline.job-id';
+!output
++--------+
+| result |
++--------+
+|     OK |
++--------+
+1 row in set
+!ok
+
+SELECT * FROM StreamingTableForPlan;
+!output
++----+----+-------+
+| op | id |   str |
++----+----+-------+
+| +I |  1 | Hello |
+| +I |  1 | Hello |
++----+----+-------+
+2 rows in set
 !ok
 
 # ==========================================================================
@@ -134,38 +204,39 @@ create table BatchTable (
 1 row in set
 !ok
 
-# test only to verify the test job id.
-SET '$internal.pipeline.job-id' = '29ba2263b9b86bd8a14b91487941bfe7';
-!output
-+--------+
-| result |
-+--------+
-|     OK |
-+--------+
-1 row in set
-!ok
-
 INSERT INTO BatchTable SELECT * FROM (VALUES (1, 'Hello World'), (2, 'Hi'), (2, 'Hi'), (3, 'Hello'), (3, 'World'), (4, 'ADD'), (5, 'LINE'));
 !output
-+----------------------------------+
-|                           job id |
-+----------------------------------+
-| 29ba2263b9b86bd8a14b91487941bfe7 |
-+----------------------------------+
-1 row in set
-!ok
-
-RESET '$internal.pipeline.job-id';
-!output
-+--------+
-| result |
-+--------+
-|     OK |
-+--------+
-1 row in set
-!ok
+Job ID:
+!info
 
 SELECT * FROM BatchTable;
+!output
++----+-------------+
+| id |         str |
++----+-------------+
+|  1 | Hello World |
+|  2 |          Hi |
+|  2 |          Hi |
+|  3 |       Hello |
+|  3 |       World |
+|  4 |         ADD |
+|  5 |        LINE |
++----+-------------+
+7 rows in set
+!ok
+
+CREATE TABLE CtasTable
+WITH (
+  'connector' = 'filesystem',
+  'path' = '$VAR_BATCH_CTAS_PATH',
+  'format' = 'csv'
+)
+AS SELECT * FROM (VALUES (1, 'Hello World'), (2, 'Hi'), (2, 'Hi'), (3, 'Hello'), (3, 'World'), (4, 'ADD'), (5, 'LINE')) T(id, str);
+!output
+Job ID:
+!info
+
+SELECT * FROM CtasTable;
 !output
 +----+-------------+
 | id |         str |

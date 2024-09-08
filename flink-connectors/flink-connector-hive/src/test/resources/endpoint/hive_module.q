@@ -19,6 +19,17 @@
 # test load module
 # ==========================================================================
 
+# set to default dialect to execute the statements supported only in Flink default dialect
+SET table.sql-dialect=default;
+!output
++--------+
+| result |
++--------+
+|     OK |
++--------+
+1 row in set
+!ok
+
 # list default loaded and enabled module
 SHOW MODULES;
 !output
@@ -59,11 +70,98 @@ SELECT SUBSTRING_INDEX('www.apache.org', '.', 2) FROM (VALUES (1, 'Hello World')
 1 row in set
 !ok
 
+# ==========================================================================
+# test use built-in native agg function of hive module
+# ==========================================================================
+
+# set to hive dialect to execute the statements supported in Hive dialect
+SET table.sql-dialect = hive;
+!output
++--------+
+| result |
++--------+
+|     OK |
++--------+
+1 row in set
+!ok
+
+CREATE TABLE source (
+    a INT
+);
+!output
++--------+
+| result |
++--------+
+|     OK |
++--------+
+1 row in set
+!ok
+
+EXPLAIN SELECT SUM(a) FROM source;
+!output
+== Abstract Syntax Tree ==
+LogicalProject(_o__c0=[$0])
++- LogicalAggregate(group=[{}], agg#0=[sum($0)])
+   +- LogicalProject($f0=[$0])
+      +- LogicalTableScan(table=[[hive, default, source]])
+
+== Optimized Physical Plan ==
+SortAggregate(isMerge=[false], select=[sum(a) AS $f0])
++- Exchange(distribution=[single])
+   +- TableSourceScan(table=[[hive, default, source]], fields=[a])
+
+== Optimized Execution Plan ==
+SortAggregate(isMerge=[false], select=[sum(a) AS $f0])
++- Exchange(distribution=[single])
+   +- TableSourceScan(table=[[hive, default, source]], fields=[a])
+!ok
+
+# enable hive native agg function that use hash-agg strategy
+SET table.exec.hive.native-agg-function.enabled = true;
+!output
++--------+
+| result |
++--------+
+|     OK |
++--------+
+1 row in set
+!ok
+
+EXPLAIN SELECT SUM(a) FROM source;
+!output
+== Abstract Syntax Tree ==
+LogicalProject(_o__c0=[$0])
++- LogicalAggregate(group=[{}], agg#0=[sum($0)])
+   +- LogicalProject($f0=[$0])
+      +- LogicalTableScan(table=[[hive, default, source]])
+
+== Optimized Physical Plan ==
+HashAggregate(isMerge=[false], select=[sum(a) AS $f0])
++- Exchange(distribution=[single])
+   +- TableSourceScan(table=[[hive, default, source]], fields=[a])
+
+== Optimized Execution Plan ==
+HashAggregate(isMerge=[false], select=[sum(a) AS $f0])
++- Exchange(distribution=[single])
+   +- TableSourceScan(table=[[hive, default, source]], fields=[a])
+!ok
+
 # load hive module with module name as string literal
 LOAD MODULE 'hive';
 !output
 org.apache.flink.table.planner.delegation.hive.copy.HiveASTParseException: line 1:5 mismatched input 'MODULE' expecting DATA near 'LOAD' in load statement
 !error
+
+# set to default dialect to execute the statements supported in Flink default dialect
+SET table.sql-dialect = default;
+!output
++--------+
+| result |
++--------+
+|     OK |
++--------+
+1 row in set
+!ok
 
 # load hive module with module name capitalized
 LOAD MODULE Hive;

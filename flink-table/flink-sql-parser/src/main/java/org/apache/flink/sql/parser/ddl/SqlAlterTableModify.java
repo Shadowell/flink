@@ -18,7 +18,6 @@
 
 package org.apache.flink.sql.parser.ddl;
 
-import org.apache.flink.sql.parser.SqlUnparseUtils;
 import org.apache.flink.sql.parser.ddl.constraint.SqlTableConstraint;
 
 import org.apache.calcite.sql.SqlIdentifier;
@@ -31,12 +30,12 @@ import javax.annotation.Nullable;
 import java.util.List;
 
 /**
- * SqlNode to describe ALTER TABLE table_name MODIFY column/constraint/watermark clause.
+ * SqlNode to describe ALTER TABLE [IF EXISTS] table_name MODIFY column/constraint/watermark clause.
  *
  * <p>Example: DDL like the below for modify column/constraint/watermark.
  *
  * <pre>{@code
- * -- add single column
+ * -- modify single column
  * ALTER TABLE mytable MODIFY new_column STRING COMMENT 'new_column docs';
  *
  * -- modify multiple columns, constraint, and watermark
@@ -56,16 +55,17 @@ public class SqlAlterTableModify extends SqlAlterTableSchema {
             SqlIdentifier tableName,
             SqlNodeList modifiedColumns,
             List<SqlTableConstraint> constraints,
-            @Nullable SqlWatermark watermark) {
-        super(pos, tableName, modifiedColumns, constraints, watermark);
+            @Nullable SqlWatermark watermark,
+            @Nullable SqlDistribution distribution,
+            boolean ifTableExists) {
+        super(pos, tableName, modifiedColumns, constraints, watermark, distribution, ifTableExists);
     }
 
     @Override
     public void unparse(SqlWriter writer, int leftPrec, int rightPrec) {
         super.unparse(writer, leftPrec, rightPrec);
         writer.keyword("MODIFY");
-        // unparse table schema
-        SqlUnparseUtils.unparseTableSchema(
-                writer, leftPrec, rightPrec, columnList, constraints, watermark);
+        // unparse table schema and distribution
+        unparseSchemaAndDistribution(writer, leftPrec, rightPrec);
     }
 }

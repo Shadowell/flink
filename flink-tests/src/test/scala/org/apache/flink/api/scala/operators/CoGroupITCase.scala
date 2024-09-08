@@ -17,16 +17,16 @@
  */
 package org.apache.flink.api.scala.operators
 
-import org.apache.flink.api.common.functions.RichCoGroupFunction
+import org.apache.flink.api.common.functions.{OpenContext, RichCoGroupFunction}
 import org.apache.flink.api.scala._
 import org.apache.flink.api.scala.util.CollectionDataSets
 import org.apache.flink.api.scala.util.CollectionDataSets.CustomType
 import org.apache.flink.configuration.Configuration
 import org.apache.flink.core.fs.FileSystem.WriteMode
-import org.apache.flink.test.util.{MultipleProgramsTestBase, TestBaseUtils}
-import org.apache.flink.test.util.MultipleProgramsTestBase.TestExecutionMode
+import org.apache.flink.test.util.{MultipleProgramsTestBaseJUnit4, TestBaseUtils}
 import org.apache.flink.util.Collector
 
+import MultipleProgramsTestBaseJUnit4.TestExecutionMode
 import org.junit._
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
@@ -35,7 +35,7 @@ import org.junit.runners.Parameterized
 import scala.collection.JavaConverters._
 
 @RunWith(classOf[Parameterized])
-class CoGroupITCase(mode: TestExecutionMode) extends MultipleProgramsTestBase(mode) {
+class CoGroupITCase(mode: TestExecutionMode) extends MultipleProgramsTestBaseJUnit4(mode) {
   val _tempFolder = new TemporaryFolder()
   var resultPath: String = _
   var expectedResult: String = _
@@ -163,7 +163,7 @@ class CoGroupITCase(mode: TestExecutionMode) extends MultipleProgramsTestBase(mo
           (Int, Int, Int)] {
           private var broadcast = 41
 
-          override def open(config: Configuration) {
+          override def open(openContext: OpenContext) {
             val ints = this.getRuntimeContext.getBroadcastVariable[Int]("ints").asScala
             broadcast = ints.sum
           }

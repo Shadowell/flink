@@ -20,10 +20,15 @@ package org.apache.flink.tests.util.flink;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.ConfigurationUtils;
 import org.apache.flink.configuration.GlobalConfiguration;
 import org.apache.flink.configuration.UnmodifiableConfiguration;
+import org.apache.flink.table.api.ResultKind;
+import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.gateway.rest.message.statement.FetchResultsResponseBody;
 import org.apache.flink.test.util.FileUtils;
 import org.apache.flink.test.util.JobSubmission;
+import org.apache.flink.test.util.SQLJobClientMode;
 import org.apache.flink.test.util.SQLJobSubmission;
 import org.apache.flink.tests.util.AutoClosableProcess;
 import org.apache.flink.tests.util.TestUtils;
@@ -53,7 +58,6 @@ import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStreamReader;
-import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -64,6 +68,8 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -261,39 +267,31 @@ public final class FlinkDistribution {
     }
 
     public void submitSQLJob(SQLJobSubmission job, Duration timeout) throws Exception {
-        final List<String> commands = new ArrayList<>();
-
-        if (job.getClientMode() == SQLJobSubmission.ClientMode.SQL_CLIENT) {
+        if (job.getClientMode() instanceof SQLJobClientMode.EmbeddedSqlClient) {
+            final List<String> commands = new ArrayList<>();
             commands.add(bin.resolve("sql-client.sh").toAbsolutePath().toString());
-            for (String jar : job.getJars()) {
-                commands.add("--jar");
-                commands.add(jar);
-            }
+            submitSQLJobWithSQLClient(job, commands, timeout);
+        } else if (job.getClientMode() instanceof SQLJobClientMode.GatewaySqlClient) {
+            final List<String> commands = new ArrayList<>();
+            commands.add(bin.resolve("sql-client.sh").toAbsolutePath().toString());
+            commands.add("gateway");
 
-            AutoClosableProcess.create(commands.toArray(new String[0]))
-                    .setStdInputs(job.getSqlLines().toArray(new String[0]))
-                    .setStdoutProcessor(LOG::info) // logging the SQL statements and error message
-                    .setEnv(job.getEnvProcessor())
-                    .runBlocking(timeout);
-        } else if (job.getClientMode() == SQLJobSubmission.ClientMode.HIVE_JDBC) {
+            SQLJobClientMode.GatewaySqlClient sqlClient =
+                    (SQLJobClientMode.GatewaySqlClient) job.getClientMode();
+            commands.add("-e");
+            commands.add(String.format("%s:%s", sqlClient.getHost(), sqlClient.getPort()));
+            submitSQLJobWithSQLClient(job, commands, timeout);
+        } else if (job.getClientMode() instanceof SQLJobClientMode.HiveJDBC) {
             // register HiveDriver to the DriverManager
             Class.forName(HIVE_DRIVER);
-            Map<String, String> configMap =
-                    GlobalConfiguration.loadConfiguration(conf.toAbsolutePath().toString()).toMap();
-            String host =
-                    configMap.getOrDefault(
-                            "sql-gateway.endpoint.hiveserver2.host",
-                            InetAddress.getByName("localhost").getHostAddress());
-            String port =
-                    configMap.getOrDefault("sql-gateway.endpoint.hiveserver2.thrift.port", "10000");
-
+            SQLJobClientMode.HiveJDBC hiveJdbc = (SQLJobClientMode.HiveJDBC) job.getClientMode();
             submitSQL(
                     () -> {
                         try (Connection connection =
                                         DriverManager.getConnection(
                                                 String.format(
                                                         "jdbc:hive2://%s:%s/default;auth=noSasl;",
-                                                        host, port));
+                                                        hiveJdbc.getHost(), hiveJdbc.getPort()));
                                 Statement statement = connection.createStatement()) {
                             for (String jar : job.getJars()) {
                                 statement.execute(String.format("ADD JAR '%s'", jar));
@@ -304,14 +302,17 @@ public final class FlinkDistribution {
                         }
                     },
                     timeout);
-        } else if (job.getClientMode() == SQLJobSubmission.ClientMode.REST) {
+        } else if (job.getClientMode() instanceof SQLJobClientMode.RestClient) {
             submitSQL(
                     () -> {
+                        SQLJobClientMode.RestClient restClient =
+                                (SQLJobClientMode.RestClient) job.getClientMode();
                         // Open a session
                         TestSqlGatewayRestClient client =
                                 new TestSqlGatewayRestClient(
-                                        GlobalConfiguration.loadConfiguration(
-                                                conf.toAbsolutePath().toString()));
+                                        restClient.getHost(),
+                                        restClient.getPort(),
+                                        restClient.getRestEndpointVersion());
                         List<String> sqlLines = new ArrayList<>();
                         for (String jar : job.getJars()) {
                             sqlLines.add(String.format("ADD JAR '%s'", jar));
@@ -325,6 +326,20 @@ public final class FlinkDistribution {
                     },
                     timeout);
         }
+    }
+
+    private void submitSQLJobWithSQLClient(
+            SQLJobSubmission job, List<String> commands, Duration timeout) throws Exception {
+        for (String jar : job.getJars()) {
+            commands.add("--jar");
+            commands.add(jar);
+        }
+
+        AutoClosableProcess.create(commands.toArray(new String[0]))
+                .setStdInputs(job.getSqlLines().toArray(new String[0]))
+                .setStdoutProcessor(LOG::info) // logging the SQL statements and error message
+                .setEnv(job.getEnvProcessor())
+                .runBlocking(timeout);
     }
 
     private void submitSQL(RunnableWithException command, Duration timeout) throws Exception {
@@ -409,12 +424,9 @@ public final class FlinkDistribution {
         mergedConfig.addAll(defaultConfig);
         mergedConfig.addAll(config);
 
-        final List<String> configurationLines =
-                mergedConfig.toMap().entrySet().stream()
-                        .map(entry -> entry.getKey() + ": " + entry.getValue())
-                        .collect(Collectors.toList());
-
-        Files.write(conf.resolve("flink-conf.yaml"), configurationLines);
+        Files.write(
+                conf.resolve(GlobalConfiguration.FLINK_CONF_FILENAME),
+                ConfigurationUtils.convertConfigToWritableLines(mergedConfig, false));
     }
 
     public void setTaskExecutorHosts(Collection<String> taskExecutorHosts) throws IOException {
@@ -457,30 +469,47 @@ public final class FlinkDistribution {
     }
 
     /** This rest client is used to submit SQL strings to Rest Endpoint of Sql Gateway. */
-    private static class TestSqlGatewayRestClient {
+    public static class TestSqlGatewayRestClient {
 
         private final String host;
-        private final String port;
+        private final int port;
+        private final String version;
         private final String sessionHandle;
         private final OkHttpClient client = new OkHttpClient();
 
-        public TestSqlGatewayRestClient(Configuration configuration) throws Exception {
-            Map<String, String> configMap = configuration.toMap();
-            host =
-                    configMap.getOrDefault(
-                            "sql-gateway.endpoint.rest.address",
-                            InetAddress.getByName("localhost").getHostAddress());
-            port = configMap.getOrDefault("sql-gateway.endpoint.rest.port", "8083");
-            sessionHandle = openSession();
+        public TestSqlGatewayRestClient(String host, int port, String version) throws Exception {
+            this.host = host;
+            this.port = port;
+            this.version = version;
+            this.sessionHandle = openSession(Collections.emptyMap());
         }
 
-        private String openSession() throws Exception {
-            FormBody.Builder builder = new FormBody.Builder();
-            FormBody requestBody = builder.build();
+        public TestSqlGatewayRestClient(
+                String host, int port, String version, Map<String, String> properties)
+                throws Exception {
+            this.host = host;
+            this.port = port;
+            this.version = version;
+            this.sessionHandle = openSession(properties);
+        }
+
+        private String openSession(Map<String, String> properties) throws Exception {
+            RequestBody requestBody;
+            if (properties == null || properties.isEmpty()) {
+                requestBody = new FormBody.Builder().build();
+            } else {
+                Map<String, Object> requestMap = new HashMap<>();
+                requestMap.put("properties", properties);
+                requestBody =
+                        RequestBody.create(
+                                MediaType.parse("application/json; charset=utf-8"),
+                                OBJECT_MAPPER.writeValueAsString(requestMap));
+            }
+
             final Request request =
                     new Request.Builder()
                             .post(requestBody)
-                            .url(String.format("http://%s:%s/v1/sessions/", host, port))
+                            .url(String.format("http://%s:%s/%s/sessions/", host, port, version))
                             .build();
             final JsonNode jsonNode = OBJECT_MAPPER.readTree(sendRequest(request));
             return jsonNode.get("sessionHandle").asText();
@@ -498,8 +527,8 @@ public final class FlinkDistribution {
                             .post(requestBody)
                             .url(
                                     String.format(
-                                            "http://%s:%s/v1/sessions/%s/statements",
-                                            host, port, sessionHandle))
+                                            "http://%s:%s/%s/sessions/%s/statements",
+                                            host, port, version, sessionHandle))
                             .build();
             final JsonNode jsonNode = OBJECT_MAPPER.readTree(sendRequest(request));
             return jsonNode.get("operationHandle").asText();
@@ -513,12 +542,55 @@ public final class FlinkDistribution {
                                 .get()
                                 .url(
                                         String.format(
-                                                "http://%s:%s/v1/sessions/%s/operations/%s/status",
-                                                host, port, sessionHandle, operationHandle))
+                                                "http://%s:%s/%s/sessions/%s/operations/%s/status",
+                                                host,
+                                                port,
+                                                version,
+                                                sessionHandle,
+                                                operationHandle))
                                 .build();
                 final JsonNode jsonNode = OBJECT_MAPPER.readTree(sendRequest(request));
                 status = jsonNode.get("status").asText();
             } while (!Objects.equals(status, "FINISHED") && !Objects.equals(status, "ERROR"));
+        }
+
+        public List<RowData> getOperationResult(String operationHandle) throws Exception {
+            List<RowData> result = new ArrayList<>();
+            String resultUri =
+                    String.format(
+                            "/%s/sessions/%s/operations/%s/result/0",
+                            version, sessionHandle, operationHandle);
+            while (resultUri != null) {
+                final Request request =
+                        new Request.Builder()
+                                .get()
+                                .url(String.format("http://%s:%s%s", host, port, resultUri))
+                                .build();
+
+                String response = sendRequest(request);
+
+                FetchResultsResponseBody fetchResultsResponseBody =
+                        OBJECT_MAPPER.readValue(response, FetchResultsResponseBody.class);
+                ResultKind resultKind = fetchResultsResponseBody.getResultKind();
+
+                if (Objects.equals(resultKind, ResultKind.SUCCESS_WITH_CONTENT)) {
+                    result.addAll(fetchResultsResponseBody.getResults().getData());
+                }
+                resultUri = fetchResultsResponseBody.getNextResultUri();
+                Thread.sleep(1000);
+            }
+
+            return result;
+        }
+
+        public List<RowData> executeStatementWithResult(String sql) {
+            try {
+                String operationHandle = executeStatement(sql);
+                waitUntilOperationTerminate(operationHandle);
+                return getOperationResult(operationHandle);
+            } catch (Exception e) {
+                throw new RuntimeException("Execute statement failed", e);
+            }
         }
 
         private String sendRequest(Request request) throws Exception {

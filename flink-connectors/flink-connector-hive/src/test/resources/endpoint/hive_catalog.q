@@ -19,6 +19,17 @@
 # test hive catalog
 # ==========================================================================
 
+# set to default dialect to execute the statements supported only in Flink default dialect
+SET table.sql-dialect = default;
+!output
++--------+
+| result |
++--------+
+|     OK |
++--------+
+1 row in set
+!ok
+
 show current catalog;
 !output
 +----------------------+
@@ -64,6 +75,17 @@ use additional_test_database;
 1 row in set
 !ok
 
+# set to hive dialect to execute the statements supported in Hive dialect
+SET table.sql-dialect = hive;
+!output
++--------+
+| result |
++--------+
+|     OK |
++--------+
+1 row in set
+!ok
+
 create table param_types_table (
     dec DECIMAL(10, 10),
     ch CHAR(5),
@@ -88,6 +110,17 @@ show tables;
 1 row in set
 !ok
 
+# set to flink dialect to execute the statements supported only in Flink default dialect
+SET table.sql-dialect = default;
+!output
++--------+
+| result |
++--------+
+|     OK |
++--------+
+1 row in set
+!ok
+
 show current database;
 !output
 +--------------------------+
@@ -102,15 +135,26 @@ show current database;
 # test hive table with parameterized types
 # ==========================================================================
 
-describe hive.additional_test_database.param_types_table;
+# set to hive dialect to test the result of describe table since it's behavior is different from default dialect
+SET table.sql-dialect = hive;
 !output
-+------+-----------------+------+-----+--------+-----------+
-| name |            type | null | key | extras | watermark |
-+------+-----------------+------+-----+--------+-----------+
-|  dec | DECIMAL(10, 10) | TRUE |     |        |           |
-|   ch |         CHAR(5) | TRUE |     |        |           |
-|  vch |     VARCHAR(15) | TRUE |     |        |           |
-+------+-----------------+------+-----+--------+-----------+
++--------+
+| result |
++--------+
+|     OK |
++--------+
+1 row in set
+!ok
+
+describe additional_test_database.param_types_table;
+!output
++----------+----------------+---------+
+| col_name |      data_type | comment |
++----------+----------------+---------+
+|      dec | decimal(10,10) |         |
+|       ch |        char(5) |         |
+|      vch |    varchar(15) |         |
++----------+----------------+---------+
 3 rows in set
 !ok
 

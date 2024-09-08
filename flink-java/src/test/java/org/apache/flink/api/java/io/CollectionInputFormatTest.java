@@ -18,11 +18,11 @@
 
 package org.apache.flink.api.java.io;
 
-import org.apache.flink.api.common.ExecutionConfig;
+import org.apache.flink.api.common.serialization.SerializerConfigImpl;
 import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.api.common.typeutils.TypeSerializerConfigSnapshot;
+import org.apache.flink.api.common.typeutils.TypeSerializerSnapshot;
 import org.apache.flink.api.java.typeutils.TypeExtractor;
 import org.apache.flink.core.io.GenericInputSplit;
 import org.apache.flink.core.memory.DataInputView;
@@ -102,7 +102,7 @@ class CollectionInputFormatTest {
 
             CollectionInputFormat<ElementType> inputFormat =
                     new CollectionInputFormat<>(
-                            inputCollection, info.createSerializer(new ExecutionConfig()));
+                            inputCollection, info.createSerializer(new SerializerConfigImpl()));
 
             out.writeObject(inputFormat);
 
@@ -180,7 +180,8 @@ class CollectionInputFormatTest {
             CollectionInputFormat<String> inputFormat =
                     new CollectionInputFormat<>(
                             inputCollection,
-                            BasicTypeInfo.STRING_TYPE_INFO.createSerializer(new ExecutionConfig()));
+                            BasicTypeInfo.STRING_TYPE_INFO.createSerializer(
+                                    new SerializerConfigImpl()));
 
             // serialize
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -381,7 +382,7 @@ class CollectionInputFormatTest {
         }
 
         @Override
-        public TypeSerializerConfigSnapshot<ElementType> snapshotConfiguration() {
+        public TypeSerializerSnapshot<ElementType> snapshotConfiguration() {
             throw new UnsupportedOperationException();
         }
     }

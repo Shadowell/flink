@@ -19,14 +19,14 @@
 package org.apache.flink.test.operators;
 
 import org.apache.flink.api.common.functions.FilterFunction;
+import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.functions.RichFilterFunction;
 import org.apache.flink.api.java.DataSet;
 import org.apache.flink.api.java.ExecutionEnvironment;
 import org.apache.flink.api.java.tuple.Tuple3;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.test.operators.util.CollectionDataSets;
 import org.apache.flink.test.operators.util.CollectionDataSets.CustomType;
-import org.apache.flink.test.util.MultipleProgramsTestBase;
+import org.apache.flink.test.util.MultipleProgramsTestBaseJUnit4;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -40,7 +40,7 @@ import static org.apache.flink.test.util.TestBaseUtils.compareResultAsTuples;
 
 /** Integration tests for {@link FilterFunction} and {@link RichFilterFunction}. */
 @RunWith(Parameterized.class)
-public class FilterITCase extends MultipleProgramsTestBase {
+public class FilterITCase extends MultipleProgramsTestBaseJUnit4 {
     public FilterITCase(TestExecutionMode mode) {
         super(mode);
     }
@@ -264,7 +264,7 @@ public class FilterITCase extends MultipleProgramsTestBase {
         int literal = -1;
 
         @Override
-        public void open(Configuration config) {
+        public void open(OpenContext openContext) {
             Collection<Integer> ints = this.getRuntimeContext().getBroadcastVariable("ints");
             for (int i : ints) {
                 literal = literal < i ? i : literal;
@@ -307,7 +307,7 @@ public class FilterITCase extends MultipleProgramsTestBase {
         private int broadcastSum = 0;
 
         @Override
-        public void open(Configuration config) {
+        public void open(OpenContext openContext) {
             Collection<Integer> ints = this.getRuntimeContext().getBroadcastVariable("ints");
             for (Integer i : ints) {
                 broadcastSum += i;

@@ -20,6 +20,7 @@ package org.apache.flink.test.iterative.aggregators;
 
 import org.apache.flink.api.common.aggregators.ConvergenceCriterion;
 import org.apache.flink.api.common.aggregators.LongSumAggregator;
+import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.functions.RichFlatMapFunction;
 import org.apache.flink.api.common.functions.RichJoinFunction;
 import org.apache.flink.api.java.DataSet;
@@ -27,8 +28,7 @@ import org.apache.flink.api.java.ExecutionEnvironment;
 import org.apache.flink.api.java.operators.DeltaIteration;
 import org.apache.flink.api.java.operators.IterativeDataSet;
 import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.configuration.Configuration;
-import org.apache.flink.test.util.MultipleProgramsTestBase;
+import org.apache.flink.test.util.MultipleProgramsTestBaseJUnit4;
 import org.apache.flink.test.util.TestBaseUtils;
 import org.apache.flink.types.LongValue;
 import org.apache.flink.util.Collector;
@@ -46,7 +46,7 @@ import static org.junit.Assert.assertEquals;
 /** Connected Components test case that uses a parameterizable convergence criterion. */
 @RunWith(Parameterized.class)
 @SuppressWarnings("serial")
-public class AggregatorConvergenceITCase extends MultipleProgramsTestBase {
+public class AggregatorConvergenceITCase extends MultipleProgramsTestBaseJUnit4 {
 
     public AggregatorConvergenceITCase(TestExecutionMode mode) {
         super(mode);
@@ -283,7 +283,7 @@ public class AggregatorConvergenceITCase extends MultipleProgramsTestBase {
         }
 
         @Override
-        public void open(Configuration conf) {
+        public void open(OpenContext openContext) {
             aggr = getIterationRuntimeContext().getIterationAggregator(aggName);
         }
 
@@ -315,12 +315,13 @@ public class AggregatorConvergenceITCase extends MultipleProgramsTestBase {
         }
 
         @Override
-        public void open(Configuration conf) {
+        public void open(OpenContext openContext) {
             final int superstep = getIterationRuntimeContext().getSuperstepNumber();
 
             aggr = getIterationRuntimeContext().getIterationAggregator(aggName);
 
-            if (superstep > 1 && getIterationRuntimeContext().getIndexOfThisSubtask() == 0) {
+            if (superstep > 1
+                    && getIterationRuntimeContext().getTaskInfo().getIndexOfThisSubtask() == 0) {
                 LongValue val = getIterationRuntimeContext().getPreviousIterationAggregate(aggName);
                 aggr_value[superstep - 2] = val.getValue();
             }

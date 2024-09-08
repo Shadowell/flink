@@ -22,7 +22,7 @@ import org.apache.flink.api.scala._
 import org.apache.flink.table.api._
 import org.apache.flink.table.planner.utils.{TableTestBase, TableTestUtil}
 
-import org.junit.Test
+import org.junit.jupiter.api.Test
 
 import java.sql.Timestamp
 
@@ -94,6 +94,11 @@ abstract class UnnestTestBase(withExecPlan: Boolean) extends TableTestBase {
   }
 
   @Test
+  def testUnnestWithValues(): Unit = {
+    verifyPlan("SELECT * FROM UNNEST(ARRAY[1,2,3])")
+  }
+
+  @Test
   def testCrossWithUnnestForMap(): Unit = {
     util.addTableSource(
       "MyTable",
@@ -138,7 +143,7 @@ abstract class UnnestTestBase(withExecPlan: Boolean) extends TableTestBase {
     verifyPlan(sqlQuery)
   }
 
-  private def verifyPlan(sql: String): Unit = {
+  def verifyPlan(sql: String): Unit = {
     if (withExecPlan) {
       util.verifyExecPlan(sql)
     } else {

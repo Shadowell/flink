@@ -41,9 +41,9 @@ import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.TableException;
-import org.apache.flink.table.api.TableSchema;
-import org.apache.flink.table.catalog.CatalogTable;
+import org.apache.flink.table.catalog.Column;
 import org.apache.flink.table.catalog.ObjectPath;
+import org.apache.flink.table.catalog.ResolvedCatalogTable;
 import org.apache.flink.table.catalog.hive.client.HiveShim;
 import org.apache.flink.table.catalog.hive.client.HiveShimLoader;
 import org.apache.flink.table.catalog.hive.factories.HiveCatalogFactoryOptions;
@@ -85,6 +85,7 @@ import java.util.stream.Collectors;
 import static org.apache.flink.connector.file.table.FileSystemConnectorOptions.PARTITION_TIME_EXTRACTOR_TIMESTAMP_FORMATTER;
 import static org.apache.flink.connectors.hive.HiveOptions.STREAMING_SOURCE_CONSUME_START_OFFSET;
 import static org.apache.flink.connectors.hive.HiveOptions.STREAMING_SOURCE_ENABLE;
+import static org.apache.flink.connectors.hive.HiveOptions.TABLE_EXEC_HIVE_READ_STATISTICS_THREAD_NUM;
 import static org.apache.flink.connectors.hive.util.HivePartitionUtils.getAllPartitions;
 
 /** A TableSource implementation to read data from Hive tables. */
@@ -102,22 +103,23 @@ public class HiveTableSource
     protected final JobConf jobConf;
     protected final ReadableConfig flinkConf;
     protected final ObjectPath tablePath;
-    protected final CatalogTable catalogTable;
+    protected final ResolvedCatalogTable catalogTable;
     protected final String hiveVersion;
     protected final HiveShim hiveShim;
 
     // Remaining partition specs after partition pruning is performed. Null if pruning is not pushed
     // down.
-    @Nullable private List<Map<String, String>> remainingPartitions = null;
-    @Nullable private List<String> dynamicFilterPartitionKeys = null;
+    @Nullable protected List<Map<String, String>> remainingPartitions = null;
+    @Nullable protected List<String> dynamicFilterPartitionKeys = null;
     protected int[] projectedFields;
-    private Long limit = null;
+    protected DataType producedDataType;
+    protected Long limit = null;
 
     public HiveTableSource(
             JobConf jobConf,
             ReadableConfig flinkConf,
             ObjectPath tablePath,
-            CatalogTable catalogTable) {
+            ResolvedCatalogTable catalogTable) {
         this.jobConf = Preconditions.checkNotNull(jobConf);
         this.flinkConf = Preconditions.checkNotNull(flinkConf);
         this.tablePath = Preconditions.checkNotNull(tablePath);
@@ -127,6 +129,7 @@ public class HiveTableSource
                         jobConf.get(HiveCatalogFactoryOptions.HIVE_VERSION.key()),
                         "Hive version is not defined");
         this.hiveShim = HiveShimLoader.loadHiveShim(hiveVersion);
+        this.producedDataType = catalogTable.getResolvedSchema().toPhysicalRowDataType();
     }
 
     @Override
@@ -168,7 +171,8 @@ public class HiveTableSource
                             remainingPartitions);
 
             int parallelism =
-                    new HiveParallelismInference(tablePath, flinkConf)
+                    new HiveStaticParallelismInferenceFactory(tablePath, flinkConf)
+                            .create()
                             .infer(
                                     () ->
                                             HiveSourceFileEnumerator.getNumFiles(
@@ -205,29 +209,6 @@ public class HiveTableSource
                                 STREAMING_SOURCE_ENABLE.defaultValue().toString()));
     }
 
-    protected TableSchema getTableSchema() {
-        return catalogTable.getSchema();
-    }
-
-    protected TableSchema getProducedTableSchema() {
-        TableSchema fullSchema = getTableSchema();
-        if (projectedFields == null) {
-            return fullSchema;
-        } else {
-            String[] fullNames = fullSchema.getFieldNames();
-            DataType[] fullTypes = fullSchema.getFieldDataTypes();
-            return TableSchema.builder()
-                    .fields(
-                            Arrays.stream(projectedFields)
-                                    .mapToObj(i -> fullNames[i])
-                                    .toArray(String[]::new),
-                            Arrays.stream(projectedFields)
-                                    .mapToObj(i -> fullTypes[i])
-                                    .toArray(DataType[]::new))
-                    .build();
-        }
-    }
-
     @Override
     public void applyLimit(long limit) {
         this.limit = limit;
@@ -256,8 +237,9 @@ public class HiveTableSource
             // Only partition keys with supported types can be returned as accepted filter fields.
             if (HiveSourceDynamicFileEnumerator.SUPPORTED_TYPES.contains(
                     catalogTable
-                            .getSchema()
-                            .getFieldDataType(partitionKey)
+                            .getResolvedSchema()
+                            .getColumn(partitionKey)
+                            .map(Column::getDataType)
                             .map(DataType::getLogicalType)
                             .map(LogicalType::getTypeRoot)
                             .orElse(null))) {
@@ -288,6 +270,7 @@ public class HiveTableSource
     @Override
     public void applyProjection(int[][] projectedFields, DataType producedDataType) {
         this.projectedFields = Arrays.stream(projectedFields).mapToInt(value -> value[0]).toArray();
+        this.producedDataType = producedDataType;
     }
 
     @Override
@@ -305,6 +288,7 @@ public class HiveTableSource
         HiveTableSource source = new HiveTableSource(jobConf, flinkConf, tablePath, catalogTable);
         source.remainingPartitions = remainingPartitions;
         source.projectedFields = projectedFields;
+        source.producedDataType = producedDataType;
         source.limit = limit;
         source.dynamicFilterPartitionKeys = dynamicFilterPartitionKeys;
         return source;
@@ -348,13 +332,16 @@ public class HiveTableSource
                                             inputSplits.stream()
                                                     .map(FileSourceSplit::path)
                                                     .collect(Collectors.toList()),
-                                            catalogTable.getSchema().toRowDataType());
+                                            catalogTable
+                                                    .getResolvedSchema()
+                                                    .toPhysicalRowDataType());
                 } else {
                     // If HiveInputFormat's variable useMapRedReader is true, Hive using MapRed
                     // InputFormat to read data.
                     tableStats =
                             getMapRedInputFormatStatistics(
-                                    inputSplits, catalogTable.getSchema().toRowDataType());
+                                    inputSplits,
+                                    catalogTable.getResolvedSchema().toPhysicalRowDataType());
                 }
                 if (limit == null) {
                     // If no limit push down, return recompute table stats.
@@ -388,13 +375,21 @@ public class HiveTableSource
                         .toLowerCase();
         List<Path> files =
                 inputSplits.stream().map(FileSourceSplit::path).collect(Collectors.toList());
+        int statisticsThreadNum = flinkConf.get(TABLE_EXEC_HIVE_READ_STATISTICS_THREAD_NUM);
+        Preconditions.checkArgument(
+                statisticsThreadNum >= 1,
+                TABLE_EXEC_HIVE_READ_STATISTICS_THREAD_NUM.key() + " cannot be less than 1");
         // Now we only support Parquet, Orc formats.
         if (serializationLib.contains("parquet")) {
             return ParquetFormatStatisticsReportUtil.getTableStatistics(
-                    files, producedDataType, jobConf, hiveVersion.startsWith("3"));
+                    files,
+                    producedDataType,
+                    jobConf,
+                    hiveVersion.startsWith("3"),
+                    statisticsThreadNum);
         } else if (serializationLib.contains("orc")) {
             return OrcFormatStatisticsReportUtil.getTableStatistics(
-                    files, producedDataType, jobConf);
+                    files, producedDataType, jobConf, statisticsThreadNum);
         } else {
             // Now, only support Orc and Parquet Formats.
             LOG.info(
@@ -421,8 +416,6 @@ public class HiveTableSource
                 HiveShim hiveShim,
                 JobConfWrapper confWrapper,
                 List<String> partitionKeys,
-                DataType[] fieldTypes,
-                String[] fieldNames,
                 Configuration configuration,
                 String defaultPartitionName) {
             super(
@@ -430,8 +423,6 @@ public class HiveTableSource
                     hiveShim,
                     confWrapper,
                     partitionKeys,
-                    fieldTypes,
-                    fieldNames,
                     configuration,
                     defaultPartitionName);
 
@@ -439,7 +430,7 @@ public class HiveTableSource
                 case PARTITION_NAME:
                     if (configuration.contains(STREAMING_SOURCE_CONSUME_START_OFFSET)) {
                         String consumeOffsetStr =
-                                configuration.getString(STREAMING_SOURCE_CONSUME_START_OFFSET);
+                                configuration.get(STREAMING_SOURCE_CONSUME_START_OFFSET);
                         consumeStartOffset = (T) consumeOffsetStr;
                     } else {
                         consumeStartOffset = (T) DEFAULT_MIN_NAME_OFFSET;
@@ -450,12 +441,12 @@ public class HiveTableSource
                 case CREATE_TIME:
                     if (configuration.contains(STREAMING_SOURCE_CONSUME_START_OFFSET)) {
                         String consumeOffsetStr =
-                                configuration.getString(STREAMING_SOURCE_CONSUME_START_OFFSET);
+                                configuration.get(STREAMING_SOURCE_CONSUME_START_OFFSET);
 
                         LocalDateTime localDateTime =
                                 DefaultPartTimeExtractor.toLocalDateTime(
                                         consumeOffsetStr,
-                                        configuration.getString(
+                                        configuration.get(
                                                 PARTITION_TIME_EXTRACTOR_TIMESTAMP_FORMATTER));
 
                         consumeStartOffset =

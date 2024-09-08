@@ -44,6 +44,9 @@ public class MetricNames {
     public static final String IO_CURRENT_INPUT_WATERMARK_PATERN = "currentInput%dWatermark";
     public static final String IO_CURRENT_OUTPUT_WATERMARK = "currentOutputWatermark";
 
+    public static final String NUM_FIRED_TIMERS = "numFiredTimers";
+    public static final String NUM_FIRED_TIMERS_RATE = "numFiredTimers" + SUFFIX_RATE;
+
     public static final String NUM_RUNNING_JOBS = "numRunningJobs";
     public static final String TASK_SLOTS_AVAILABLE = "taskSlotsAvailable";
     public static final String TASK_SLOTS_TOTAL = "taskSlotsTotal";
@@ -62,6 +65,17 @@ public class MetricNames {
 
     public static final String CHECKPOINT_ALIGNMENT_TIME = "checkpointAlignmentTime";
     public static final String CHECKPOINT_START_DELAY_TIME = "checkpointStartDelayNanos";
+    public static final String INITIALIZATION_TIME = "initializationTime";
+
+    public static final String MAILBOX_START_DURATION = "MailboxStartDurationMs";
+    public static final String READ_OUTPUT_DATA_DURATION = "ReadOutputDataDurationMs";
+    public static final String INITIALIZE_STATE_DURATION = "InitializeStateDurationMs";
+    public static final String GATE_RESTORE_DURATION = "GateRestoreDurationMs";
+    public static final String DOWNLOAD_STATE_DURATION = "DownloadStateDurationMs";
+    public static final String RESTORE_STATE_DURATION = "RestoreStateDurationMs";
+    public static final String RESTORED_STATE_SIZE = "RestoredStateSizeBytes";
+    public static final String RESTORE_ASYNC_COMPACTION_DURATION =
+            "RestoreAsyncCompactionDurationMs";
 
     public static final String START_WORKER_FAILURE_RATE = "startWorkFailure" + SUFFIX_RATE;
 
@@ -79,6 +93,7 @@ public class MetricNames {
             "softBackPressuredTimeMs" + SUFFIX_RATE;
     public static final String TASK_HARD_BACK_PRESSURED_TIME =
             "hardBackPressuredTimeMs" + SUFFIX_RATE;
+    public static final String CHANGELOG_BUSY_TIME = "changelogBusyTimeMs" + SUFFIX_RATE;
     public static final String TASK_MAX_SOFT_BACK_PRESSURED_TIME = "maxSoftBackPressureTimeMs";
     public static final String TASK_MAX_HARD_BACK_PRESSURED_TIME = "maxHardBackPressureTimeMs";
 
@@ -87,8 +102,7 @@ public class MetricNames {
     public static final String DEBLOATED_BUFFER_SIZE = "debloatedBufferSize";
 
     // FLIP-33 sink
-    // deprecated use NUM_RECORDS_SEND_ERRORS instead.
-    @Deprecated public static final String NUM_RECORDS_OUT_ERRORS = "numRecordsOutErrors";
+    public static final String NUM_RECORDS_OUT_ERRORS = "numRecordsOutErrors";
     public static final String NUM_RECORDS_SEND_ERRORS = "numRecordsSendErrors";
     public static final String CURRENT_SEND_TIME = "currentSendTime";
     public static final String NUM_RECORDS_SEND = "numRecordsSend";
@@ -123,4 +137,15 @@ public class MetricNames {
     public static final String LATEST_LOAD_TIME = "latestLoadTime";
     public static final String NUM_CACHED_RECORDS = "numCachedRecords";
     public static final String NUM_CACHED_BYTES = "numCachedBytes";
+
+    // FLIP-27 for split enumerator
+    public static final String UNASSIGNED_SPLITS = "unassignedSplits";
+
+    // FLIP-371 for sink committer
+    public static final String TOTAL_COMMITTABLES = "totalCommittables";
+    public static final String SUCCESSFUL_COMMITTABLES = "successfulCommittables";
+    public static final String ALREADY_COMMITTED_COMMITTABLES = "alreadyCommittedCommittables";
+    public static final String FAILED_COMMITTABLES = "failedCommittables";
+    public static final String RETRIED_COMMITTABLES = "retriedCommittables";
+    public static final String PENDING_COMMITTABLES = "pendingCommittables";
 }

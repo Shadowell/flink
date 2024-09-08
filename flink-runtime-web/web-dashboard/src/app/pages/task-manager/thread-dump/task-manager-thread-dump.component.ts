@@ -17,28 +17,38 @@
  */
 
 import { ChangeDetectorRef, Component, OnInit, ChangeDetectionStrategy, OnDestroy, Inject } from '@angular/core';
+import { FormsModule } from '@angular/forms';
 import { ActivatedRoute } from '@angular/router';
 import { of, Subject } from 'rxjs';
 import { catchError, takeUntil } from 'rxjs/operators';
 
+import { AddonCompactComponent } from '@flink-runtime-web/components/addon-compact/addon-compact.component';
+import { AutoResizeDirective } from '@flink-runtime-web/components/editor/auto-resize.directive';
 import { ModuleConfig } from '@flink-runtime-web/core/module-config';
 import {
   TASK_MANAGER_MODULE_CONFIG,
   TASK_MANAGER_MODULE_DEFAULT_CONFIG
 } from '@flink-runtime-web/pages/task-manager/task-manager.config';
 import { ConfigService, TaskManagerService } from '@flink-runtime-web/services';
+import { editor } from 'monaco-editor';
+import { NzCodeEditorModule } from 'ng-zorro-antd/code-editor';
 import { EditorOptions } from 'ng-zorro-antd/code-editor/typings';
+
+import IStandaloneCodeEditor = editor.IStandaloneCodeEditor;
 
 @Component({
   selector: 'flink-task-manager-thread-dump',
   templateUrl: './task-manager-thread-dump.component.html',
   styleUrls: ['./task-manager-thread-dump.component.less'],
-  changeDetection: ChangeDetectionStrategy.OnPush
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [NzCodeEditorModule, AutoResizeDirective, FormsModule, AddonCompactComponent],
+  standalone: true
 })
 export class TaskManagerThreadDumpComponent implements OnInit, OnDestroy {
   public editorOptions: EditorOptions;
 
   public dump = '';
+  public vertexName = '';
   public loading = true;
   public taskManagerId: string;
   public downloadUrl = '';
@@ -60,12 +70,34 @@ export class TaskManagerThreadDumpComponent implements OnInit, OnDestroy {
     this.taskManagerId = this.activatedRoute.parent!.snapshot.params.taskManagerId;
     this.downloadUrl = `${this.configService.BASE_URL}/taskmanagers/${this.taskManagerId}/thread-dump`;
     this.downloadName = `taskmanager_${this.taskManagerId}_thread_dump`;
-    this.reload();
+    this.activatedRoute.queryParams.subscribe(params => {
+      this.vertexName = decodeURIComponent(params.vertexName);
+    });
   }
 
   public ngOnDestroy(): void {
     this.destroy$.next();
     this.destroy$.complete();
+  }
+
+  public nzEditorInitialized(editor: IStandaloneCodeEditor): void {
+    if (this.vertexName !== undefined) {
+      editor.onDidChangeModelContent(_ => {
+        const model = editor.getModel();
+        // Note that legacy source will prefix with `Legacy Source Thread - `, we search it first.
+        let results = model!.findMatches(`"Legacy Source Thread - ${this.vertexName}`, false, false, true, null, false);
+        if (results.length == 0) {
+          results = model!.findMatches(`"${this.vertexName}`, false, false, true, null, false);
+        }
+        if (results.length > 0) {
+          editor.setSelection(results[0].range);
+          editor.getAction('actions.find').run();
+          editor.getAction('editor.action.nextMatchFindAction').run();
+        }
+      });
+    }
+    // loading thread dump after editor view ready
+    this.reload();
   }
 
   public reload(): void {

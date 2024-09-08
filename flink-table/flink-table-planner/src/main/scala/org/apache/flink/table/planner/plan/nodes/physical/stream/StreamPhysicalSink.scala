@@ -36,7 +36,7 @@ import org.apache.calcite.rel.hint.RelHint
 import java.util
 
 /**
- * Stream physical RelNode to to write data into an external sink defined by a [[DynamicTableSink]].
+ * Stream physical RelNode to write data into an external sink defined by a [[DynamicTableSink]].
  */
 class StreamPhysicalSink(
     cluster: RelOptCluster,
@@ -45,9 +45,10 @@ class StreamPhysicalSink(
     hints: util.List[RelHint],
     contextResolvedTable: ContextResolvedTable,
     tableSink: DynamicTableSink,
+    targetColumns: Array[Array[Int]],
     abilitySpecs: Array[SinkAbilitySpec],
     val upsertMaterialize: Boolean = false)
-  extends Sink(cluster, traitSet, inputRel, hints, contextResolvedTable, tableSink)
+  extends Sink(cluster, traitSet, inputRel, hints, targetColumns, contextResolvedTable, tableSink)
   with StreamPhysicalRel {
 
   override def requireWatermark: Boolean = false
@@ -60,6 +61,7 @@ class StreamPhysicalSink(
       hints,
       contextResolvedTable,
       tableSink,
+      targetColumns,
       abilitySpecs,
       upsertMaterialize)
   }
@@ -72,6 +74,7 @@ class StreamPhysicalSink(
       hints,
       contextResolvedTable,
       tableSink,
+      targetColumns,
       abilitySpecs,
       newUpsertMaterialize)
   }
@@ -80,7 +83,10 @@ class StreamPhysicalSink(
     val inputChangelogMode =
       ChangelogPlanUtils.getChangelogMode(getInput.asInstanceOf[StreamPhysicalRel]).get
     val tableSinkSpec =
-      new DynamicTableSinkSpec(contextResolvedTable, util.Arrays.asList(abilitySpecs: _*))
+      new DynamicTableSinkSpec(
+        contextResolvedTable,
+        util.Arrays.asList(abilitySpecs: _*),
+        targetColumns)
     tableSinkSpec.setTableSink(tableSink)
     // no need to call getUpsertKeysInKeyGroupRange here because there's no exchange before sink,
     // and only add exchange in exec sink node.

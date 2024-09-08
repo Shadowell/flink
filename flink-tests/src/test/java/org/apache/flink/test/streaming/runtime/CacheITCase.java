@@ -22,6 +22,7 @@ import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.api.common.serialization.SimpleStringEncoder;
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.configuration.BatchExecutionOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.connector.file.sink.FileSink;
 import org.apache.flink.connector.file.src.FileSource;
@@ -38,7 +39,7 @@ import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.ProcessFunction;
 import org.apache.flink.streaming.api.transformations.CacheTransformation;
 import org.apache.flink.streaming.util.TestStreamEnvironment;
-import org.apache.flink.test.util.AbstractTestBase;
+import org.apache.flink.test.util.AbstractTestBaseJUnit4;
 import org.apache.flink.test.util.MiniClusterWithClientResource;
 import org.apache.flink.util.AbstractID;
 import org.apache.flink.util.Collector;
@@ -64,7 +65,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** Test datastream cache. */
-public class CacheITCase extends AbstractTestBase {
+public class CacheITCase extends AbstractTestBaseJUnit4 {
     private StreamExecutionEnvironment env;
     private MiniClusterWithClientResource miniClusterWithClientResource;
 
@@ -83,7 +84,14 @@ public class CacheITCase extends AbstractTestBase {
                                 .build());
         miniClusterWithClientResource.before();
 
-        env = new TestStreamEnvironment(miniClusterWithClientResource.getMiniCluster(), 8);
+        configuration.set(BatchExecutionOptions.ADAPTIVE_AUTO_PARALLELISM_ENABLED, false);
+        env =
+                new TestStreamEnvironment(
+                        miniClusterWithClientResource.getMiniCluster(),
+                        configuration,
+                        8,
+                        Collections.emptyList(),
+                        Collections.emptyList());
         env.setRuntimeMode(RuntimeExecutionMode.BATCH);
     }
 
@@ -166,7 +174,7 @@ public class CacheITCase extends AbstractTestBase {
             throws Exception {
 
         final DataStreamSource<Tuple2<Integer, Integer>> ds =
-                env.fromElements(new Tuple2<>(1, 1), new Tuple2<>(2, 1), new Tuple2<>(2, 1));
+                env.fromData(new Tuple2<>(1, 1), new Tuple2<>(2, 1), new Tuple2<>(2, 1));
 
         final CachedDataStream<Tuple2<Integer, Integer>> cacheSource = ds.cache();
         SingleOutputStreamOperator<Tuple2<Integer, Integer>> result =
@@ -184,7 +192,7 @@ public class CacheITCase extends AbstractTestBase {
     void testCacheSideOutput(@TempDir java.nio.file.Path tmpDir) throws Exception {
         OutputTag<Integer> tag = new OutputTag<Integer>("2") {};
         final DataStreamSource<Tuple2<Integer, Integer>> ds =
-                env.fromElements(new Tuple2<>(1, 1), new Tuple2<>(2, 1), new Tuple2<>(2, 2));
+                env.fromData(new Tuple2<>(1, 1), new Tuple2<>(2, 1), new Tuple2<>(2, 2));
 
         final SingleOutputStreamOperator<Integer> processed =
                 ds.process(

@@ -29,6 +29,7 @@ import org.apache.flink.table.planner.utils.ShortcutUtils
 import org.apache.calcite.plan.{RelOptRule, RelOptRuleCall}
 import org.apache.calcite.rel.RelNode
 import org.apache.calcite.rel.convert.ConverterRule
+import org.apache.calcite.rel.convert.ConverterRule.Config
 
 import java.lang.{Boolean => JBoolean}
 
@@ -36,12 +37,7 @@ import java.lang.{Boolean => JBoolean}
  * Rule that matches [[FlinkLogicalSort]] which sort fields is non-empty and both `fetch` and
  * `offset` are null, and converts it to [[BatchPhysicalSort]].
  */
-class BatchPhysicalSortRule
-  extends ConverterRule(
-    classOf[FlinkLogicalSort],
-    FlinkConventions.LOGICAL,
-    FlinkConventions.BATCH_PHYSICAL,
-    "BatchPhysicalSortRule") {
+class BatchPhysicalSortRule(config: Config) extends ConverterRule(config) {
 
   override def matches(call: RelOptRuleCall): Boolean = {
     val sort: FlinkLogicalSort = call.rel(0)
@@ -72,9 +68,15 @@ class BatchPhysicalSortRule
 }
 
 object BatchPhysicalSortRule {
-  val INSTANCE: RelOptRule = new BatchPhysicalSortRule
+  val INSTANCE: RelOptRule = new BatchPhysicalSortRule(
+    Config.INSTANCE.withConversion(
+      classOf[FlinkLogicalSort],
+      FlinkConventions.LOGICAL,
+      FlinkConventions.BATCH_PHYSICAL,
+      "BatchPhysicalSortRule"))
 
-  // It is a experimental config, will may be removed later.
+  /** This configuration will be removed in Flink 2.0. */
+  @Deprecated
   @Experimental
   val TABLE_EXEC_RANGE_SORT_ENABLED: ConfigOption[JBoolean] =
     key("table.exec.range-sort.enabled")

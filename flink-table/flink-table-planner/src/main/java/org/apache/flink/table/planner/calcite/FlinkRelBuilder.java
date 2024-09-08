@@ -37,7 +37,7 @@ import org.apache.flink.table.runtime.operators.rank.RankType;
 import org.apache.flink.util.CollectionUtil;
 import org.apache.flink.util.Preconditions;
 
-import org.apache.flink.shaded.guava30.com.google.common.collect.ImmutableList;
+import org.apache.flink.shaded.guava32.com.google.common.collect.ImmutableList;
 
 import org.apache.calcite.plan.Context;
 import org.apache.calcite.plan.Contexts;
@@ -79,6 +79,8 @@ import static org.apache.flink.table.planner.utils.ShortcutUtils.unwrapContext;
 @Internal
 public final class FlinkRelBuilder extends RelBuilder {
 
+    public static final RelBuilder.Config FLINK_REL_BUILDER_CONFIG =
+            Config.DEFAULT.withSimplifyValues(false);
     private final QueryOperationConverter toRelNodeConverter;
 
     private final ExpandFactory expandFactory;
@@ -279,7 +281,9 @@ public final class FlinkRelBuilder extends RelBuilder {
     public RelBuilder transform(UnaryOperator<Config> transform) {
         // Override in order to return a FlinkRelBuilder.
         final Context mergedContext =
-                Contexts.of(transform.apply(Config.DEFAULT), cluster.getPlanner().getContext());
+                Contexts.of(
+                        transform.apply(FLINK_REL_BUILDER_CONFIG),
+                        cluster.getPlanner().getContext());
         return FlinkRelBuilder.of(mergedContext, cluster, relOptSchema);
     }
 

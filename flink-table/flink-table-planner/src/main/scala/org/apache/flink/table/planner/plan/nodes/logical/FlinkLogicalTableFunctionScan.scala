@@ -22,10 +22,11 @@ import org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction
 import org.apache.flink.table.planner.functions.utils.TableSqlFunction
 import org.apache.flink.table.planner.plan.nodes.FlinkConventions
 
-import org.apache.calcite.plan.{Convention, RelOptCluster, RelOptRule, RelOptRuleCall, RelTraitSet}
+import org.apache.calcite.plan._
 import org.apache.calcite.rel.`type`.RelDataType
 import org.apache.calcite.rel.RelNode
 import org.apache.calcite.rel.convert.ConverterRule
+import org.apache.calcite.rel.convert.ConverterRule.Config
 import org.apache.calcite.rel.core.TableFunctionScan
 import org.apache.calcite.rel.logical.LogicalTableFunctionScan
 import org.apache.calcite.rel.metadata.RelColumnMapping
@@ -78,12 +79,7 @@ class FlinkLogicalTableFunctionScan(
 
 }
 
-class FlinkLogicalTableFunctionScanConverter
-  extends ConverterRule(
-    classOf[LogicalTableFunctionScan],
-    Convention.NONE,
-    FlinkConventions.LOGICAL,
-    "FlinkLogicalTableFunctionScanConverter") {
+class FlinkLogicalTableFunctionScanConverter(config: Config) extends ConverterRule(config) {
 
   override def matches(call: RelOptRuleCall): Boolean = {
     val logicalTableFunction: LogicalTableFunctionScan = call.rel(0)
@@ -110,12 +106,17 @@ class FlinkLogicalTableFunctionScanConverter
     val scan = rel.asInstanceOf[LogicalTableFunctionScan]
     val traitSet = rel.getTraitSet.replace(FlinkConventions.LOGICAL).simplify()
     val newInputs = scan.getInputs.map(input => RelOptRule.convert(input, FlinkConventions.LOGICAL))
+    val rexCall = scan.getCall.asInstanceOf[RexCall];
+    val builder = rel.getCluster.getRexBuilder
+    // When rexCall uses NamedArguments, RexCall is not inferred with the correct type.
+    // We just use the type of scan as the type of RexCall.
+    val newCall = rexCall.clone(rel.getRowType, rexCall.getOperands)
 
     new FlinkLogicalTableFunctionScan(
       scan.getCluster,
       traitSet,
       newInputs,
-      scan.getCall,
+      newCall,
       scan.getElementType,
       scan.getRowType,
       scan.getColumnMappings
@@ -125,5 +126,10 @@ class FlinkLogicalTableFunctionScanConverter
 }
 
 object FlinkLogicalTableFunctionScan {
-  val CONVERTER = new FlinkLogicalTableFunctionScanConverter
+  val CONVERTER = new FlinkLogicalTableFunctionScanConverter(
+    Config.INSTANCE.withConversion(
+      classOf[LogicalTableFunctionScan],
+      Convention.NONE,
+      FlinkConventions.LOGICAL,
+      "FlinkLogicalTableFunctionScanConverter"))
 }

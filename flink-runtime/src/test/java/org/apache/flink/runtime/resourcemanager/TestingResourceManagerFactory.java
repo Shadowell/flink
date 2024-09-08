@@ -19,8 +19,8 @@
 package org.apache.flink.runtime.resourcemanager;
 
 import org.apache.flink.api.common.time.Time;
-import org.apache.flink.configuration.AkkaOptions;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.RpcOptions;
 import org.apache.flink.runtime.blocklist.BlocklistHandler;
 import org.apache.flink.runtime.blocklist.BlocklistUtils;
 import org.apache.flink.runtime.clusterframework.ApplicationStatus;
@@ -30,6 +30,8 @@ import org.apache.flink.runtime.heartbeat.HeartbeatServices;
 import org.apache.flink.runtime.io.network.partition.ResourceManagerPartitionTrackerFactory;
 import org.apache.flink.runtime.io.network.partition.ResourceManagerPartitionTrackerImpl;
 import org.apache.flink.runtime.metrics.groups.ResourceManagerMetricGroup;
+import org.apache.flink.runtime.resourcemanager.slotmanager.NonSupportedResourceAllocatorImpl;
+import org.apache.flink.runtime.resourcemanager.slotmanager.ResourceAllocator;
 import org.apache.flink.runtime.resourcemanager.slotmanager.SlotManager;
 import org.apache.flink.runtime.rpc.FatalErrorHandler;
 import org.apache.flink.runtime.rpc.RpcService;
@@ -39,6 +41,7 @@ import org.apache.flink.util.function.TriConsumer;
 
 import javax.annotation.Nullable;
 
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -98,7 +101,7 @@ public class TestingResourceManagerFactory extends ResourceManagerFactory<Resour
                 clusterInformation,
                 fatalErrorHandler,
                 resourceManagerMetricGroup,
-                Time.fromDuration(configuration.get(AkkaOptions.ASK_TIMEOUT_DURATION)),
+                Time.fromDuration(configuration.get(RpcOptions.ASK_TIMEOUT_DURATION)),
                 ioExecutor);
     }
 
@@ -219,17 +222,7 @@ public class TestingResourceManagerFactory extends ResourceManagerFactory<Resour
         }
 
         @Override
-        public boolean startNewWorker(WorkerResourceSpec workerResourceSpec) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        protected ResourceID workerStarted(ResourceID resourceID) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public boolean stopWorker(ResourceID worker) {
+        protected Optional<ResourceID> getWorkerNodeIfAcceptRegistration(ResourceID resourceID) {
             throw new UnsupportedOperationException();
         }
 
@@ -242,6 +235,11 @@ public class TestingResourceManagerFactory extends ResourceManagerFactory<Resour
         @Override
         public CompletableFuture<Void> getReadyToServeFuture() {
             return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        protected ResourceAllocator getResourceAllocator() {
+            return NonSupportedResourceAllocatorImpl.INSTANCE;
         }
     }
 }

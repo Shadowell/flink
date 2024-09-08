@@ -20,7 +20,7 @@ package org.apache.flink.table.planner.delegation
 import org.apache.flink.api.common.RuntimeExecutionMode
 import org.apache.flink.api.dag.Transformation
 import org.apache.flink.configuration.ExecutionOptions
-import org.apache.flink.table.api.{ExplainDetail, PlanReference, TableConfig, TableException}
+import org.apache.flink.table.api._
 import org.apache.flink.table.api.config.OptimizerConfigOptions
 import org.apache.flink.table.catalog.{CatalogManager, FunctionCatalog}
 import org.apache.flink.table.delegation.{Executor, InternalPlan}
@@ -29,7 +29,7 @@ import org.apache.flink.table.operations.{ModifyOperation, Operation}
 import org.apache.flink.table.planner.plan.`trait`.FlinkRelDistributionTraitDef
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeGraph
 import org.apache.flink.table.planner.plan.nodes.exec.batch.BatchExecNode
-import org.apache.flink.table.planner.plan.nodes.exec.processor.{DeadlockBreakupProcessor, DynamicFilteringDependencyProcessor, ExecNodeGraphProcessor, ForwardHashExchangeProcessor, MultipleInputNodeCreationProcessor, ResetTransformationProcessor}
+import org.apache.flink.table.planner.plan.nodes.exec.processor.{DeadlockBreakupProcessor, DynamicFilteringDependencyProcessor, ExecNodeGraphProcessor, ForwardHashExchangeProcessor, MultipleInputNodeCreationProcessor}
 import org.apache.flink.table.planner.plan.nodes.exec.utils.ExecNodePlanDumper
 import org.apache.flink.table.planner.plan.optimize.{BatchCommonSubGraphBasedOptimizer, Optimizer}
 import org.apache.flink.table.planner.plan.utils.FlinkRelOptUtil
@@ -73,15 +73,14 @@ class BatchPlanner(
     val processors = new util.ArrayList[ExecNodeGraphProcessor]()
     // deadlock breakup
     processors.add(new DeadlockBreakupProcessor())
+    if (getTableConfig.get(OptimizerConfigOptions.TABLE_OPTIMIZER_DYNAMIC_FILTERING_ENABLED)) {
+      processors.add(new DynamicFilteringDependencyProcessor)
+    }
     // multiple input creation
     if (getTableConfig.get(OptimizerConfigOptions.TABLE_OPTIMIZER_MULTIPLE_INPUT_ENABLED)) {
       processors.add(new MultipleInputNodeCreationProcessor(false))
     }
     processors.add(new ForwardHashExchangeProcessor)
-    if (getTableConfig.get(OptimizerConfigOptions.TABLE_OPTIMIZER_DYNAMIC_FILTERING_ENABLED)) {
-      processors.add(new DynamicFilteringDependencyProcessor)
-      processors.add(new ResetTransformationProcessor)
-    }
     processors
   }
 
@@ -100,7 +99,18 @@ class BatchPlanner(
     transformations ++ planner.extraTransformations
   }
 
-  override def explain(operations: util.List[Operation], extraDetails: ExplainDetail*): String = {
+  override def explain(
+      operations: util.List[Operation],
+      format: ExplainFormat,
+      extraDetails: ExplainDetail*): String = {
+    if (format != ExplainFormat.TEXT) {
+      throw new UnsupportedOperationException(
+        s"Unsupported explain format [${format.getClass.getCanonicalName}]")
+    }
+    if (extraDetails.contains(ExplainDetail.PLAN_ADVICE)) {
+      throw new UnsupportedOperationException(
+        "EXPLAIN PLAN_ADVICE is not supported under batch mode.")
+    }
     val (sinkRelNodes, optimizedRelNodes, execGraph, streamGraph) = getExplainGraphs(operations)
 
     val sb = new mutable.StringBuilder
@@ -152,19 +162,6 @@ class BatchPlanner(
       catalogManager,
       classLoader)
   }
-
-  override def loadPlan(planReference: PlanReference): InternalPlan = {
-    throw new UnsupportedOperationException(
-      "The compiled plan feature is not supported in batch mode.")
-  }
-
-  override def compilePlan(modifyOperations: util.List[ModifyOperation]): InternalPlan =
-    throw new UnsupportedOperationException(
-      "The compiled plan feature is not supported in batch mode.")
-
-  override def translatePlan(plan: InternalPlan): util.List[Transformation[_]] =
-    throw new UnsupportedOperationException(
-      "The compiled plan feature is not supported in batch mode.")
 
   override def explainPlan(plan: InternalPlan, extraDetails: ExplainDetail*): String =
     throw new UnsupportedOperationException(

@@ -25,8 +25,8 @@ import org.apache.calcite.rex.{RexBuilder, RexLiteral, RexNode, RexUtil}
 import org.apache.calcite.sql.`type`.{BasicSqlType, SqlTypeName}
 import org.apache.calcite.sql.`type`.SqlTypeName._
 import org.apache.calcite.sql.fun.SqlStdOperatorTable._
-import org.junit.Assert.{assertEquals, assertFalse}
-import org.junit.Test
+import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse}
+import org.junit.jupiter.api.Test
 
 import java.math.BigDecimal
 import java.util.Collections
@@ -206,7 +206,7 @@ class FlinkRexUtilTest {
     assertEquals(RexUtil.toCnf(rexBuilder, predicate).toString, newPredicate3.toString)
 
     val newPredicate4 = FlinkRexUtil.toCnf(rexBuilder, Int.MaxValue, predicate)
-    assertFalse(RexUtil.eq(predicate, newPredicate4))
+    assertFalse(predicate.equals(newPredicate4))
     assertEquals(RexUtil.toCnf(rexBuilder, predicate).toString, newPredicate4.toString)
   }
 
@@ -456,9 +456,7 @@ class FlinkRexUtilTest {
       predicate17Equals,
       rexBuilder.makeIn(c, java.util.Arrays.asList(intLiteral(0), intLiteral(1))))
     val newPredicate17 = simplify(rexBuilder, predicate17)
-    assertEquals(
-      rexBuilder.makeIn(c, Collections.singletonList[RexNode](intLiteral(0))).toString,
-      newPredicate17.toString)
+    assertEquals(rexBuilder.makeCall(EQUALS, c, intLiteral(0)).toString, newPredicate17.toString)
 
     // c = 0 OR SEARCH(c, [0, 1])
     val predicate18Search =
@@ -484,18 +482,17 @@ class FlinkRexUtilTest {
       rexBuilder.makeCall(GREATER_THAN, c, intLiteral(0)),
       predicate19Layer1)
     val newPredicate19 = simplify(rexBuilder, predicate19)
-    assertEquals(
-      rexBuilder.makeIn(c, Collections.singletonList[RexNode](intLiteral(1))).toString,
-      newPredicate19.toString)
+    assertEquals(rexBuilder.makeCall(EQUALS, c, intLiteral(1)).toString, newPredicate19.toString)
 
     // c >= 0 OR SEARCH(c, [0, 1])
-    // TODO `c >= 0 OR SEARCH(c, [0, 1])` should be simplified to c >= 0
     val predicate20 = rexBuilder.makeCall(
       OR,
       rexBuilder.makeCall(GREATER_THAN_OR_EQUAL, c, intLiteral(0)),
       predicate18Search)
     val newPredicate20 = simplify(rexBuilder, predicate20)
-    assertEquals(predicate20.toString, newPredicate20.toString)
+    assertEquals(
+      rexBuilder.makeCall(GREATER_THAN_OR_EQUAL, c, intLiteral(0)).toString,
+      newPredicate20.toString)
 
     // CAST(1 AS BOOLEAN)
     val predicate21CastFromData = intLiteral(1)

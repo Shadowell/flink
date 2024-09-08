@@ -27,6 +27,7 @@ import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.time.Deadline;
 import org.apache.flink.changelog.fs.FsStateChangelogStorageFactory;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.ExternalizedCheckpointRetention;
 import org.apache.flink.runtime.io.network.logger.NetworkActionsLogger;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.SavepointRestoreSettings;
@@ -39,7 +40,6 @@ import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.datastream.DataStreamUtils;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
-import org.apache.flink.streaming.api.environment.CheckpointConfig.ExternalizedCheckpointCleanup;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.co.KeyedCoProcessFunction;
 import org.apache.flink.streaming.api.functions.source.ParallelSourceFunction;
@@ -49,18 +49,17 @@ import org.apache.flink.streaming.api.windowing.assigners.TumblingProcessingTime
 import org.apache.flink.streaming.api.windowing.time.Time;
 import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
 import org.apache.flink.test.util.MiniClusterWithClientResource;
+import org.apache.flink.testutils.junit.utils.TempDirUtils;
 import org.apache.flink.util.Collector;
 import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.FileUtils;
-import org.apache.flink.util.LogLevelRule;
-import org.apache.flink.util.TestLogger;
+import org.apache.flink.util.LogLevelExtension;
 
-import org.junit.After;
-import org.junit.Before;
-import org.junit.ClassRule;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.event.Level;
 
 import javax.annotation.Nullable;
@@ -68,11 +67,15 @@ import javax.annotation.Nullable;
 import java.io.File;
 import java.io.IOException;
 import java.io.Serializable;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Duration;
-import java.util.Comparator;
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
@@ -81,17 +84,18 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static java.util.Objects.requireNonNull;
 import static org.apache.flink.configuration.CheckpointingOptions.CHECKPOINTS_DIRECTORY;
 import static org.apache.flink.configuration.CheckpointingOptions.MAX_RETAINED_CHECKPOINTS;
 import static org.apache.flink.shaded.curator5.org.apache.curator.shaded.com.google.common.base.Preconditions.checkState;
-import static org.apache.flink.shaded.guava30.com.google.common.collect.Iterables.getOnlyElement;
+import static org.apache.flink.shaded.guava32.com.google.common.collect.Iterables.getOnlyElement;
 import static org.apache.flink.test.util.TestUtils.submitJobAndWaitForResult;
 
 /**
  * A stress test that runs for a pre-defined amount of time, verifying data correctness and every
  * couple of checkpoints is triggering fail over to stress test unaligned checkpoints.
  */
-public class UnalignedCheckpointStressITCase extends TestLogger {
+class UnalignedCheckpointStressITCase {
 
     private static final int CHECKPOINT_INTERVAL = 20;
     private static final int MINIMUM_COMPLETED_CHECKPOINTS_BETWEEN_FAILURES = 2;
@@ -105,22 +109,22 @@ public class UnalignedCheckpointStressITCase extends TestLogger {
     private static final int NORMAL_RECORD_SLEEP = 1;
     private static final int SMALL_RECORD_SIZE = (BUFFER_SIZE / BUFFER_TIME) * NORMAL_RECORD_SLEEP;
 
-    @ClassRule
-    public static final LogLevelRule NETWORK_LOGGER =
-            new LogLevelRule().set(NetworkActionsLogger.class, Level.TRACE);
+    @RegisterExtension
+    public static final LogLevelExtension NETWORK_LOGGER =
+            new LogLevelExtension().set(NetworkActionsLogger.class, Level.TRACE);
 
-    @Rule public TemporaryFolder temporaryFolder = new TemporaryFolder();
+    @TempDir public File temporaryFolder;
 
     // a separate folder is used because temporaryFolder is cleaned up
     // after each checkpoint
-    @Rule public TemporaryFolder changelogFolder = new TemporaryFolder();
+    @TempDir public Path changelogFolder;
 
     private MiniClusterWithClientResource cluster;
 
-    @Before
-    public void setup() throws Exception {
+    @BeforeEach
+    void setup() throws Exception {
         Configuration configuration = new Configuration();
-        File folder = temporaryFolder.getRoot();
+        File folder = temporaryFolder;
         configuration.set(CHECKPOINTS_DIRECTORY, folder.toURI().toString());
         configuration.set(MAX_RETAINED_CHECKPOINTS, 1);
 
@@ -129,7 +133,7 @@ public class UnalignedCheckpointStressITCase extends TestLogger {
         // Doing it on cluster level unconditionally as randomization currently happens on the job
         // level (environment); while this factory can only be set on the cluster level.
         FsStateChangelogStorageFactory.configure(
-                configuration, changelogFolder.newFolder(), Duration.ofMinutes(1), 10);
+                configuration, TempDirUtils.newFolder(changelogFolder), Duration.ofMinutes(1), 10);
 
         cluster =
                 new MiniClusterWithClientResource(
@@ -141,8 +145,8 @@ public class UnalignedCheckpointStressITCase extends TestLogger {
         cluster.before();
     }
 
-    @After
-    public void shutDownExistingCluster() {
+    @AfterEach
+    void shutDownExistingCluster() {
         if (cluster != null) {
             cluster.after();
             cluster = null;
@@ -150,13 +154,12 @@ public class UnalignedCheckpointStressITCase extends TestLogger {
     }
 
     @Test
-    public void runStressTest() throws Exception {
+    void runStressTest() throws Exception {
         Deadline deadline = Deadline.fromNow(Duration.ofMillis(TEST_DURATION));
-        Optional<File> externalizedCheckpoint = Optional.empty();
+        File externalizedCheckpoint = null;
         while (deadline.hasTimeLeft()) {
-            externalizedCheckpoint =
-                    Optional.of(runAndTakeExternalCheckpoint(externalizedCheckpoint));
-            cleanDirectoryExcept(externalizedCheckpoint.get());
+            externalizedCheckpoint = runAndTakeExternalCheckpoint(externalizedCheckpoint);
+            cleanDirectoryExcept(externalizedCheckpoint);
         }
     }
 
@@ -213,7 +216,7 @@ public class UnalignedCheckpointStressITCase extends TestLogger {
 
         DataStream<Record> stream =
                 sources.rebalance()
-                        .map((MapFunction<Record, Record>) value -> value.validate())
+                        .map((MapFunction<Record, Record>) Record::validate)
                         .keyBy(Record::getSourceId)
                         // add small throttling to prevent WindowOperator from blowing up
                         .map(new ThrottlingMap(100));
@@ -231,20 +234,20 @@ public class UnalignedCheckpointStressITCase extends TestLogger {
 
     private void cleanDirectoryExcept(File externalizedCheckpoint) throws IOException {
         File directoryToKeep = externalizedCheckpoint.getParentFile();
-        for (File directory : temporaryFolder.getRoot().listFiles()) {
+        for (File directory : requireNonNull(temporaryFolder.listFiles())) {
             if (!directory.equals(directoryToKeep)) {
                 FileUtils.deleteDirectory(directory);
             }
         }
     }
 
-    private File runAndTakeExternalCheckpoint(Optional<File> startingCheckpoint) throws Exception {
+    private File runAndTakeExternalCheckpoint(@Nullable File startingCheckpoint) throws Exception {
 
         StreamExecutionEnvironment env = defineEnvironment();
         testProgram(env);
 
         StreamGraph streamGraph = env.getStreamGraph();
-        startingCheckpoint
+        Optional.ofNullable(startingCheckpoint)
                 .map(File::toString)
                 .map(SavepointRestoreSettings::forPath)
                 .ifPresent(streamGraph::setSavepointRestoreSettings);
@@ -272,28 +275,20 @@ public class UnalignedCheckpointStressITCase extends TestLogger {
 
     private File discoverRetainedCheckpoint() throws Exception {
         // structure: root/attempt/checkpoint/_metadata
-        File rootDir = temporaryFolder.getRoot();
+        File rootDir = temporaryFolder;
         Path checkpointDir = null;
 
         for (int i = 0; i <= 1000 && checkpointDir == null; i++) {
             Thread.sleep(5);
-            try (Stream<Path> files = Files.walk(Paths.get(rootDir.getPath()))) {
-                checkpointDir =
-                        files.filter(Files::isRegularFile)
-                                .filter(path -> path.endsWith("_metadata"))
-                                .map(path -> path.getParent())
-                                .sorted(
-                                        Comparator.comparingInt(
-                                                UnalignedCheckpointStressITCase
-                                                        ::getCheckpointNumberFromPath))
-                                .reduce((first, second) -> second)
-                                .orElse(null);
-            }
+            MaxCheckpointFileVisitor fileVisitor = new MaxCheckpointFileVisitor();
+            Files.walkFileTree(Paths.get(rootDir.getPath()), fileVisitor);
+            checkpointDir = fileVisitor.getMaxCheckpointDir();
         }
         if (checkpointDir == null) {
-            List<Path> files =
-                    Files.walk(Paths.get(rootDir.getPath())).collect(Collectors.toList());
-            throw new IllegalStateException("Failed to find _metadata file among " + files);
+            try (Stream<Path> savepoint = Files.walk(Paths.get(rootDir.getPath()))) {
+                List<Path> files = savepoint.collect(Collectors.toList());
+                throw new IllegalStateException("Failed to find _metadata file among " + files);
+            }
         }
         return checkpointDir.toFile();
     }
@@ -308,8 +303,8 @@ public class UnalignedCheckpointStressITCase extends TestLogger {
         env.getCheckpointConfig().enableUnalignedCheckpoints();
         env.setRestartStrategy(RestartStrategies.noRestart());
         env.getCheckpointConfig()
-                .setExternalizedCheckpointCleanup(
-                        ExternalizedCheckpointCleanup.DELETE_ON_CANCELLATION);
+                .setExternalizedCheckpointRetention(
+                        ExternalizedCheckpointRetention.DELETE_ON_CANCELLATION);
         return env;
     }
 
@@ -419,7 +414,8 @@ public class UnalignedCheckpointStressITCase extends TestLogger {
         public void run(SourceContext<Record> ctx) throws Exception {
             RecordGenerator generator =
                     new RecordGenerator(
-                            getRuntimeContext().getIndexOfThisSubtask() + sourceIdOffset);
+                            getRuntimeContext().getTaskInfo().getIndexOfThisSubtask()
+                                    + sourceIdOffset);
             while (running) {
                 Record next = generator.next(nextValue);
                 synchronized (ctx.getCheckpointLock()) {
@@ -436,8 +432,7 @@ public class UnalignedCheckpointStressITCase extends TestLogger {
 
         @Override
         public void snapshotState(FunctionSnapshotContext context) throws Exception {
-            nextState.clear();
-            nextState.add(nextValue);
+            nextState.update(Collections.singletonList(nextValue));
         }
 
         @Override
@@ -446,7 +441,7 @@ public class UnalignedCheckpointStressITCase extends TestLogger {
                     context.getOperatorStateStore()
                             .getListState(new ListStateDescriptor<>("state", Long.class));
             // We are not supporting rescaling
-            nextValue = getOnlyElement(nextState.get(), 0L);
+            nextValue = requireNonNull(getOnlyElement(nextState.get(), 0L));
         }
     }
 
@@ -497,10 +492,6 @@ public class UnalignedCheckpointStressITCase extends TestLogger {
         public int sourceId;
         public long value;
         public byte[] payload;
-
-        public Record() {
-            this(0, 0, SMALL_RECORD_SIZE);
-        }
 
         public Record(int sourceId, long value, int payloadSize) {
             this.sourceId = sourceId;
@@ -557,6 +548,38 @@ public class UnalignedCheckpointStressITCase extends TestLogger {
                 Thread.sleep(NORMAL_RECORD_SLEEP);
             }
             return value.validate();
+        }
+    }
+
+    /** The file visitor which is looking for the most recent checkpoint. */
+    private static class MaxCheckpointFileVisitor extends SimpleFileVisitor<Path> {
+        private Path maxCheckpointDir;
+
+        @Override
+        public FileVisitResult visitFile(Path path, BasicFileAttributes basicFileAttributes) {
+            if (path.endsWith("_metadata")) {
+                int curCheckpointId = getCheckpointNumberFromPath(path.getParent());
+                int prevCheckpointId =
+                        maxCheckpointDir == null
+                                ? -1
+                                : getCheckpointNumberFromPath(maxCheckpointDir);
+                if (prevCheckpointId < curCheckpointId) {
+                    maxCheckpointDir = path.getParent();
+                }
+            }
+            return FileVisitResult.CONTINUE;
+        }
+
+        @Override
+        public FileVisitResult visitFileFailed(Path file, IOException ex) throws IOException {
+            if (ex instanceof NoSuchFileException) {
+                return FileVisitResult.CONTINUE;
+            }
+            throw ex;
+        }
+
+        public Path getMaxCheckpointDir() {
+            return maxCheckpointDir;
         }
     }
 }

@@ -22,6 +22,7 @@ import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.JobManagerOptions;
+import org.apache.flink.core.failure.FailureEnricher;
 import org.apache.flink.runtime.blob.BlobWriter;
 import org.apache.flink.runtime.blocklist.BlocklistOperations;
 import org.apache.flink.runtime.checkpoint.CheckpointRecoveryFactory;
@@ -38,6 +39,9 @@ import org.apache.flink.runtime.shuffle.ShuffleMaster;
 
 import org.slf4j.Logger;
 
+import javax.annotation.Nonnull;
+
+import java.util.Collection;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
 
@@ -49,10 +53,13 @@ public interface SlotPoolServiceSchedulerFactory {
      *
      * @param jid jid is the JobID to pass to the service
      * @param declarativeSlotPoolFactory the declarative slot pool factory
+     * @param componentMainThreadExecutor component main thread executor.
      * @return created SlotPoolService
      */
     SlotPoolService createSlotPoolService(
-            JobID jid, DeclarativeSlotPoolFactory declarativeSlotPoolFactory);
+            JobID jid,
+            DeclarativeSlotPoolFactory declarativeSlotPoolFactory,
+            @Nonnull ComponentMainThreadExecutor componentMainThreadExecutor);
 
     /**
      * Returns the scheduler type this factory is creating.
@@ -87,6 +94,7 @@ public interface SlotPoolServiceSchedulerFactory {
             ComponentMainThreadExecutor mainThreadExecutor,
             FatalErrorHandler fatalErrorHandler,
             JobStatusListener jobStatusListener,
+            Collection<FailureEnricher> failureEnrichers,
             BlocklistOperations blocklistOperations)
             throws Exception;
 }

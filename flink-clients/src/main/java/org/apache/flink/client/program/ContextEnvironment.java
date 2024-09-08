@@ -22,6 +22,8 @@ import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.JobExecutionResult;
 import org.apache.flink.api.java.ExecutionEnvironment;
 import org.apache.flink.api.java.ExecutionEnvironmentFactory;
+import org.apache.flink.client.ClientUtils;
+import org.apache.flink.client.cli.ClientOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.DeploymentOptions;
 import org.apache.flink.core.execution.DetachedJobExecutionResult;
@@ -37,6 +39,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
@@ -91,11 +94,12 @@ public class ContextEnvironment extends ExecutionEnvironment {
         checkNotNull(jobClient);
 
         JobExecutionResult jobExecutionResult;
-        if (getConfiguration().getBoolean(DeploymentOptions.ATTACHED)) {
+        if (getConfiguration().get(DeploymentOptions.ATTACHED)) {
             CompletableFuture<JobExecutionResult> jobExecutionResultFuture =
                     jobClient.getJobExecutionResult();
 
-            if (getConfiguration().getBoolean(DeploymentOptions.SHUTDOWN_IF_ATTACHED)) {
+            ScheduledExecutorService clientHeartbeatService = null;
+            if (getConfiguration().get(DeploymentOptions.SHUTDOWN_IF_ATTACHED)) {
                 Thread shutdownHook =
                         ShutdownHookUtil.addShutdownHook(
                                 () -> {
@@ -112,9 +116,21 @@ public class ContextEnvironment extends ExecutionEnvironment {
                                         shutdownHook,
                                         ContextEnvironment.class.getSimpleName(),
                                         LOG));
+                clientHeartbeatService =
+                        ClientUtils.reportHeartbeatPeriodically(
+                                jobClient,
+                                getConfiguration()
+                                        .get(ClientOptions.CLIENT_HEARTBEAT_INTERVAL)
+                                        .toMillis(),
+                                getConfiguration()
+                                        .get(ClientOptions.CLIENT_HEARTBEAT_TIMEOUT)
+                                        .toMillis());
             }
 
             jobExecutionResult = jobExecutionResultFuture.get();
+            if (clientHeartbeatService != null) {
+                clientHeartbeatService.shutdown();
+            }
             if (!suppressSysout) {
                 System.out.println(jobExecutionResult);
             }

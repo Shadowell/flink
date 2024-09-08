@@ -24,10 +24,9 @@ import org.apache.flink.table.planner.runtime.utils.BatchTestBase.row
 import org.apache.flink.table.utils.DateTimeUtils.toLocalDateTime
 import org.apache.flink.types.Row
 
-import org.junit.Test
+import org.junit.jupiter.api.Test
 
 import scala.collection.JavaConverters._
-import scala.collection.Seq
 
 class UnnestITCase extends BatchTestBase {
 
@@ -302,6 +301,18 @@ class UnnestITCase extends BatchTestBase {
       "SELECT a, k, v FROM T, UNNEST(T.b) as A(k, v)",
       Seq(row(1, "a", 10), row(1, "b", 11), row(2, "c", 20), row(2, "d", 21))
     )
+  }
+
+  @Test
+  def testUnnestWithValuesBatch(): Unit = {
+    checkResult("SELECT * FROM UNNEST(ARRAY[1,2,3])", Seq(row(1), row(2), row(3)))
+  }
+
+  @Test
+  def testUnnestWithValuesBatch2(): Unit = {
+    checkResult(
+      "SELECT * FROM (VALUES('a')) CROSS JOIN UNNEST(ARRAY[1, 2, 3])",
+      Seq(row('a', 1), row('a', 2), row('a', 3)))
   }
 
 }

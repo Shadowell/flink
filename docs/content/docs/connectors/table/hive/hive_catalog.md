@@ -64,7 +64,7 @@ Generic tables, on the other hand, are specific to Flink. When creating generic 
 HMS to persist the metadata. While these tables are visible to Hive, it's unlikely Hive is able to understand
 the metadata. And therefore using such tables in Hive leads to undefined behavior.
 
-It's recommended to switch to [Hive dialect]({{< ref "docs/connectors/table/hive/hive_dialect" >}}) to create Hive-compatible tables.
+It's recommended to switch to [Hive dialect]({{< ref "docs/dev/table/hive-compatibility/hive-dialect/overview" >}}) to create Hive-compatible tables.
 If you want to create Hive-compatible tables with default dialect, make sure to set `'connector'='hive'` in your table properties, otherwise
 a table is considered generic by default in `HiveCatalog`. Note that the `connector` property is not required if you use Hive dialect.
 
@@ -183,12 +183,12 @@ Create a simple Kafka table with Flink SQL DDL, and verify its schema.
 Flink SQL> USE CATALOG myhive;
 
 Flink SQL> CREATE TABLE mykafka (name String, age Int) WITH (
-   'connector.type' = 'kafka',
-   'connector.version' = 'universal',
-   'connector.topic' = 'test',
-   'connector.properties.bootstrap.servers' = 'localhost:9092',
-   'format.type' = 'csv',
-   'update-mode' = 'append'
+   'connector' = 'kafka',
+   'topic' = 'test',
+   'properties.bootstrap.servers' = 'localhost:9092',
+   'properties.group.id' = 'testGroup',
+   'scan.startup.mode' = 'earliest-offset',
+   'format' = 'csv'
 );
 [INFO] Table has been created.
 

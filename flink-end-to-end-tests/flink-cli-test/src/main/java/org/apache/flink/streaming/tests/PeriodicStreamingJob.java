@@ -37,6 +37,8 @@ import org.apache.flink.streaming.api.functions.source.SourceFunction;
 import org.apache.flink.streaming.api.windowing.assigners.TumblingProcessingTimeWindows;
 import org.apache.flink.streaming.api.windowing.time.Time;
 
+import java.util.Collections;
+
 /**
  * This is a periodic streaming job that runs for CLI testing purposes.
  *
@@ -65,7 +67,9 @@ public class PeriodicStreamingJob {
         DataStream<Tuple> rows = sEnv.addSource(generator);
 
         DataStream<Tuple> result =
-                rows.keyBy(1).window(TumblingProcessingTimeWindows.of(Time.seconds(5))).sum(0);
+                rows.keyBy(tuple -> tuple.getField(1))
+                        .window(TumblingProcessingTimeWindows.of(Time.seconds(5)))
+                        .sum(0);
 
         result.writeAsText(outputPath + "/result.txt", FileSystem.WriteMode.OVERWRITE)
                 .setParallelism(1);
@@ -73,7 +77,14 @@ public class PeriodicStreamingJob {
         sEnv.execute();
     }
 
-    /** Data-generating source function. */
+    /**
+     * Data-generating source function.
+     *
+     * @deprecated This class is based on the {@link
+     *     org.apache.flink.streaming.api.functions.source.SourceFunction} API, which is due to be
+     *     removed. Use the new {@link org.apache.flink.api.connector.source.Source} API instead.
+     */
+    @Deprecated
     public static class PeriodicSourceGenerator
             implements SourceFunction<Tuple>, ResultTypeQueryable<Tuple>, CheckpointedFunction {
         private final int sleepMs;
@@ -128,8 +139,7 @@ public class PeriodicStreamingJob {
 
         @Override
         public void snapshotState(FunctionSnapshotContext context) throws Exception {
-            state.clear();
-            state.add(ms);
+            state.update(Collections.singletonList(ms));
         }
     }
 }

@@ -20,6 +20,7 @@ package org.apache.flink.connectors.hive.util;
 
 import org.apache.flink.connectors.hive.FlinkHiveException;
 import org.apache.flink.connectors.hive.HiveTablePartition;
+import org.apache.flink.connectors.hive.HiveTablePartitionSerializer;
 import org.apache.flink.table.catalog.CatalogPartitionSpec;
 import org.apache.flink.table.catalog.ObjectPath;
 import org.apache.flink.table.catalog.hive.client.HiveMetastoreClientFactory;
@@ -32,6 +33,7 @@ import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.LogicalTypeFamily;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
+import org.apache.flink.util.CollectionUtil;
 
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
@@ -225,7 +227,7 @@ public class HivePartitionUtils {
     public static CatalogPartitionSpec createPartitionSpec(
             String hivePartitionName, String defaultPartitionName) {
         String[] partKeyVals = hivePartitionName.split("/");
-        Map<String, String> spec = new HashMap<>(partKeyVals.length);
+        Map<String, String> spec = CollectionUtil.newHashMapWithExpectedSize(partKeyVals.length);
         for (String keyVal : partKeyVals) {
             String[] kv = keyVal.split("=");
             String partitionValue = unescapePathName(kv[1]);
@@ -289,5 +291,34 @@ public class HivePartitionUtils {
                 listStatusRecursively(fs, stat, level + 1, expectLevel, results);
             }
         }
+    }
+
+    public static List<byte[]> serializeHiveTablePartition(
+            List<HiveTablePartition> hiveTablePartitions) {
+        List<byte[]> partitionBytes = new ArrayList<>(hiveTablePartitions.size());
+        try {
+            for (HiveTablePartition hiveTablePartition : hiveTablePartitions) {
+                partitionBytes.add(
+                        HiveTablePartitionSerializer.INSTANCE.serialize(hiveTablePartition));
+            }
+        } catch (IOException ex) {
+            throw new RuntimeException(ex);
+        }
+        return partitionBytes;
+    }
+
+    public static List<HiveTablePartition> deserializeHiveTablePartition(
+            List<byte[]> partitionBytes) {
+        List<HiveTablePartition> hiveTablePartitions = new ArrayList<>(partitionBytes.size());
+        try {
+            for (byte[] bytes : partitionBytes) {
+                hiveTablePartitions.add(
+                        HiveTablePartitionSerializer.INSTANCE.deserialize(
+                                HiveTablePartitionSerializer.INSTANCE.getVersion(), bytes));
+            }
+        } catch (IOException ex) {
+            throw new RuntimeException(ex);
+        }
+        return hiveTablePartitions;
     }
 }

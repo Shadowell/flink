@@ -35,7 +35,6 @@ import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.filesystem.bucketassigners.BasePathBucketAssigner;
 import org.apache.flink.streaming.api.operators.collect.ClientAndIterator;
 import org.apache.flink.test.junit5.MiniClusterExtension;
-import org.apache.flink.util.TestLoggerExtension;
 import org.apache.flink.util.function.FunctionWithException;
 import org.apache.flink.util.jackson.JacksonMapperFactory;
 
@@ -44,11 +43,11 @@ import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.dataformat.csv.Csv
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.dataformat.csv.CsvSchema;
 
 import org.apache.commons.io.FileUtils;
-import org.jetbrains.annotations.NotNull;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.api.io.TempDir;
+
+import javax.annotation.Nonnull;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -72,8 +71,7 @@ import java.util.stream.Collectors;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** MiniCluster-based integration tests CSV data format. */
-@ExtendWith({TestLoggerExtension.class})
-public class DataStreamCsvITCase {
+class DataStreamCsvITCase {
 
     private static final CsvMapper CSV_MAPPER = JacksonMapperFactory.createCsvMapper();
 
@@ -151,7 +149,7 @@ public class DataStreamCsvITCase {
     //  test cases
     // ------------------------------------------------------------------------
     @Test
-    public void testCsvReaderFormatFromPojo() throws Exception {
+    void testCsvReaderFormatFromPojo() throws Exception {
         writeFile(outDir, "data.csv", CSV_LINES);
 
         final CsvReaderFormat<CityPojo> csvFormat = CsvReaderFormat.forPojo(CityPojo.class);
@@ -161,7 +159,7 @@ public class DataStreamCsvITCase {
     }
 
     @Test
-    public void testCsvReaderFormatFromSchema() throws Exception {
+    void testCsvReaderFormatFromSchema() throws Exception {
         writeFile(outDir, "data.csv", CSV_LINES_PIPE_SEPARATED);
 
         final CsvReaderFormat<CityPojo> csvFormat =
@@ -178,7 +176,7 @@ public class DataStreamCsvITCase {
     }
 
     @Test
-    public void testCsvReaderFormatMalformed() throws Exception {
+    void testCsvReaderFormatMalformed() throws Exception {
         writeFile(outDir, "data.csv", CSV_LINES_MALFORMED);
 
         final CsvReaderFormat<CityPojo> csvFormat =
@@ -193,7 +191,7 @@ public class DataStreamCsvITCase {
     }
 
     @Test
-    public void testCustomBulkWriter() throws Exception {
+    void testCustomBulkWriter() throws Exception {
 
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         env.setParallelism(PARALLELISM);
@@ -217,7 +215,7 @@ public class DataStreamCsvITCase {
         assertThat(result).containsExactlyInAnyOrder(CSV_LINES);
     }
 
-    @NotNull
+    @Nonnull
     private String[] getResultsFromSinkFiles(File outDir) throws IOException {
         final Map<File, String> contents = getFileContentByPath(outDir);
 
@@ -246,6 +244,7 @@ public class DataStreamCsvITCase {
         return contents;
     }
 
+    /** Test pojo describing a city. */
     @JsonPropertyOrder({
         "city",
         "lat",
@@ -256,7 +255,7 @@ public class DataStreamCsvITCase {
         "capital",
         "population"
     })
-    static class CityPojo implements Serializable {
+    public static class CityPojo implements Serializable {
         public String city;
         public BigDecimal lat;
         public BigDecimal lng;
@@ -354,7 +353,7 @@ public class DataStreamCsvITCase {
         return getResultsFromStream(stream);
     }
 
-    @NotNull
+    @Nonnull
     private static <T> List<T> getResultsFromStream(DataStream<T> stream) throws Exception {
         final ClientAndIterator<T> client =
                 DataStreamUtils.collectWithClient(stream, "Bounded Results Fetch");

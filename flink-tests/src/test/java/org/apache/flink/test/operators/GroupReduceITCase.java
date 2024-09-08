@@ -21,6 +21,7 @@ package org.apache.flink.test.operators;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.functions.GroupCombineFunction;
 import org.apache.flink.api.common.functions.GroupReduceFunction;
+import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.functions.RichGroupReduceFunction;
 import org.apache.flink.api.common.functions.RichMapFunction;
 import org.apache.flink.api.common.operators.Order;
@@ -39,7 +40,7 @@ import org.apache.flink.test.operators.util.CollectionDataSets.CustomType;
 import org.apache.flink.test.operators.util.CollectionDataSets.FromTupleWithCTor;
 import org.apache.flink.test.operators.util.CollectionDataSets.POJO;
 import org.apache.flink.test.operators.util.CollectionDataSets.PojoContainingTupleAndWritable;
-import org.apache.flink.test.util.MultipleProgramsTestBase;
+import org.apache.flink.test.util.MultipleProgramsTestBaseJUnit4;
 import org.apache.flink.util.Collector;
 
 import org.joda.time.DateTime;
@@ -64,7 +65,7 @@ import static org.apache.flink.test.util.TestBaseUtils.compareResultAsTuples;
  */
 @SuppressWarnings({"serial", "unchecked", "UnusedDeclaration"})
 @RunWith(Parameterized.class)
-public class GroupReduceITCase extends MultipleProgramsTestBase {
+public class GroupReduceITCase extends MultipleProgramsTestBaseJUnit4 {
 
     public GroupReduceITCase(TestExecutionMode mode) {
         super(mode);
@@ -1507,7 +1508,7 @@ public class GroupReduceITCase extends MultipleProgramsTestBase {
         private String f2Replace = "";
 
         @Override
-        public void open(Configuration config) {
+        public void open(OpenContext openContext) {
 
             Collection<Integer> ints = this.getRuntimeContext().getBroadcastVariable("ints");
             int sum = 0;

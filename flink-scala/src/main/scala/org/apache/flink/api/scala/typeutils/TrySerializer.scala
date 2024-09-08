@@ -19,6 +19,7 @@ package org.apache.flink.api.scala.typeutils
 
 import org.apache.flink.annotation.Internal
 import org.apache.flink.api.common.ExecutionConfig
+import org.apache.flink.api.common.serialization.SerializerConfig
 import org.apache.flink.api.common.typeutils._
 import org.apache.flink.api.java.typeutils.runtime.kryo.KryoSerializer
 import org.apache.flink.core.memory.{DataInputView, DataOutputView}
@@ -35,10 +36,10 @@ class TrySerializer[A](
 
   private[typeutils] def this(
       elemSerializer: TypeSerializer[A],
-      executionConfig: ExecutionConfig) = {
+      serializerConfig: SerializerConfig) = {
     this(
       elemSerializer,
-      new KryoSerializer[Throwable](classOf[Throwable], executionConfig)
+      new KryoSerializer[Throwable](classOf[Throwable], serializerConfig)
     )
   }
 
@@ -114,31 +115,4 @@ class TrySerializer[A](
   override def snapshotConfiguration(): ScalaTrySerializerSnapshot[A] = {
     new ScalaTrySerializerSnapshot[A](this)
   }
-}
-
-object TrySerializer {
-
-  /**
-   * We need to keep this to be compatible with snapshots taken in Flink 1.3.0. Once Flink 1.3.x is
-   * no longer supported, this can be removed.
-   */
-  @Deprecated
-  class TrySerializerConfigSnapshot[A]() extends CompositeTypeSerializerConfigSnapshot[Try[A]]() {
-
-    override def getVersion: Int = TrySerializerConfigSnapshot.VERSION
-
-    override def resolveSchemaCompatibility(
-        newSerializer: TypeSerializer[Try[A]]
-    ): TypeSerializerSchemaCompatibility[Try[A]] =
-      CompositeTypeSerializerUtil.delegateCompatibilityCheckToNewSnapshot(
-        newSerializer,
-        new ScalaTrySerializerSnapshot[A](),
-        getNestedSerializersAndConfigs.get(0).f1,
-        getNestedSerializersAndConfigs.get(1).f1)
-  }
-
-  object TrySerializerConfigSnapshot {
-    val VERSION = 1
-  }
-
 }

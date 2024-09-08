@@ -65,15 +65,13 @@ import org.apache.flink.runtime.taskmanager.TaskExecutionState;
 import org.apache.flink.runtime.taskmanager.TaskManagerLocation;
 import org.apache.flink.runtime.testtasks.NoOpInvokable;
 import org.apache.flink.runtime.testutils.DirectScheduledExecutorService;
+import org.apache.flink.runtime.util.NoOpGroupCache;
 import org.apache.flink.testutils.TestingUtils;
-import org.apache.flink.testutils.executor.TestExecutorResource;
-import org.apache.flink.util.TestLogger;
+import org.apache.flink.testutils.executor.TestExecutorExtension;
 import org.apache.flink.util.function.FunctionUtils;
 
-import org.hamcrest.Description;
-import org.hamcrest.TypeSafeMatcher;
-import org.junit.ClassRule;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -87,19 +85,14 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledExecutorService;
 
-import static junit.framework.TestCase.assertTrue;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertThat;
-import static org.junit.Assert.fail;
+import static org.assertj.core.api.Assertions.assertThat;
 
 /** Tests for {@link DefaultExecutionGraph} deployment. */
-public class DefaultExecutionGraphDeploymentTest extends TestLogger {
+class DefaultExecutionGraphDeploymentTest {
 
-    @ClassRule
-    public static final TestExecutorResource<ScheduledExecutorService> EXECUTOR_RESOURCE =
-            TestingUtils.defaultExecutorResource();
+    @RegisterExtension
+    static final TestExecutorExtension<ScheduledExecutorService> EXECUTOR_EXTENSION =
+            TestingUtils.defaultExecutorExtension();
 
     /** BLOB server instance to use for the job graph. */
     protected BlobWriter blobWriter = VoidBlobWriter.getInstance();
@@ -117,7 +110,8 @@ public class DefaultExecutionGraphDeploymentTest extends TestLogger {
      * @param eg the execution graph that was created
      */
     protected void checkJobOffloaded(DefaultExecutionGraph eg) throws Exception {
-        assertTrue(eg.getJobInformationOrBlobKey().isLeft());
+        assertThat(eg.getTaskDeploymentDescriptorFactory().getSerializedJobInformation())
+                .isInstanceOf(TaskDeploymentDescriptor.NonOffloaded.class);
     }
 
     /**
@@ -128,11 +122,11 @@ public class DefaultExecutionGraphDeploymentTest extends TestLogger {
      * @param jobVertexId job vertex ID
      */
     protected void checkTaskOffloaded(ExecutionGraph eg, JobVertexID jobVertexId) throws Exception {
-        assertTrue(eg.getJobVertex(jobVertexId).getTaskInformationOrBlobKey().isLeft());
+        assertThat(eg.getJobVertex(jobVertexId).getTaskInformationOrBlobKey().isLeft()).isTrue();
     }
 
     @Test
-    public void testBuildDeploymentDescriptor() throws Exception {
+    void testBuildDeploymentDescriptor() throws Exception {
 
         final JobVertexID jid1 = new JobVertexID();
         final JobVertexID jid2 = new JobVertexID();
@@ -185,7 +179,11 @@ public class DefaultExecutionGraphDeploymentTest extends TestLogger {
         taskManagerGateway.setSubmitConsumer(
                 FunctionUtils.uncheckedConsumer(
                         taskDeploymentDescriptor -> {
-                            taskDeploymentDescriptor.loadBigData(blobCache);
+                            taskDeploymentDescriptor.loadBigData(
+                                    blobCache,
+                                    new NoOpGroupCache<>(),
+                                    new NoOpGroupCache<>(),
+                                    new NoOpGroupCache<>());
                             tdd.complete(taskDeploymentDescriptor);
                         }));
 
@@ -194,7 +192,7 @@ public class DefaultExecutionGraphDeploymentTest extends TestLogger {
                         .setTaskManagerGateway(taskManagerGateway)
                         .createTestingLogicalSlot();
 
-        assertEquals(ExecutionState.CREATED, vertex.getExecutionState());
+        assertThat(vertex.getExecutionState()).isEqualTo(ExecutionState.CREATED);
         vertex.getCurrentExecutionAttempt().transitionState(ExecutionState.SCHEDULED);
 
         vertex.getCurrentExecutionAttempt()
@@ -202,128 +200,109 @@ public class DefaultExecutionGraphDeploymentTest extends TestLogger {
                 .get();
         vertex.deployToSlot(slot);
 
-        assertEquals(ExecutionState.DEPLOYING, vertex.getExecutionState());
+        assertThat(vertex.getExecutionState()).isEqualTo(ExecutionState.DEPLOYING);
         checkTaskOffloaded(eg, vertex.getJobvertexId());
 
         TaskDeploymentDescriptor descr = tdd.get();
-        assertNotNull(descr);
+        assertThat(descr).isNotNull();
 
-        JobInformation jobInformation =
-                descr.getSerializedJobInformation().deserializeValue(getClass().getClassLoader());
-        TaskInformation taskInformation =
-                descr.getSerializedTaskInformation().deserializeValue(getClass().getClassLoader());
+        JobInformation jobInformation = descr.getJobInformation();
+        TaskInformation taskInformation = descr.getTaskInformation();
 
-        assertEquals(jobId, descr.getJobId());
-        assertEquals(jobId, jobInformation.getJobId());
-        assertEquals(jid2, taskInformation.getJobVertexId());
-        assertEquals(3, descr.getSubtaskIndex());
-        assertEquals(10, taskInformation.getNumberOfSubtasks());
-        assertEquals(BatchTask.class.getName(), taskInformation.getInvokableClassName());
-        assertEquals("v2", taskInformation.getTaskName());
+        assertThat(descr.getJobId()).isEqualTo(jobId);
+        assertThat(jobInformation.getJobId()).isEqualTo(jobId);
+        assertThat(taskInformation.getJobVertexId()).isEqualTo(jid2);
+        assertThat(descr.getSubtaskIndex()).isEqualTo(3);
+        assertThat(taskInformation.getNumberOfSubtasks()).isEqualTo(10);
+        assertThat(taskInformation.getInvokableClassName()).isEqualTo(BatchTask.class.getName());
+        assertThat(taskInformation.getTaskName()).isEqualTo("v2");
 
         Collection<ResultPartitionDeploymentDescriptor> producedPartitions =
                 descr.getProducedPartitions();
         Collection<InputGateDeploymentDescriptor> consumedPartitions = descr.getInputGates();
 
-        assertEquals(2, producedPartitions.size());
-        assertEquals(1, consumedPartitions.size());
+        assertThat(producedPartitions).hasSize((2));
+        assertThat(consumedPartitions).hasSize(1);
 
         Iterator<ResultPartitionDeploymentDescriptor> iteratorProducedPartitions =
                 producedPartitions.iterator();
         Iterator<InputGateDeploymentDescriptor> iteratorConsumedPartitions =
                 consumedPartitions.iterator();
 
-        assertEquals(10, iteratorProducedPartitions.next().getNumberOfSubpartitions());
-        assertEquals(10, iteratorProducedPartitions.next().getNumberOfSubpartitions());
+        assertThat(iteratorProducedPartitions.next().getNumberOfSubpartitions()).isEqualTo(10);
+        assertThat(iteratorProducedPartitions.next().getNumberOfSubpartitions()).isEqualTo(10);
 
         ShuffleDescriptor[] shuffleDescriptors =
                 iteratorConsumedPartitions.next().getShuffleDescriptors();
-        assertEquals(10, shuffleDescriptors.length);
+        assertThat(shuffleDescriptors.length).isEqualTo(10);
 
         Iterator<ConsumedPartitionGroup> iteratorConsumedPartitionGroup =
                 vertex.getAllConsumedPartitionGroups().iterator();
         int idx = 0;
         for (IntermediateResultPartitionID partitionId : iteratorConsumedPartitionGroup.next()) {
-            assertEquals(
-                    partitionId, shuffleDescriptors[idx++].getResultPartitionID().getPartitionId());
+            assertThat(shuffleDescriptors[idx++].getResultPartitionID().getPartitionId())
+                    .isEqualTo(partitionId);
         }
     }
 
     @Test
-    public void testRegistrationOfExecutionsFinishing() {
-        try {
-            final JobVertexID jid1 = new JobVertexID();
-            final JobVertexID jid2 = new JobVertexID();
+    void testRegistrationOfExecutionsFinishing() throws Exception {
 
-            JobVertex v1 = new JobVertex("v1", jid1);
-            JobVertex v2 = new JobVertex("v2", jid2);
+        final JobVertexID jid1 = new JobVertexID();
+        final JobVertexID jid2 = new JobVertexID();
 
-            SchedulerBase scheduler = setupScheduler(v1, 7650, v2, 2350);
-            Collection<Execution> executions =
-                    new ArrayList<>(
-                            scheduler.getExecutionGraph().getRegisteredExecutions().values());
+        JobVertex v1 = new JobVertex("v1", jid1);
+        JobVertex v2 = new JobVertex("v2", jid2);
 
-            for (Execution e : executions) {
-                e.markFinished();
-            }
+        SchedulerBase scheduler = setupScheduler(v1, 7650, v2, 2350);
+        Collection<Execution> executions =
+                new ArrayList<>(scheduler.getExecutionGraph().getRegisteredExecutions().values());
 
-            assertEquals(0, scheduler.getExecutionGraph().getRegisteredExecutions().size());
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail(e.getMessage());
+        for (Execution e : executions) {
+            e.markFinished();
         }
+
+        assertThat(scheduler.getExecutionGraph().getRegisteredExecutions()).isEmpty();
     }
 
     @Test
-    public void testRegistrationOfExecutionsFailing() {
-        try {
+    void testRegistrationOfExecutionsFailing() throws Exception {
 
-            final JobVertexID jid1 = new JobVertexID();
-            final JobVertexID jid2 = new JobVertexID();
+        final JobVertexID jid1 = new JobVertexID();
+        final JobVertexID jid2 = new JobVertexID();
 
-            JobVertex v1 = new JobVertex("v1", jid1);
-            JobVertex v2 = new JobVertex("v2", jid2);
+        JobVertex v1 = new JobVertex("v1", jid1);
+        JobVertex v2 = new JobVertex("v2", jid2);
 
-            SchedulerBase scheduler = setupScheduler(v1, 7, v2, 6);
-            Collection<Execution> executions =
-                    new ArrayList<>(
-                            scheduler.getExecutionGraph().getRegisteredExecutions().values());
+        SchedulerBase scheduler = setupScheduler(v1, 7, v2, 6);
+        Collection<Execution> executions =
+                new ArrayList<>(scheduler.getExecutionGraph().getRegisteredExecutions().values());
 
-            for (Execution e : executions) {
-                e.markFailed(null);
-            }
-
-            assertEquals(0, scheduler.getExecutionGraph().getRegisteredExecutions().size());
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail(e.getMessage());
+        for (Execution e : executions) {
+            e.markFailed(null);
         }
+
+        assertThat(scheduler.getExecutionGraph().getRegisteredExecutions()).isEmpty();
     }
 
     @Test
-    public void testRegistrationOfExecutionsFailedExternally() {
-        try {
+    void testRegistrationOfExecutionsFailedExternally() throws Exception {
 
-            final JobVertexID jid1 = new JobVertexID();
-            final JobVertexID jid2 = new JobVertexID();
+        final JobVertexID jid1 = new JobVertexID();
+        final JobVertexID jid2 = new JobVertexID();
 
-            JobVertex v1 = new JobVertex("v1", jid1);
-            JobVertex v2 = new JobVertex("v2", jid2);
+        JobVertex v1 = new JobVertex("v1", jid1);
+        JobVertex v2 = new JobVertex("v2", jid2);
 
-            SchedulerBase scheduler = setupScheduler(v1, 7, v2, 6);
-            Collection<Execution> executions =
-                    new ArrayList<>(
-                            scheduler.getExecutionGraph().getRegisteredExecutions().values());
+        SchedulerBase scheduler = setupScheduler(v1, 7, v2, 6);
+        Collection<Execution> executions =
+                new ArrayList<>(scheduler.getExecutionGraph().getRegisteredExecutions().values());
 
-            for (Execution e : executions) {
-                e.fail(null);
-            }
-
-            assertEquals(0, scheduler.getExecutionGraph().getRegisteredExecutions().size());
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail(e.getMessage());
+        for (Execution e : executions) {
+            e.fail(null);
         }
+
+        assertThat(scheduler.getExecutionGraph().getRegisteredExecutions()).isEmpty();
     }
 
     /**
@@ -331,7 +310,7 @@ public class DefaultExecutionGraphDeploymentTest extends TestLogger {
      * accumulators and metrics for an execution that failed or was canceled.
      */
     @Test
-    public void testAccumulatorsAndMetricsForwarding() throws Exception {
+    void testAccumulatorsAndMetricsForwarding() throws Exception {
         final JobVertexID jid1 = new JobVertexID();
         final JobVertexID jid2 = new JobVertexID();
 
@@ -361,9 +340,9 @@ public class DefaultExecutionGraphDeploymentTest extends TestLogger {
 
         scheduler.updateTaskExecutionState(state);
 
-        assertEquals(ioMetrics, execution1.getIOMetrics());
-        assertNotNull(execution1.getUserAccumulators());
-        assertEquals(4, execution1.getUserAccumulators().get("acc").getLocalValue());
+        assertIOMetricsEqual(execution1.getIOMetrics(), ioMetrics);
+        assertThat(execution1.getUserAccumulators()).isNotNull();
+        assertThat(execution1.getUserAccumulators().get("acc").getLocalValue()).isEqualTo(4);
 
         // verify behavior for failed executions
         Execution execution2 = executions.values().iterator().next();
@@ -384,9 +363,9 @@ public class DefaultExecutionGraphDeploymentTest extends TestLogger {
 
         scheduler.updateTaskExecutionState(state2);
 
-        assertEquals(ioMetrics2, execution2.getIOMetrics());
-        assertNotNull(execution2.getUserAccumulators());
-        assertEquals(8, execution2.getUserAccumulators().get("acc").getLocalValue());
+        assertIOMetricsEqual(execution2.getIOMetrics(), ioMetrics2);
+        assertThat(execution2.getUserAccumulators()).isNotNull();
+        assertThat(execution2.getUserAccumulators().get("acc").getLocalValue()).isEqualTo(8);
     }
 
     /**
@@ -395,7 +374,7 @@ public class DefaultExecutionGraphDeploymentTest extends TestLogger {
      * accumulators and metrics correctly.
      */
     @Test
-    public void testAccumulatorsAndMetricsStorage() throws Exception {
+    void testAccumulatorsAndMetricsStorage() throws Exception {
         final JobVertexID jid1 = new JobVertexID();
         final JobVertexID jid2 = new JobVertexID();
 
@@ -413,41 +392,35 @@ public class DefaultExecutionGraphDeploymentTest extends TestLogger {
         execution1.cancel();
         execution1.completeCancelling(accumulators, ioMetrics, false);
 
-        assertEquals(ioMetrics, execution1.getIOMetrics());
-        assertEquals(accumulators, execution1.getUserAccumulators());
+        assertIOMetricsEqual(execution1.getIOMetrics(), ioMetrics);
+        assertThat(execution1.getUserAccumulators()).isEqualTo(accumulators);
 
         Execution execution2 = executions.values().iterator().next();
         execution2.markFailed(new Throwable(), false, accumulators, ioMetrics, false, true);
 
-        assertEquals(ioMetrics, execution2.getIOMetrics());
-        assertEquals(accumulators, execution2.getUserAccumulators());
+        assertIOMetricsEqual(execution2.getIOMetrics(), ioMetrics);
+        assertThat(execution2.getUserAccumulators()).isEqualTo(accumulators);
     }
 
     @Test
-    public void testRegistrationOfExecutionsCanceled() {
-        try {
+    void testRegistrationOfExecutionsCanceled() throws Exception {
 
-            final JobVertexID jid1 = new JobVertexID();
-            final JobVertexID jid2 = new JobVertexID();
+        final JobVertexID jid1 = new JobVertexID();
+        final JobVertexID jid2 = new JobVertexID();
 
-            JobVertex v1 = new JobVertex("v1", jid1);
-            JobVertex v2 = new JobVertex("v2", jid2);
+        JobVertex v1 = new JobVertex("v1", jid1);
+        JobVertex v2 = new JobVertex("v2", jid2);
 
-            SchedulerBase scheduler = setupScheduler(v1, 19, v2, 37);
-            Collection<Execution> executions =
-                    new ArrayList<>(
-                            scheduler.getExecutionGraph().getRegisteredExecutions().values());
+        SchedulerBase scheduler = setupScheduler(v1, 19, v2, 37);
+        Collection<Execution> executions =
+                new ArrayList<>(scheduler.getExecutionGraph().getRegisteredExecutions().values());
 
-            for (Execution e : executions) {
-                e.cancel();
-                e.completeCancelling();
-            }
-
-            assertEquals(0, scheduler.getExecutionGraph().getRegisteredExecutions().size());
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail(e.getMessage());
+        for (Execution e : executions) {
+            e.cancel();
+            e.completeCancelling();
         }
+
+        assertThat(scheduler.getExecutionGraph().getRegisteredExecutions()).isEmpty();
     }
 
     /**
@@ -456,7 +429,7 @@ public class DefaultExecutionGraphDeploymentTest extends TestLogger {
      * swallow the fail exception when scheduling a consumer task.
      */
     @Test
-    public void testNoResourceAvailableFailure() throws Exception {
+    void testNoResourceAvailableFailure() throws Exception {
         JobVertex v1 = new JobVertex("source");
         JobVertex v2 = new JobVertex("sink");
 
@@ -481,7 +454,7 @@ public class DefaultExecutionGraphDeploymentTest extends TestLogger {
                 new DefaultSchedulerBuilder(
                                 graph,
                                 ComponentMainThreadExecutorServiceAdapter.forMainThread(),
-                                EXECUTOR_RESOURCE.getExecutor())
+                                EXECUTOR_EXTENSION.getExecutor())
                         .setExecutionSlotAllocatorFactory(
                                 SchedulerTestingUtils.newSlotSharingExecutionSlotAllocatorFactory(
                                         TestingPhysicalSlotProvider
@@ -507,7 +480,7 @@ public class DefaultExecutionGraphDeploymentTest extends TestLogger {
         scheduler.updateTaskExecutionState(
                 new TaskExecutionState(attemptID, ExecutionState.FINISHED, null));
 
-        assertEquals(JobStatus.FAILED, eg.getState());
+        assertThat(eg.getState()).isEqualTo(JobStatus.FAILED);
     }
 
     // ------------------------------------------------------------------------
@@ -515,16 +488,16 @@ public class DefaultExecutionGraphDeploymentTest extends TestLogger {
     // ------------------------------------------------------------------------
 
     @Test
-    public void testSettingDefaultMaxNumberOfCheckpointsToRetain() throws Exception {
+    void testSettingDefaultMaxNumberOfCheckpointsToRetain() throws Exception {
         final Configuration jobManagerConfig = new Configuration();
 
         final ExecutionGraph eg = createExecutionGraph(jobManagerConfig);
 
-        assertEquals(
-                CheckpointingOptions.MAX_RETAINED_CHECKPOINTS.defaultValue().intValue(),
-                eg.getCheckpointCoordinator()
-                        .getCheckpointStore()
-                        .getMaxNumberOfRetainedCheckpoints());
+        assertThat(
+                        eg.getCheckpointCoordinator()
+                                .getCheckpointStore()
+                                .getMaxNumberOfRetainedCheckpoints())
+                .isEqualTo(CheckpointingOptions.MAX_RETAINED_CHECKPOINTS.defaultValue().intValue());
     }
 
     private SchedulerBase setupScheduler(JobVertex v1, int dop1, JobVertex v2, int dop2)
@@ -542,7 +515,7 @@ public class DefaultExecutionGraphDeploymentTest extends TestLogger {
                 new DefaultSchedulerBuilder(
                                 JobGraphTestUtils.streamingJobGraph(v1, v2),
                                 ComponentMainThreadExecutorServiceAdapter.forMainThread(),
-                                EXECUTOR_RESOURCE.getExecutor())
+                                EXECUTOR_EXTENSION.getExecutor())
                         .setExecutionSlotAllocatorFactory(
                                 SchedulerTestingUtils.newSlotSharingExecutionSlotAllocatorFactory())
                         .setFutureExecutor(executorService)
@@ -556,39 +529,39 @@ public class DefaultExecutionGraphDeploymentTest extends TestLogger {
         scheduler.startScheduling();
 
         Map<ExecutionAttemptID, Execution> executions = eg.getRegisteredExecutions();
-        assertEquals(dop1 + dop2, executions.size());
+        assertThat(executions).hasSize(dop1 + dop2);
 
         return scheduler;
     }
 
     @Test
-    public void testSettingIllegalMaxNumberOfCheckpointsToRetain() throws Exception {
+    void testSettingIllegalMaxNumberOfCheckpointsToRetain() throws Exception {
 
         final int negativeMaxNumberOfCheckpointsToRetain = -10;
 
         final Configuration jobManagerConfig = new Configuration();
-        jobManagerConfig.setInteger(
+        jobManagerConfig.set(
                 CheckpointingOptions.MAX_RETAINED_CHECKPOINTS,
                 negativeMaxNumberOfCheckpointsToRetain);
 
         final ExecutionGraph eg = createExecutionGraph(jobManagerConfig);
 
-        assertNotEquals(
-                negativeMaxNumberOfCheckpointsToRetain,
-                eg.getCheckpointCoordinator()
-                        .getCheckpointStore()
-                        .getMaxNumberOfRetainedCheckpoints());
+        assertThat(
+                        eg.getCheckpointCoordinator()
+                                .getCheckpointStore()
+                                .getMaxNumberOfRetainedCheckpoints())
+                .isNotEqualTo(negativeMaxNumberOfCheckpointsToRetain);
 
-        assertEquals(
-                CheckpointingOptions.MAX_RETAINED_CHECKPOINTS.defaultValue().intValue(),
-                eg.getCheckpointCoordinator()
-                        .getCheckpointStore()
-                        .getMaxNumberOfRetainedCheckpoints());
+        assertThat(
+                        eg.getCheckpointCoordinator()
+                                .getCheckpointStore()
+                                .getMaxNumberOfRetainedCheckpoints())
+                .isEqualTo(CheckpointingOptions.MAX_RETAINED_CHECKPOINTS.defaultValue().intValue());
     }
 
     /** Tests that the {@link ExecutionGraph} is deployed in topological order. */
     @Test
-    public void testExecutionGraphIsDeployedInTopologicalOrder() throws Exception {
+    void testExecutionGraphIsDeployedInTopologicalOrder() throws Exception {
         final int sourceParallelism = 2;
         final int sinkParallelism = 1;
 
@@ -628,7 +601,7 @@ public class DefaultExecutionGraphDeploymentTest extends TestLogger {
                 new DefaultSchedulerBuilder(
                                 jobGraph,
                                 ComponentMainThreadExecutorServiceAdapter.forMainThread(),
-                                EXECUTOR_RESOURCE.getExecutor())
+                                EXECUTOR_EXTENSION.getExecutor())
                         .setExecutionSlotAllocatorFactory(
                                 SchedulerTestingUtils.newSlotSharingExecutionSlotAllocatorFactory(
                                         physicalSlotProvider))
@@ -670,7 +643,9 @@ public class DefaultExecutionGraphDeploymentTest extends TestLogger {
         }
 
         assertThat(
-                submittedTasks, new ExecutionStageMatcher(Arrays.asList(firstStage, secondStage)));
+                        isDeployedInTopologicalOrder(
+                                submittedTasks, Arrays.asList(firstStage, secondStage)))
+                .isTrue();
     }
 
     private ExecutionGraph createExecutionGraph(Configuration configuration) throws Exception {
@@ -693,41 +668,40 @@ public class DefaultExecutionGraphDeploymentTest extends TestLogger {
                 .setJobGraph(jobGraph)
                 .setJobMasterConfig(configuration)
                 .setBlobWriter(blobWriter)
-                .build(EXECUTOR_RESOURCE.getExecutor());
+                .build(EXECUTOR_EXTENSION.getExecutor());
     }
 
-    private static final class ExecutionStageMatcher
-            extends TypeSafeMatcher<List<ExecutionAttemptID>> {
-        private final List<Collection<ExecutionAttemptID>> executionStages;
+    private static boolean isDeployedInTopologicalOrder(
+            List<ExecutionAttemptID> submissionOrder,
+            List<Collection<ExecutionAttemptID>> executionStages) {
+        final Iterator<ExecutionAttemptID> submissionIterator = submissionOrder.iterator();
 
-        private ExecutionStageMatcher(List<Collection<ExecutionAttemptID>> executionStages) {
-            this.executionStages = executionStages;
-        }
+        for (Collection<ExecutionAttemptID> stage : executionStages) {
+            final Collection<ExecutionAttemptID> currentStage = new ArrayList<>(stage);
 
-        @Override
-        protected boolean matchesSafely(List<ExecutionAttemptID> submissionOrder) {
-            final Iterator<ExecutionAttemptID> submissionIterator = submissionOrder.iterator();
-
-            for (Collection<ExecutionAttemptID> stage : executionStages) {
-                final Collection<ExecutionAttemptID> currentStage = new ArrayList<>(stage);
-
-                while (!currentStage.isEmpty() && submissionIterator.hasNext()) {
-                    if (!currentStage.remove(submissionIterator.next())) {
-                        return false;
-                    }
-                }
-
-                if (!currentStage.isEmpty()) {
+            while (!currentStage.isEmpty() && submissionIterator.hasNext()) {
+                if (!currentStage.remove(submissionIterator.next())) {
                     return false;
                 }
             }
 
-            return !submissionIterator.hasNext();
+            if (!currentStage.isEmpty()) {
+                return false;
+            }
         }
 
-        @Override
-        public void describeTo(Description description) {
-            description.appendValueList("<[", ", ", "]>", executionStages);
-        }
+        return !submissionIterator.hasNext();
+    }
+
+    private void assertIOMetricsEqual(IOMetrics ioMetrics1, IOMetrics ioMetrics2) {
+        assertThat(ioMetrics1.numBytesIn).isEqualTo(ioMetrics2.numBytesIn);
+        assertThat(ioMetrics1.numBytesOut).isEqualTo(ioMetrics2.numBytesOut);
+        assertThat(ioMetrics1.numRecordsIn).isEqualTo(ioMetrics2.numRecordsIn);
+        assertThat(ioMetrics1.numRecordsOut).isEqualTo(ioMetrics2.numRecordsOut);
+        assertThat(ioMetrics1.accumulateIdleTime).isEqualTo(ioMetrics2.accumulateIdleTime);
+        assertThat(ioMetrics1.accumulateBusyTime).isEqualTo(ioMetrics2.accumulateBusyTime);
+        assertThat(ioMetrics1.accumulateBackPressuredTime)
+                .isEqualTo(ioMetrics2.accumulateBackPressuredTime);
+        assertThat(ioMetrics1.resultPartitionBytes).isEqualTo(ioMetrics2.resultPartitionBytes);
     }
 }

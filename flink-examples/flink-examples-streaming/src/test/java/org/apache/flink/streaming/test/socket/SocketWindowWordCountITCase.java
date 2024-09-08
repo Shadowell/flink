@@ -20,7 +20,7 @@ package org.apache.flink.streaming.test.socket;
 import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.streaming.examples.socket.SocketWindowWordCount;
 import org.apache.flink.test.testdata.WordCountData;
-import org.apache.flink.test.util.AbstractTestBase;
+import org.apache.flink.test.util.AbstractTestBaseJUnit4;
 import org.apache.flink.util.NetUtils;
 
 import org.junit.Test;
@@ -37,7 +37,7 @@ import java.net.Socket;
 import static org.junit.Assert.fail;
 
 /** Tests for {@link SocketWindowWordCount}. */
-public class SocketWindowWordCountITCase extends AbstractTestBase {
+public class SocketWindowWordCountITCase extends AbstractTestBaseJUnit4 {
 
     @Test
     public void testJavaProgram() throws Exception {
@@ -62,48 +62,6 @@ public class SocketWindowWordCountITCase extends AbstractTestBase {
                 final int serverPort = server.getLocalPort();
 
                 SocketWindowWordCount.main(new String[] {"--port", String.valueOf(serverPort)});
-
-                if (errorMessages.size() != 0) {
-                    fail(
-                            "Found error message: "
-                                    + new String(
-                                            errorMessages.toByteArray(),
-                                            ConfigConstants.DEFAULT_CHARSET));
-                }
-
-                serverThread.join();
-                serverThread.checkError();
-            }
-        } finally {
-            System.setOut(originalSysout);
-            System.setErr(originalSyserr);
-        }
-    }
-
-    @Test
-    public void testScalaProgram() throws Exception {
-        InetAddress localhost = InetAddress.getByName("localhost");
-
-        // suppress sysout messages from this example
-        final PrintStream originalSysout = System.out;
-        final PrintStream originalSyserr = System.err;
-
-        final ByteArrayOutputStream errorMessages = new ByteArrayOutputStream();
-
-        System.setOut(new PrintStream(new NullStream()));
-        System.setErr(new PrintStream(errorMessages));
-
-        try {
-            try (ServerSocket server = new ServerSocket(0, 10, localhost)) {
-
-                final ServerThread serverThread = new ServerThread(server);
-                serverThread.setDaemon(true);
-                serverThread.start();
-
-                final int serverPort = server.getLocalPort();
-
-                org.apache.flink.streaming.scala.examples.socket.SocketWindowWordCount.main(
-                        new String[] {"--port", String.valueOf(serverPort)});
 
                 if (errorMessages.size() != 0) {
                     fail(

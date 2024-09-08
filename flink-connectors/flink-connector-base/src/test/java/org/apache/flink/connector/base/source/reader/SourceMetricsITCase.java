@@ -34,11 +34,12 @@ import org.apache.flink.metrics.Metric;
 import org.apache.flink.metrics.groups.OperatorMetricGroup;
 import org.apache.flink.runtime.metrics.MetricNames;
 import org.apache.flink.runtime.metrics.groups.InternalSourceReaderMetricGroup;
+import org.apache.flink.runtime.metrics.groups.TaskMetricGroup;
 import org.apache.flink.runtime.testutils.InMemoryReporter;
 import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.sink.DiscardingSink;
+import org.apache.flink.streaming.api.functions.sink.v2.DiscardingSink;
 import org.apache.flink.test.util.MiniClusterWithClientResource;
 import org.apache.flink.testutils.junit.SharedObjects;
 import org.apache.flink.testutils.junit.SharedReference;
@@ -123,7 +124,7 @@ public class SourceMetricsITCase extends TestLogger {
                                     }
                                     return i;
                                 });
-        stream.addSink(new DiscardingSink<>());
+        stream.sinkTo(new DiscardingSink<>());
         JobClient jobClient = env.executeAsync();
         final JobID jobId = jobClient.getJobID();
 
@@ -182,6 +183,10 @@ public class SourceMetricsITCase extends TestLogger {
                     .isEqualTo(processedRecordsPerSubtask);
             assertThatCounter(group.getIOMetricGroup().getNumBytesInCounter())
                     .isEqualTo(processedRecordsPerSubtask * MockRecordEmitter.RECORD_SIZE_IN_BYTES);
+            assertThatCounter(group.getIOMetricGroup().getNumRecordsOutCounter())
+                    .isEqualTo(processedRecordsPerSubtask);
+            assertThatCounter(group.getIOMetricGroup().getNumBytesOutCounter())
+                    .isEqualTo(processedRecordsPerSubtask * MockRecordEmitter.RECORD_SIZE_IN_BYTES);
             // MockRecordEmitter is just incrementing errors every even record
             assertThatCounter(metrics.get(MetricNames.NUM_RECORDS_IN_ERRORS))
                     .isEqualTo(processedRecordsPerSubtask / 2);
@@ -219,6 +224,26 @@ public class SourceMetricsITCase extends TestLogger {
             assertThatGauge(metrics.get(MetricNames.SOURCE_IDLE_TIME)).isEqualTo(0L);
         }
         assertThat(subtaskWithMetrics).isEqualTo(numSplits);
+
+        // Test operator I/O metrics are reused by task metrics
+        List<TaskMetricGroup> taskMetricGroups =
+                reporter.findTaskMetricGroups(jobId, "MetricTestingSource");
+        assertThat(taskMetricGroups).hasSize(parallelism);
+
+        int subtaskWithTaskMetrics = 0;
+        for (TaskMetricGroup taskMetricGroup : taskMetricGroups) {
+            // there are only 2 splits assigned; so two groups will not update metrics
+            if (taskMetricGroup.getIOMetricGroup().getNumRecordsInCounter().getCount() == 0) {
+                continue;
+            }
+
+            subtaskWithTaskMetrics++;
+            assertThatCounter(taskMetricGroup.getIOMetricGroup().getNumRecordsInCounter())
+                    .isEqualTo(processedRecordsPerSubtask);
+            assertThatCounter(taskMetricGroup.getIOMetricGroup().getNumBytesInCounter())
+                    .isEqualTo(processedRecordsPerSubtask * MockRecordEmitter.RECORD_SIZE_IN_BYTES);
+        }
+        assertThat(subtaskWithTaskMetrics).isEqualTo(numSplits);
     }
 
     private static class LaggingTimestampAssigner

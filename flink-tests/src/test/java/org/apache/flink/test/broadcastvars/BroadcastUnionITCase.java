@@ -18,19 +18,19 @@
 
 package org.apache.flink.test.broadcastvars;
 
+import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.functions.ReduceFunction;
 import org.apache.flink.api.common.functions.RichMapFunction;
 import org.apache.flink.api.java.DataSet;
 import org.apache.flink.api.java.ExecutionEnvironment;
-import org.apache.flink.configuration.Configuration;
-import org.apache.flink.test.util.JavaProgramTestBase;
+import org.apache.flink.test.util.JavaProgramTestBaseJUnit4;
 
 import org.junit.Assert;
 
 import java.util.List;
 
 /** Test broadcast input after union. */
-public class BroadcastUnionITCase extends JavaProgramTestBase {
+public class BroadcastUnionITCase extends JavaProgramTestBaseJUnit4 {
     private static final String BC_NAME = "bc";
 
     @Override
@@ -55,7 +55,7 @@ public class BroadcastUnionITCase extends JavaProgramTestBase {
         private List<Long> values;
 
         @Override
-        public void open(Configuration config) {
+        public void open(OpenContext openContext) {
             values = getRuntimeContext().getBroadcastVariable(BC_NAME);
         }
 

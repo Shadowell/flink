@@ -21,7 +21,6 @@ package org.apache.flink.api.scala.typeutils;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.common.typeutils.CompositeTypeSerializerSnapshot;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.api.common.typeutils.TypeSerializerConfigSnapshot;
 import org.apache.flink.api.common.typeutils.TypeSerializerSnapshot;
 import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataOutputView;
@@ -44,24 +43,7 @@ public final class ScalaCaseClassSerializerSnapshot<T extends scala.Product>
 
     /** Used via reflection. */
     @SuppressWarnings("unused")
-    public ScalaCaseClassSerializerSnapshot() {
-        super(ScalaCaseClassSerializer.class);
-    }
-
-    /**
-     * Used for delegating schema compatibility checks from serializers that were previously using
-     * {@code TupleSerializerConfigSnapshot}. Type is the {@code outerSnapshot} information, that is
-     * required to perform {@link #internalResolveSchemaCompatibility(TypeSerializer,
-     * TypeSerializerSnapshot[])}.
-     *
-     * <p>This is used in {@link
-     * ScalaCaseClassSerializer#resolveSchemaCompatibilityViaRedirectingToNewSnapshotClass(TypeSerializerConfigSnapshot)}.
-     */
-    @Internal
-    ScalaCaseClassSerializerSnapshot(Class<T> type) {
-        super(ScalaCaseClassSerializer.class);
-        this.type = checkNotNull(type, "type can not be NULL");
-    }
+    public ScalaCaseClassSerializerSnapshot() {}
 
     /** Used for the snapshot path. */
     public ScalaCaseClassSerializerSnapshot(ScalaCaseClassSerializer<T> serializerInstance) {
@@ -102,8 +84,14 @@ public final class ScalaCaseClassSerializerSnapshot<T extends scala.Product>
 
     @Override
     protected CompositeTypeSerializerSnapshot.OuterSchemaCompatibility
-            resolveOuterSchemaCompatibility(ScalaCaseClassSerializer<T> newSerializer) {
-        return (Objects.equals(type, newSerializer.getTupleClass()))
+            resolveOuterSchemaCompatibility(TypeSerializerSnapshot<T> oldSerializerSnapshot) {
+        if (!(oldSerializerSnapshot instanceof ScalaCaseClassSerializerSnapshot)) {
+            return OuterSchemaCompatibility.INCOMPATIBLE;
+        }
+
+        ScalaCaseClassSerializerSnapshot<T> oldSnapshot =
+                (ScalaCaseClassSerializerSnapshot<T>) oldSerializerSnapshot;
+        return (Objects.equals(type, oldSnapshot.type))
                 ? OuterSchemaCompatibility.COMPATIBLE_AS_IS
                 : OuterSchemaCompatibility.INCOMPATIBLE;
     }

@@ -18,7 +18,7 @@
 
 import { HttpClient } from '@angular/common/http';
 import { Injectable } from '@angular/core';
-import { EMPTY, forkJoin, Observable } from 'rxjs';
+import { EMPTY, forkJoin, mergeMap, Observable } from 'rxjs';
 import { catchError, map } from 'rxjs/operators';
 
 import {
@@ -44,6 +44,7 @@ import {
   VerticesLink,
   JobVertexSubTaskDetail
 } from '@flink-runtime-web/interfaces';
+import { JobResourceRequirements } from '@flink-runtime-web/interfaces/job-resource-requirements';
 
 import { ConfigService } from './config.service';
 
@@ -122,6 +123,17 @@ export class JobService {
     );
   }
 
+  public loadOperatorFlameGraphForSingleSubtask(
+    jobId: string,
+    vertexId: string,
+    type: string,
+    subtaskIndex: string
+  ): Observable<JobFlameGraph> {
+    return this.httpClient.get<JobFlameGraph>(
+      `${this.configService.BASE_URL}/jobs/${jobId}/vertices/${vertexId}/flamegraph?type=${type}&subtaskindex=${subtaskIndex}`
+    );
+  }
+
   public loadSubTasks(jobId: string, vertexId: string): Observable<JobVertexSubTaskDetail> {
     return this.httpClient.get<JobVertexSubTaskDetail>(
       `${this.configService.BASE_URL}/jobs/${jobId}/vertices/${vertexId}`
@@ -164,11 +176,40 @@ export class JobService {
     );
   }
 
+  public loadJobResourceRequirements(jobId: string): Observable<JobResourceRequirements> {
+    return this.httpClient.get<JobResourceRequirements>(
+      `${this.configService.BASE_URL}/jobs/${jobId}/resource-requirements`
+    );
+  }
+
+  public changeDesiredParallelism(jobId: string, desiredParallelism: Map<string, number>): Observable<void> {
+    return this.loadJobResourceRequirements(jobId)
+      .pipe(
+        map(jobResourceRequirements => {
+          for (const vertexId in jobResourceRequirements) {
+            const newUpperBound = desiredParallelism.get(vertexId);
+            if (newUpperBound != undefined) {
+              jobResourceRequirements[vertexId].parallelism.upperBound = newUpperBound;
+            }
+          }
+          return jobResourceRequirements;
+        })
+      )
+      .pipe(
+        mergeMap(jobResourceRequirements => {
+          return this.httpClient.put<void>(
+            `${this.configService.BASE_URL}/jobs/${jobId}/resource-requirements`,
+            jobResourceRequirements
+          );
+        })
+      );
+  }
+
   /** nodes to nodes links in order to generate graph */
   private convertJob(job: JobDetail): JobDetailCorrect {
     const links: VerticesLink[] = [];
     let nodes: NodesItemCorrect[] = [];
-    if (job.plan?.nodes.length) {
+    if (job.plan?.nodes?.length) {
       nodes = job.plan.nodes.map(node => {
         let detail;
         if (job.vertices && job.vertices.length) {

@@ -19,6 +19,7 @@
 package org.apache.flink.table.planner.hint;
 
 import java.util.List;
+import java.util.Locale;
 
 /** Currently available join strategies and corresponding join hint names. */
 public enum JoinStrategy {
@@ -55,13 +56,9 @@ public enum JoinStrategy {
         this.joinHintName = joinHintName;
     }
 
-    // ~ option name for join hint
-    public static final String LEFT_INPUT = "LEFT";
-    public static final String RIGHT_INPUT = "RIGHT";
-
     public static boolean isJoinStrategy(String hintName) {
         try {
-            JoinStrategy.valueOf(hintName);
+            JoinStrategy.valueOf(hintName.toUpperCase(Locale.ROOT));
             return true;
         } catch (Exception e) {
             return false;
@@ -91,6 +88,8 @@ public enum JoinStrategy {
     }
 
     public static boolean isLookupHint(String hintName) {
-        return isJoinStrategy(hintName) && JoinStrategy.valueOf(hintName) == LOOKUP;
+        String formalizedHintName = hintName.toUpperCase(Locale.ROOT);
+        return isJoinStrategy(formalizedHintName)
+                && JoinStrategy.valueOf(formalizedHintName) == LOOKUP;
     }
 }

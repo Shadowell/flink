@@ -18,8 +18,8 @@
 
 package org.apache.flink.table.runtime.operators.join;
 
+import org.apache.flink.api.common.functions.DefaultOpenContext;
 import org.apache.flink.api.common.functions.RuntimeContext;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.metrics.Gauge;
 import org.apache.flink.metrics.groups.OperatorMetricGroup;
 import org.apache.flink.runtime.io.disk.iomanager.IOManager;
@@ -59,6 +59,10 @@ public class SortMergeJoinFunction implements Serializable {
     private final FlinkJoinType type;
     private final boolean leftIsSmaller;
     private final boolean[] filterNulls;
+    private final int maxNumFileHandles;
+    private final boolean compressionEnabled;
+    private final int compressionBlockSize;
+    private final boolean asyncMergeEnabled;
 
     // generated code to cook
     private GeneratedJoinCondition condFuncCode;
@@ -93,6 +97,10 @@ public class SortMergeJoinFunction implements Serializable {
             double externalBufferMemRatio,
             FlinkJoinType type,
             boolean leftIsSmaller,
+            int maxNumFileHandles,
+            boolean compressionEnabled,
+            int compressionBlockSize,
+            boolean asyncMergeEnabled,
             GeneratedJoinCondition condFuncCode,
             GeneratedProjection projectionCode1,
             GeneratedProjection projectionCode2,
@@ -105,6 +113,10 @@ public class SortMergeJoinFunction implements Serializable {
         this.externalBufferMemRatio = externalBufferMemRatio;
         this.type = type;
         this.leftIsSmaller = leftIsSmaller;
+        this.maxNumFileHandles = maxNumFileHandles;
+        this.compressionEnabled = compressionEnabled;
+        this.compressionBlockSize = compressionBlockSize;
+        this.asyncMergeEnabled = asyncMergeEnabled;
         this.condFuncCode = condFuncCode;
         this.projectionCode1 = projectionCode1;
         this.projectionCode2 = projectionCode2;
@@ -159,7 +171,6 @@ public class SortMergeJoinFunction implements Serializable {
                             + ", please increase manage memory of task manager.");
         }
 
-        Configuration conf = taskContainer.getJobConfiguration();
         // sorter1
         this.sorter1 =
                 new BinaryExternalSorter(
@@ -171,7 +182,10 @@ public class SortMergeJoinFunction implements Serializable {
                         serializer1,
                         computer1.newInstance(cl),
                         comparator1.newInstance(cl),
-                        conf);
+                        maxNumFileHandles,
+                        compressionEnabled,
+                        compressionBlockSize,
+                        asyncMergeEnabled);
         this.sorter1.startThreads();
 
         // sorter2
@@ -185,13 +199,16 @@ public class SortMergeJoinFunction implements Serializable {
                         serializer2,
                         computer2.newInstance(cl),
                         comparator2.newInstance(cl),
-                        conf);
+                        maxNumFileHandles,
+                        compressionEnabled,
+                        compressionBlockSize,
+                        asyncMergeEnabled);
         this.sorter2.startThreads();
 
         keyComparator = genKeyComparator.newInstance(cl);
         this.condFunc = condFuncCode.newInstance(cl);
         condFunc.setRuntimeContext(runtimeContext);
-        condFunc.open(new Configuration());
+        condFunc.open(DefaultOpenContext.INSTANCE);
 
         projection1 = projectionCode1.newInstance(cl);
         projection2 = projectionCode2.newInstance(cl);

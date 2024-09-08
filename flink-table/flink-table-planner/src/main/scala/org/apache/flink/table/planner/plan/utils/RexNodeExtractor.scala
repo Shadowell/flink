@@ -34,20 +34,25 @@ import org.apache.flink.table.runtime.types.LogicalTypeDataTypeConverter.fromLog
 import org.apache.flink.table.types.DataType
 import org.apache.flink.table.types.logical.LogicalTypeRoot._
 import org.apache.flink.table.types.logical.YearMonthIntervalType
+import org.apache.flink.table.types.utils.TypeConversions
 import org.apache.flink.util.Preconditions
 
+import org.apache.calcite.avatica.util.ByteString
 import org.apache.calcite.plan.RelOptUtil
+import org.apache.calcite.rel.`type`.RelDataType
 import org.apache.calcite.rex._
 import org.apache.calcite.sql.{SqlFunction, SqlKind, SqlPostfixOperator}
 import org.apache.calcite.sql.fun.{SqlStdOperatorTable, SqlTrimFunction}
 import org.apache.calcite.util.{TimestampString, Util}
 
+import java.time.{ZoneId, ZoneOffset}
 import java.util
-import java.util.{List => JList, TimeZone}
+import java.util.{Collections, List => JList}
 
+import scala.collection.{mutable, JavaConverters}
 import scala.collection.JavaConversions._
 import scala.collection.JavaConverters._
-import scala.collection.mutable
+import scala.collection.mutable.ArrayBuffer
 import scala.util.{Failure, Success, Try}
 
 object RexNodeExtractor extends Logging {
@@ -106,15 +111,10 @@ object RexNodeExtractor extends Logging {
       inputFieldNames: JList[String],
       rexBuilder: RexBuilder,
       functionCatalog: FunctionCatalog,
-      catalogManager: CatalogManager,
-      timeZone: TimeZone): (Array[Expression], Array[RexNode]) = {
+      catalogManager: CatalogManager): (Array[Expression], Array[RexNode]) = {
     val inputNames = inputFieldNames.asScala.toArray
-    val converter = new RexNodeToExpressionConverter(
-      rexBuilder,
-      inputNames,
-      functionCatalog,
-      catalogManager,
-      timeZone)
+    val converter =
+      new RexNodeToExpressionConverter(rexBuilder, inputNames, functionCatalog, catalogManager)
     val (convertibleRexNodes, unconvertedRexNodes) =
       extractConjunctiveConditions(expr, maxCnfNodeCount, rexBuilder, converter)
     val convertedExpressions = convertibleRexNodes.map(_.accept(converter).get)
@@ -395,8 +395,16 @@ class RexNodeToExpressionConverter(
     inputNames: Array[String],
     functionCatalog: FunctionCatalog,
     catalogManager: CatalogManager,
-    timeZone: TimeZone)
+    relDataType: Option[RelDataType] = None)
   extends RexVisitor[Option[ResolvedExpression]] {
+
+  def this(
+      rexBuilder: RexBuilder,
+      inputNames: Array[String],
+      functionCatalog: FunctionCatalog,
+      catalogManager: CatalogManager) = {
+    this(rexBuilder, inputNames, functionCatalog, catalogManager, None)
+  }
 
   override def visitInputRef(inputRef: RexInputRef): Option[ResolvedExpression] = {
     Preconditions.checkArgument(inputRef.getIndex < inputNames.length)
@@ -441,7 +449,7 @@ class RexNodeToExpressionConverter(
 
       case TIMESTAMP_WITH_LOCAL_TIME_ZONE =>
         val v = literal.getValueAs(classOf[TimestampString])
-        toLocalDateTime(v).atZone(timeZone.toZoneId).toInstant
+        toLocalDateTime(v).atZone(ZoneId.of(ZoneOffset.UTC.getId)).toInstant
 
       case INTERVAL_DAY_TIME =>
         val v = literal.getValueAs(classOf[java.lang.Long])
@@ -488,6 +496,9 @@ class RexNodeToExpressionConverter(
       case DECIMAL =>
         // convert to BigDecimal
         literal.getValueAs(classOf[java.math.BigDecimal])
+
+      case BINARY | VARBINARY =>
+        literal.getValueAs(classOf[Array[Byte]])
 
       case _ =>
         literal.getValue
@@ -538,8 +549,35 @@ class RexNodeToExpressionConverter(
     }
   }
 
-  override def visitFieldAccess(fieldAccess: RexFieldAccess): Option[ResolvedExpression] = None
+  override def visitFieldAccess(fieldAccess: RexFieldAccess): Option[ResolvedExpression] = {
+    fieldAccess.getReferenceExpr match {
+      // push down on nested field inside a composite type like map or array is not supported
+      case _: RexCall => return None
+      case _ => // do nothing
+    }
 
+    relDataType match {
+      case Some(dataType) =>
+        val schema = NestedProjectionUtil.build(Collections.singletonList(fieldAccess), dataType)
+        val fieldIndices = NestedProjectionUtil.convertToIndexArray(schema)
+        var (topLevelColumnName, nestedColumn) = schema.columns.head
+        val fieldNames = new ArrayBuffer[String]()
+
+        while (!nestedColumn.isLeaf) {
+          fieldNames.add(topLevelColumnName)
+          topLevelColumnName = nestedColumn.children.head._1
+          nestedColumn = nestedColumn.children.head._2
+        }
+        fieldNames.add(topLevelColumnName)
+
+        Some(
+          new NestedFieldReferenceExpression(
+            fieldNames.toArray,
+            fieldIndices(0),
+            TypeConversions.fromLogicalToDataType(
+              FlinkTypeFactory.toLogicalType(fieldAccess.getType))))
+    }
+  }
   override def visitCorrelVariable(correlVariable: RexCorrelVariable): Option[ResolvedExpression] =
     None
 

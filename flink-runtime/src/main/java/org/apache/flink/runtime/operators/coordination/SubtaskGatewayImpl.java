@@ -37,6 +37,8 @@ import java.util.TreeSet;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 
+import static org.apache.flink.runtime.operators.coordination.OperatorCoordinator.BATCH_CHECKPOINT_ID;
+
 /**
  * Implementation of the {@link OperatorCoordinator.SubtaskGateway} interface that access to
  * subtasks for status and event sending via {@link SubtaskAccess}.
@@ -45,9 +47,7 @@ import java.util.concurrent.CompletableFuture;
  * releasing them later. If the instance is closed for a specific checkpoint, events arrived after
  * that would be blocked temporarily, and released after the checkpoint finishes. If an event is
  * blocked & buffered when there are multiple ongoing checkpoints, the event would be released after
- * all these checkpoints finish. It is used for "alignment" of operator event streams with
- * checkpoint barrier injection, similar to how the input channels are aligned during a common
- * checkpoint.
+ * all these checkpoints finish.
  *
  * <p>The methods on the critical communication path, including closing/reopening the gateway and
  * sending the operator events, are required to be used in a single-threaded context specified by
@@ -187,7 +187,7 @@ class SubtaskGatewayImpl implements OperatorCoordinator.SubtaskGateway {
         if (checkpointId > latestAttemptedCheckpointId) {
             currentMarkedCheckpointIds.add(checkpointId);
             latestAttemptedCheckpointId = checkpointId;
-        } else {
+        } else if (checkpointId != BATCH_CHECKPOINT_ID) {
             throw new IllegalStateException(
                     String.format(
                             "Regressing checkpoint IDs. Previous checkpointId = %d, new checkpointId = %d",

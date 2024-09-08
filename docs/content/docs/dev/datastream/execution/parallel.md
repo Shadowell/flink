@@ -222,7 +222,7 @@ Still not supported in Python API.
 ### System Level
 
 A system-wide default parallelism for all execution environments can be defined by setting the
-`parallelism.default` property in `./conf/flink-conf.yaml`. See the
+`parallelism.default` property in [Flink configuration file]({{< ref "docs/deployment/config#flink-configuration-file" >}}). See the
 [Configuration]({{< ref "docs/deployment/config" >}}) documentation for details.
 
 ## Setting the Maximum Parallelism
@@ -239,6 +239,8 @@ Setting the maximum parallelism to a very large
 value can be detrimental to performance because some state backends have to keep internal data
 structures that scale with the number of key-groups (which are the internal implementation mechanism for
 rescalable state).
+
+Changing the maximum parallelism explicitly when recovery from original job will lead to state incompatibility.
 {{< /hint >}}
 
 {{< top >}}

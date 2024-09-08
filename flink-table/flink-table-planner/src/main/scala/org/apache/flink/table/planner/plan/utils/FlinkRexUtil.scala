@@ -21,14 +21,20 @@ import org.apache.flink.annotation.Experimental
 import org.apache.flink.configuration.ConfigOption
 import org.apache.flink.configuration.ConfigOptions.key
 import org.apache.flink.table.planner.functions.sql.SqlTryCastFunction
+import org.apache.flink.table.planner.plan.nodes.calcite.{LegacySink, Sink}
+import org.apache.flink.table.planner.plan.optimize.RelNodeBlock
 import org.apache.flink.table.planner.plan.utils.ExpressionDetail.ExpressionDetail
 import org.apache.flink.table.planner.plan.utils.ExpressionFormat.ExpressionFormat
+import org.apache.flink.table.planner.utils.ShortcutUtils
 
 import com.google.common.base.Function
 import com.google.common.collect.{ImmutableList, Lists}
 import org.apache.calcite.avatica.util.ByteString
 import org.apache.calcite.plan.{RelOptPredicateList, RelOptUtil}
 import org.apache.calcite.rel.`type`.RelDataType
+import org.apache.calcite.rel.RelNode
+import org.apache.calcite.rel.core.{Calc, Filter, Project, TableScan, Values}
+import org.apache.calcite.rel.logical.LogicalUnion
 import org.apache.calcite.rex._
 import org.apache.calcite.sql.`type`.SqlTypeName
 import org.apache.calcite.sql.{SqlAsOperator, SqlKind, SqlOperator}
@@ -48,7 +54,8 @@ import scala.collection.mutable
 /** Utility methods concerning [[RexNode]]. */
 object FlinkRexUtil {
 
-  // It is a experimental config, will may be removed later.
+  /** This configuration will be removed in Flink 2.0. */
+  @Deprecated
   @Experimental
   val TABLE_OPTIMIZER_CNF_NODES_LIMIT: ConfigOption[Integer] =
     key("table.optimizer.cnf-nodes-limit")
@@ -86,6 +93,32 @@ object FlinkRexUtil {
       maxCnfNodeCount
     }
     new CnfHelper(rexBuilder, maxCnfNodeCnt).toCnf(rex)
+  }
+
+  /**
+   * Returns true if a input blocks only consist of [[Filter]], [[Project]], [[TableScan]],
+   * [[Calc]], [[Values]], and [[Sink]] nodes.
+   */
+  def shouldSkipMiniBatch(blocks: Seq[RelNodeBlock]): Boolean = {
+
+    val noMiniBatchRequired = {
+      (node: RelNode) =>
+        node match {
+          case _: Filter | _: Project | _: TableScan | _: Calc | _: Values | _: Sink |
+              _: LegacySink =>
+            true
+          case unionNode: LogicalUnion => unionNode.all
+          case _ => false
+        }
+    }
+
+    def nodeTraverser(node: RelNode): Boolean = {
+      noMiniBatchRequired(node) && node.getInputs
+        .map(n => nodeTraverser(n))
+        .forall(r => r)
+    }
+
+    blocks.map(b => nodeTraverser(b.outputNode)).forall(r => r)
   }
 
   /** Returns true if the RexNode contains any node in the given expected [[RexInputRef]] nodes. */
@@ -213,8 +246,8 @@ object FlinkRexUtil {
     val binaryComparisonExprReduced =
       sameExprMerged.accept(new BinaryComparisonExprReducer(rexBuilder))
 
-    val rexSimplify = new RexSimplify(rexBuilder, RelOptPredicateList.EMPTY, true, executor)
-    rexSimplify.simplify(binaryComparisonExprReduced)
+    val rexSimplify = new RexSimplify(rexBuilder, RelOptPredicateList.EMPTY, executor)
+    rexSimplify.simplifyUnknownAs(binaryComparisonExprReduced, RexUnknownAs.falseIf(true))
   }
 
   val BINARY_COMPARISON: util.Set[SqlKind] = util.EnumSet.of(
@@ -310,10 +343,11 @@ object FlinkRexUtil {
 
   /**
    * Find all inputRefs.
+   *
    * @return
    *   InputRef HashSet.
    */
-  private[flink] def findAllInputRefs(node: RexNode): util.HashSet[RexInputRef] = {
+  def findAllInputRefs(node: RexNode): util.HashSet[RexInputRef] = {
     val set = new util.HashSet[RexInputRef]
     node.accept(new RexVisitorImpl[Void](true) {
       override def visitInputRef(inputRef: RexInputRef): Void = {
@@ -588,23 +622,13 @@ object FlinkRexUtil {
   }
 
   /**
-   * Returns whether a given expression is deterministic in streaming scenario, differs from
-   * calcite's [[RexUtil]], it considers both non-deterministic and dynamic functions.
+   * Returns the non-deterministic call name for a given expression. Use java [[Optional]] for
+   * scala-free goal.
    */
-  def isDeterministicInStreaming(e: RexNode): Boolean = {
-    !getNonDeterministicCallNameInStreaming(e).isPresent
-  }
-
-  /**
-   * Returns the non-deterministic call name for a given expression in streaming scenario, differs
-   * from calcite's [[RexUtil]], it considers both non-deterministic and dynamic functions. Use java
-   * [[Optional]] for scala-free goal.
-   */
-  def getNonDeterministicCallNameInStreaming(e: RexNode): Optional[String] = try {
+  def getNonDeterministicCallName(e: RexNode): Optional[String] = try {
     val visitor = new RexVisitorImpl[Void](true) {
       override def visitCall(call: RexCall): Void = {
-        // dynamic function call is also non-deterministic to streaming
-        if (!call.getOperator.isDeterministic || call.getOperator.isDynamicFunction) {
+        if (!call.getOperator.isDeterministic) {
           throw new Util.FoundOne(call.getOperator.getName)
         }
         super.visitCall(call)
@@ -619,20 +643,45 @@ object FlinkRexUtil {
   }
 
   /**
-   * Returns whether a given [[RexProgram]] is deterministic in streaming scenario, differs from
-   * calcite's [[RexUtil]], it considers both non-deterministic and dynamic functions.
+   * Returns whether a given [[RexProgram]] is deterministic.
+   *
    * @return
-   *   true if any expression of the program is not deterministic in streaming
+   *   false if any expression of the program is not deterministic
    */
-  def isDeterministicInStreaming(rexProgram: RexProgram): Boolean = try {
+  def isDeterministic(rexProgram: RexProgram): Boolean = try {
     if (null != rexProgram.getCondition) {
       val rexCondi = rexProgram.expandLocalRef(rexProgram.getCondition)
-      if (!isDeterministicInStreaming(rexCondi)) {
+      if (!RexUtil.isDeterministic(rexCondi)) {
         return false
       }
     }
     val projects = rexProgram.getProjectList.map(rexProgram.expandLocalRef)
-    projects.forall(isDeterministicInStreaming)
+    projects.forall(RexUtil.isDeterministic)
+  }
+
+  /**
+   * Return convertible rex nodes and unconverted rex nodes extracted from the filter expression.
+   */
+  def extractPredicates(
+      inputNames: Array[String],
+      filterExpression: RexNode,
+      rel: RelNode,
+      rexBuilder: RexBuilder): (Array[RexNode], Array[RexNode]) = {
+    val context = ShortcutUtils.unwrapContext(rel)
+    val maxCnfNodeCount = FlinkRelOptUtil.getMaxCnfNodeCount(rel);
+    val converter =
+      new RexNodeToExpressionConverter(
+        rexBuilder,
+        inputNames,
+        context.getFunctionCatalog,
+        context.getCatalogManager,
+        Some(rel.getRowType));
+
+    RexNodeExtractor.extractConjunctiveConditions(
+      filterExpression,
+      maxCnfNodeCount,
+      rexBuilder,
+      converter);
   }
 }
 

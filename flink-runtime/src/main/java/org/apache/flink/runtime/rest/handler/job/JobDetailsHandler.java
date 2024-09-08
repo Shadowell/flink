@@ -34,6 +34,7 @@ import org.apache.flink.runtime.rest.handler.util.MutableIOMetrics;
 import org.apache.flink.runtime.rest.messages.EmptyRequestBody;
 import org.apache.flink.runtime.rest.messages.JobIDPathParameter;
 import org.apache.flink.runtime.rest.messages.JobMessageParameters;
+import org.apache.flink.runtime.rest.messages.JobPlanInfo;
 import org.apache.flink.runtime.rest.messages.MessageHeaders;
 import org.apache.flink.runtime.rest.messages.ResponseBody;
 import org.apache.flink.runtime.rest.messages.job.JobDetailsInfo;
@@ -42,6 +43,7 @@ import org.apache.flink.runtime.webmonitor.RestfulGateway;
 import org.apache.flink.runtime.webmonitor.history.ArchivedJson;
 import org.apache.flink.runtime.webmonitor.history.OnlyExecutionGraphJsonArchivist;
 import org.apache.flink.runtime.webmonitor.retriever.GatewayRetriever;
+import org.apache.flink.util.CollectionUtil;
 import org.apache.flink.util.Preconditions;
 
 import javax.annotation.Nullable;
@@ -50,7 +52,6 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.Executor;
 
@@ -108,7 +109,8 @@ public class JobDetailsHandler
                         : -1L;
         final long duration = (endTime > 0L ? endTime : now) - startTime;
 
-        final Map<JobStatus, Long> timestamps = new HashMap<>(JobStatus.values().length);
+        final Map<JobStatus, Long> timestamps =
+                CollectionUtil.newHashMapWithExpectedSize(JobStatus.values().length);
 
         for (JobStatus jobStatus : JobStatus.values()) {
             timestamps.put(jobStatus, executionGraph.getStatusTimestamp(jobStatus));
@@ -132,7 +134,7 @@ public class JobDetailsHandler
         }
 
         Map<ExecutionState, Integer> jobVerticesPerStateMap =
-                new HashMap<>(ExecutionState.values().length);
+                CollectionUtil.newHashMapWithExpectedSize(ExecutionState.values().length);
 
         for (ExecutionState executionState : ExecutionState.values()) {
             jobVerticesPerStateMap.put(
@@ -144,6 +146,7 @@ public class JobDetailsHandler
                 executionGraph.getJobName(),
                 executionGraph.isStoppable(),
                 executionGraph.getState(),
+                executionGraph.getJobType(),
                 startTime,
                 endTime,
                 duration,
@@ -152,7 +155,7 @@ public class JobDetailsHandler
                 timestamps,
                 jobVertexInfos,
                 jobVerticesPerStateMap,
-                executionGraph.getJsonPlan());
+                new JobPlanInfo.RawJson(executionGraph.getJsonPlan()));
     }
 
     private static JobDetailsInfo.JobVertexDetailsInfo createJobVertexDetailsInfo(
@@ -193,7 +196,8 @@ public class JobDetailsHandler
         ExecutionState jobVertexState =
                 ExecutionJobVertex.getAggregateJobVertexState(tasksPerState, ejv.getParallelism());
 
-        Map<ExecutionState, Integer> tasksPerStateMap = new HashMap<>(tasksPerState.length);
+        Map<ExecutionState, Integer> tasksPerStateMap =
+                CollectionUtil.newHashMapWithExpectedSize(tasksPerState.length);
 
         for (ExecutionState executionState : ExecutionState.values()) {
             tasksPerStateMap.put(executionState, tasksPerState[executionState.ordinal()]);
@@ -227,6 +231,7 @@ public class JobDetailsHandler
 
         return new JobDetailsInfo.JobVertexDetailsInfo(
                 ejv.getJobVertexId(),
+                ejv.getSlotSharingGroup().getSlotSharingGroupId(),
                 ejv.getName(),
                 ejv.getMaxParallelism(),
                 ejv.getParallelism(),

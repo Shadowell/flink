@@ -19,10 +19,10 @@ package org.apache.flink.table.planner.calcite
 
 import org.apache.flink.sql.parser.ExtendedSqlNode
 import org.apache.flink.sql.parser.ddl.{SqlCompilePlan, SqlReset, SqlSet, SqlUseModules}
-import org.apache.flink.sql.parser.dml.{RichSqlInsert, SqlBeginStatementSet, SqlCompileAndExecutePlan, SqlEndStatementSet, SqlExecute, SqlExecutePlan, SqlStatementSet}
+import org.apache.flink.sql.parser.dml._
 import org.apache.flink.sql.parser.dql._
 import org.apache.flink.table.api.{TableException, ValidationException}
-import org.apache.flink.table.planner.hint.JoinStrategy
+import org.apache.flink.table.planner.hint.FlinkHints
 import org.apache.flink.table.planner.parse.CalciteParser
 import org.apache.flink.table.planner.plan.FlinkCalciteCatalogReader
 import org.apache.flink.table.planner.utils.JavaScalaConversionUtil
@@ -35,7 +35,7 @@ import org.apache.calcite.rel.`type`.RelDataType
 import org.apache.calcite.rel.{RelFieldCollation, RelRoot}
 import org.apache.calcite.rel.hint.RelHint
 import org.apache.calcite.rex.{RexInputRef, RexNode}
-import org.apache.calcite.sql.{SqlCall, SqlHint, SqlKind, SqlNode, SqlNodeList, SqlOperatorTable, SqlSelect, SqlTableRef}
+import org.apache.calcite.sql.{SqlBasicCall, SqlCall, SqlHint, SqlKind, SqlNode, SqlNodeList, SqlOperatorTable, SqlSelect, SqlTableRef}
 import org.apache.calcite.sql.advise.SqlAdvisorValidator
 import org.apache.calcite.sql.util.SqlShuttle
 import org.apache.calcite.sql.validate.SqlValidator
@@ -46,6 +46,7 @@ import javax.annotation.Nullable
 
 import java.lang.{Boolean => JBoolean}
 import java.util
+import java.util.Locale
 import java.util.function.{Function => JFunction}
 
 import scala.collection.JavaConverters._
@@ -59,12 +60,13 @@ class FlinkPlannerImpl(
     val config: FrameworkConfig,
     catalogReaderSupplier: JFunction[JBoolean, CalciteCatalogReader],
     typeFactory: FlinkTypeFactory,
-    cluster: RelOptCluster) {
+    val cluster: RelOptCluster) {
 
   val operatorTable: SqlOperatorTable = config.getOperatorTable
   val parser: CalciteParser = new CalciteParser(config.getParserConfig)
   val convertletTable: SqlRexConvertletTable = config.getConvertletTable
-  val sqlToRelConverterConfig: SqlToRelConverter.Config = config.getSqlToRelConverterConfig
+  val sqlToRelConverterConfig: SqlToRelConverter.Config =
+    config.getSqlToRelConverterConfig.withAddJsonTypeOperatorEnabled(false)
 
   var validator: FlinkCalciteSqlValidator = _
 
@@ -74,7 +76,7 @@ class FlinkPlannerImpl(
       catalogReaderSupplier.apply(true), // ignore cases for lenient completion
       typeFactory,
       SqlValidator.Config.DEFAULT
-        .withSqlConformance(config.getParserConfig.conformance()))
+        .withConformance(config.getParserConfig.conformance()))
   }
 
   /**
@@ -102,7 +104,10 @@ class FlinkPlannerImpl(
       SqlValidator.Config.DEFAULT
         .withIdentifierExpansion(true)
         .withDefaultNullCollation(FlinkPlannerImpl.defaultNullCollation)
-        .withTypeCoercionEnabled(false)
+        .withTypeCoercionEnabled(false),
+      createToRelContext(),
+      cluster,
+      config
     ) // Disable implicit type coercion for now.
     validator
   }
@@ -133,12 +138,17 @@ class FlinkPlannerImpl(
         || sqlNode.isInstanceOf[SqlShowDatabases]
         || sqlNode.isInstanceOf[SqlShowCurrentDatabase]
         || sqlNode.isInstanceOf[SqlShowTables]
+        || sqlNode.isInstanceOf[SqlShowModels]
         || sqlNode.isInstanceOf[SqlShowFunctions]
         || sqlNode.isInstanceOf[SqlShowJars]
         || sqlNode.isInstanceOf[SqlShowModules]
         || sqlNode.isInstanceOf[SqlShowViews]
         || sqlNode.isInstanceOf[SqlShowColumns]
         || sqlNode.isInstanceOf[SqlShowPartitions]
+        || sqlNode.isInstanceOf[SqlShowProcedures]
+        || sqlNode.isInstanceOf[SqlShowJobs]
+        || sqlNode.isInstanceOf[SqlDescribeJob]
+        || sqlNode.isInstanceOf[SqlRichDescribeModel]
         || sqlNode.isInstanceOf[SqlRichDescribeTable]
         || sqlNode.isInstanceOf[SqlUnloadModule]
         || sqlNode.isInstanceOf[SqlUseModules]
@@ -147,6 +157,7 @@ class FlinkPlannerImpl(
         || sqlNode.isInstanceOf[SqlSet]
         || sqlNode.isInstanceOf[SqlReset]
         || sqlNode.isInstanceOf[SqlExecutePlan]
+        || sqlNode.isInstanceOf[SqlTruncateTable]
       ) {
         return sqlNode
       }
@@ -177,6 +188,13 @@ class FlinkPlannerImpl(
         case compileAndExecute: SqlCompileAndExecutePlan =>
           compileAndExecute.setOperand(0, validate(compileAndExecute.getOperandList.get(0)))
           compileAndExecute
+        // for call procedure statement
+        case sqlCallNode if sqlCallNode.getKind == SqlKind.PROCEDURE_CALL =>
+          val callNode = sqlCallNode.asInstanceOf[SqlBasicCall]
+          callNode.getOperandList.asScala.zipWithIndex.foreach {
+            case (operand, idx) => callNode.setOperand(idx, validate(operand))
+          }
+          callNode
         case _ =>
           validator.validate(sqlNode)
       }
@@ -193,23 +211,24 @@ class FlinkPlannerImpl(
   private def rel(validatedSqlNode: SqlNode, sqlValidator: FlinkCalciteSqlValidator) = {
     try {
       assert(validatedSqlNode != null)
-      // check whether this SqlNode tree contains join hints
-      val checkContainJoinHintShuttle = new CheckContainJoinHintShuttle
-      validatedSqlNode.accept(checkContainJoinHintShuttle)
-      val sqlToRelConverter: SqlToRelConverter = if (checkContainJoinHintShuttle.containsJoinHint) {
-        val converter = createSqlToRelConverter(
-          sqlValidator,
-          // disable project merge during sql to rel phase to prevent
-          // incorrect propagation of join hints into child query block
-          sqlToRelConverterConfig.addRelBuilderConfigTransform(c => c.withBloat(-1))
-        )
-        // TODO currently, it is a relatively hacked way to tell converter
-        // that this SqlNode tree contains join hints
-        converter.containsJoinHint()
-        converter
-      } else {
-        createSqlToRelConverter(sqlValidator, sqlToRelConverterConfig)
-      }
+      // check whether this SqlNode tree contains query hints
+      val checkContainQueryHintsShuttle = new CheckContainQueryHintsShuttle
+      validatedSqlNode.accept(checkContainQueryHintsShuttle)
+      val sqlToRelConverter: SqlToRelConverter =
+        if (checkContainQueryHintsShuttle.containsQueryHints) {
+          val converter = createSqlToRelConverter(
+            sqlValidator,
+            // disable project merge during sql to rel phase to prevent
+            // incorrect propagation of query hints into child query block
+            sqlToRelConverterConfig.addRelBuilderConfigTransform(c => c.withBloat(-1))
+          )
+          // TODO currently, it is a relatively hacked way to tell converter
+          // that this SqlNode tree contains query hints
+          converter.containsQueryHints()
+          converter
+        } else {
+          createSqlToRelConverter(sqlValidator, sqlToRelConverterConfig)
+        }
 
       sqlToRelConverter.convertQuery(validatedSqlNode, false, true)
       // we disable automatic flattening in order to let composite types pass without modification
@@ -225,20 +244,20 @@ class FlinkPlannerImpl(
     }
   }
 
-  class CheckContainJoinHintShuttle extends SqlShuttle {
-    var containsJoinHint: Boolean = false
+  private class CheckContainQueryHintsShuttle extends SqlShuttle {
+    var containsQueryHints: Boolean = false
 
     override def visit(call: SqlCall): SqlNode = {
       call match {
         case select: SqlSelect =>
-          if (select.hasHints && hasJoinHint(select.getHints.getList)) {
-            containsJoinHint = true
+          if (select.hasHints && hasQueryHints(select.getHints.getList)) {
+            containsQueryHints = true
             return call
           }
         case table: SqlTableRef =>
           val hintList = table.getOperandList.get(1).asInstanceOf[SqlNodeList]
-          if (hasJoinHint(hintList.getList)) {
-            containsJoinHint = true
+          if (hasQueryHints(hintList.getList)) {
+            containsQueryHints = true
             return call
           }
         case _ => // ignore
@@ -246,11 +265,11 @@ class FlinkPlannerImpl(
       super.visit(call)
     }
 
-    private def hasJoinHint(hints: util.List[SqlNode]): Boolean = {
+    private def hasQueryHints(hints: util.List[SqlNode]): Boolean = {
       JavaScalaConversionUtil.toScala(hints).foreach {
         case hint: SqlHint =>
           val hintName = hint.getName
-          if (JoinStrategy.isJoinStrategy(hintName)) {
+          if (FlinkHints.isQueryHint(hintName.toUpperCase(Locale.ROOT))) {
             return true
           }
       }

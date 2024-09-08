@@ -43,12 +43,10 @@ import org.apache.flink.runtime.metrics.util.TestReporter;
 import org.apache.flink.runtime.rpc.RpcService;
 import org.apache.flink.runtime.rpc.TestingRpcService;
 import org.apache.flink.runtime.webmonitor.retriever.MetricQueryServiceGateway;
-import org.apache.flink.util.TestLoggerExtension;
 
-import org.apache.flink.shaded.guava30.com.google.common.collect.Iterators;
+import org.apache.flink.shaded.guava32.com.google.common.collect.Iterators;
 
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 
 import javax.annotation.Nullable;
 
@@ -64,7 +62,6 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** Tests for the {@link MetricRegistryImpl}. */
-@ExtendWith(TestLoggerExtension.class)
 class MetricRegistryImplTest {
 
     private static final char GLOBAL_DEFAULT_DELIMITER = '.';
@@ -77,7 +74,7 @@ class MetricRegistryImplTest {
 
         assertThat(metricRegistry.isShutdown()).isFalse();
 
-        metricRegistry.shutdown().get();
+        metricRegistry.closeAsync().get();
 
         assertThat(metricRegistry.isShutdown()).isTrue();
     }
@@ -161,7 +158,7 @@ class MetricRegistryImplTest {
         }
         assertThat(reporter.getReportCount()).as("No report was triggered.").isGreaterThan(0);
 
-        registry.shutdown().get();
+        registry.closeAsync().get();
     }
 
     @Test
@@ -188,7 +185,7 @@ class MetricRegistryImplTest {
             assertThat(reportTask.getDelay(TimeUnit.SECONDS))
                     .isEqualTo(MetricOptions.REPORTER_INTERVAL.defaultValue().getSeconds());
         } finally {
-            registry.shutdown().get();
+            registry.closeAsync().get();
         }
     }
 
@@ -242,7 +239,7 @@ class MetricRegistryImplTest {
         assertThat(reporter2.getLastRemovedMetric()).containsInstanceOf(Counter.class);
         assertThat(reporter2.getLastRemovedMetricName()).hasValue("rootCounter");
 
-        registry.shutdown().get();
+        registry.closeAsync().get();
     }
 
     /**
@@ -290,10 +287,10 @@ class MetricRegistryImplTest {
     void testScopeConfig() {
         Configuration config = new Configuration();
 
-        config.setString(MetricOptions.SCOPE_NAMING_TM, "A");
-        config.setString(MetricOptions.SCOPE_NAMING_TM_JOB, "B");
-        config.setString(MetricOptions.SCOPE_NAMING_TASK, "C");
-        config.setString(MetricOptions.SCOPE_NAMING_OPERATOR, "D");
+        config.set(MetricOptions.SCOPE_NAMING_TM, "A");
+        config.set(MetricOptions.SCOPE_NAMING_TM_JOB, "B");
+        config.set(MetricOptions.SCOPE_NAMING_TASK, "C");
+        config.set(MetricOptions.SCOPE_NAMING_OPERATOR, "D");
 
         ScopeFormats scopeConfig = ScopeFormats.fromConfig(config);
 
@@ -306,8 +303,8 @@ class MetricRegistryImplTest {
     @Test
     void testConfigurableDelimiter() throws Exception {
         Configuration config = new Configuration();
-        config.setString(MetricOptions.SCOPE_DELIMITER, "_");
-        config.setString(MetricOptions.SCOPE_NAMING_TM, "A.B.C.D.E");
+        config.set(MetricOptions.SCOPE_DELIMITER, "_");
+        config.set(MetricOptions.SCOPE_NAMING_TM, "A.B.C.D.E");
 
         MetricRegistryImpl registry =
                 new MetricRegistryImpl(
@@ -319,7 +316,7 @@ class MetricRegistryImplTest {
                         registry, "host", new ResourceID("id"));
         assertThat(tmGroup.getMetricIdentifier("name")).isEqualTo("A_B_C_D_E_name");
 
-        registry.shutdown().get();
+        registry.closeAsync().get();
     }
 
     @Test
@@ -348,7 +345,7 @@ class MetricRegistryImplTest {
         assertThat(registry.getDelimiter(3)).isEqualTo(GLOBAL_DEFAULT_DELIMITER);
         assertThat(registry.getDelimiter(-1)).isEqualTo(GLOBAL_DEFAULT_DELIMITER);
 
-        registry.shutdown().get();
+        registry.closeAsync().get();
     }
 
     @Test
@@ -364,7 +361,7 @@ class MetricRegistryImplTest {
         config3.setProperty(MetricOptions.REPORTER_SCOPE_DELIMITER.key(), "AA");
 
         Configuration config = new Configuration();
-        config.setString(MetricOptions.SCOPE_NAMING_TM, "A.B");
+        config.set(MetricOptions.SCOPE_NAMING_TM, "A.B");
 
         List<ReporterSetup> reporterConfigurations =
                 Arrays.asList(
@@ -384,7 +381,7 @@ class MetricRegistryImplTest {
                         registry, "host", new ResourceID("id"));
         group.counter(name);
         group.close();
-        registry.shutdown().get();
+        registry.closeAsync().get();
 
         for (ReporterSetup cfg : reporterConfigurations) {
             String delimiter =
@@ -421,7 +418,7 @@ class MetricRegistryImplTest {
 
         MetricQueryService queryService = checkNotNull(registry.getQueryService());
 
-        registry.shutdown().get();
+        registry.closeAsync().get();
 
         queryService.getTerminationFuture().get();
     }
@@ -450,7 +447,7 @@ class MetricRegistryImplTest {
         assertThat(reporter1.getLastRemovedMetric()).hasValue(metric);
         assertThat(reporter1.getLastRemovedMetricName()).hasValue("counter");
 
-        registry.shutdown().get();
+        registry.closeAsync().get();
     }
 
     /** Reporter that throws an exception when it is notified of an added or removed metric. */

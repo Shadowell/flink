@@ -44,7 +44,7 @@ import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindo
 import org.apache.flink.streaming.api.windowing.evictors.CountEvictor;
 import org.apache.flink.streaming.api.windowing.time.Time;
 import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
-import org.apache.flink.test.util.AbstractTestBase;
+import org.apache.flink.test.util.AbstractTestBaseJUnit4;
 import org.apache.flink.util.AbstractID;
 import org.apache.flink.util.CloseableIterator;
 import org.apache.flink.util.Collector;
@@ -64,7 +64,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** IT Test for writing savepoints to the {@code WindowOperator}. */
 @SuppressWarnings("unchecked")
 @RunWith(Parameterized.class)
-public class SavepointWriterWindowITCase extends AbstractTestBase {
+public class SavepointWriterWindowITCase extends AbstractTestBaseJUnit4 {
 
     private static final String UID = "uid";
 
@@ -146,7 +146,7 @@ public class SavepointWriterWindowITCase extends AbstractTestBase {
         env.setRuntimeMode(RuntimeExecutionMode.AUTOMATIC);
 
         DataStream<Tuple2<String, Integer>> bootstrapData =
-                env.fromCollection(WORDS)
+                env.fromData(WORDS)
                         .map(word -> Tuple2.of(word, 1))
                         .returns(TUPLE_TYPE_INFO)
                         .assignTimestampsAndWatermarks(
@@ -158,8 +158,9 @@ public class SavepointWriterWindowITCase extends AbstractTestBase {
                         .keyBy(tuple -> tuple.f0, Types.STRING)
                         .window(TumblingEventTimeWindows.of(Time.milliseconds(5)));
 
-        SavepointWriter.newSavepoint(stateBackend, 128)
-                .withOperator(UID, windowBootstrap.bootstrap(transformation))
+        SavepointWriter.newSavepoint(env, stateBackend, 128)
+                .withOperator(
+                        OperatorIdentifier.forUid(UID), windowBootstrap.bootstrap(transformation))
                 .write(savepointPath);
 
         env.execute("write state");
@@ -189,7 +190,7 @@ public class SavepointWriterWindowITCase extends AbstractTestBase {
         env.setRuntimeMode(RuntimeExecutionMode.AUTOMATIC);
 
         DataStream<Tuple2<String, Integer>> bootstrapData =
-                env.fromCollection(WORDS)
+                env.fromData(WORDS)
                         .map(word -> Tuple2.of(word, 1))
                         .returns(TUPLE_TYPE_INFO)
                         .assignTimestampsAndWatermarks(
@@ -202,8 +203,9 @@ public class SavepointWriterWindowITCase extends AbstractTestBase {
                         .window(TumblingEventTimeWindows.of(Time.milliseconds(5)))
                         .evictor(CountEvictor.of(1));
 
-        SavepointWriter.newSavepoint(stateBackend, 128)
-                .withOperator(UID, windowBootstrap.bootstrap(transformation))
+        SavepointWriter.newSavepoint(env, stateBackend, 128)
+                .withOperator(
+                        OperatorIdentifier.forUid(UID), windowBootstrap.bootstrap(transformation))
                 .write(savepointPath);
 
         env.execute("write state");
@@ -234,7 +236,7 @@ public class SavepointWriterWindowITCase extends AbstractTestBase {
         env.setRuntimeMode(RuntimeExecutionMode.AUTOMATIC);
 
         DataStream<Tuple2<String, Integer>> bootstrapData =
-                env.fromCollection(WORDS)
+                env.fromData(WORDS)
                         .map(word -> Tuple2.of(word, 1), TUPLE_TYPE_INFO)
                         .assignTimestampsAndWatermarks(
                                 WatermarkStrategy.<Tuple2<String, Integer>>noWatermarks()
@@ -247,8 +249,9 @@ public class SavepointWriterWindowITCase extends AbstractTestBase {
                                 SlidingEventTimeWindows.of(
                                         Time.milliseconds(5), Time.milliseconds(1)));
 
-        SavepointWriter.newSavepoint(stateBackend, 128)
-                .withOperator(UID, windowBootstrap.bootstrap(transformation))
+        SavepointWriter.newSavepoint(env, stateBackend, 128)
+                .withOperator(
+                        OperatorIdentifier.forUid(UID), windowBootstrap.bootstrap(transformation))
                 .write(savepointPath);
 
         env.execute("write state");
@@ -280,7 +283,7 @@ public class SavepointWriterWindowITCase extends AbstractTestBase {
         env.setRuntimeMode(RuntimeExecutionMode.AUTOMATIC);
 
         DataStream<Tuple2<String, Integer>> bootstrapData =
-                env.fromCollection(WORDS)
+                env.fromData(WORDS)
                         .map(word -> Tuple2.of(word, 1))
                         .returns(TUPLE_TYPE_INFO)
                         .assignTimestampsAndWatermarks(
@@ -295,8 +298,9 @@ public class SavepointWriterWindowITCase extends AbstractTestBase {
                                         Time.milliseconds(5), Time.milliseconds(1)))
                         .evictor(CountEvictor.of(1));
 
-        SavepointWriter.newSavepoint(stateBackend, 128)
-                .withOperator(UID, windowBootstrap.bootstrap(transformation))
+        SavepointWriter.newSavepoint(env, stateBackend, 128)
+                .withOperator(
+                        OperatorIdentifier.forUid(UID), windowBootstrap.bootstrap(transformation))
                 .write(savepointPath);
 
         env.execute("write state");

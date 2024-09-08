@@ -160,7 +160,7 @@ public class ExecutionConfigOptions {
                             Description.builder()
                                     .text(
                                             "In order to minimize the distributed disorder problem when writing data into table with primary keys that many users suffers. "
-                                                    + "FLINK will auto add a keyed shuffle by default when the sink's parallelism differs from upstream operator and upstream is append only. "
+                                                    + "FLINK will auto add a keyed shuffle by default when the sink parallelism differs from upstream operator and sink parallelism is not 1. "
                                                     + "This works only when the upstream ensures the multi-records' order on the primary key, if not, the added shuffle can not solve "
                                                     + "the problem (In this situation, a more proper way is to consider the deduplicate operation for the source firstly or use an "
                                                     + "upsert source with primary key definition which truly reflect the records evolution).")
@@ -169,6 +169,17 @@ public class ExecutionConfigOptions {
                                             "By default, the keyed shuffle will be added when the sink's parallelism differs from upstream operator. "
                                                     + "You can set to no shuffle(NONE) or force shuffle(FORCE).")
                                     .build());
+
+    @Documentation.TableOption(execMode = Documentation.ExecMode.STREAMING)
+    public static final ConfigOption<RowtimeInserter> TABLE_EXEC_SINK_ROWTIME_INSERTER =
+            key("table.exec.sink.rowtime-inserter")
+                    .enumType(RowtimeInserter.class)
+                    .defaultValue(RowtimeInserter.ENABLED)
+                    .withDescription(
+                            "Some sink implementations require a single rowtime attribute in the input "
+                                    + "that can be inserted into the underlying stream record. This option "
+                                    + "allows disabling the timestamp insertion and avoids errors around "
+                                    + "multiple time attributes being present in the query schema.");
 
     // ------------------------------------------------------------------------
     //  Sort Options
@@ -304,6 +315,54 @@ public class ExecutionConfigOptions {
                     .withDescription(
                             "Sets the window elements buffer size limit used in group window agg operator.");
 
+    @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH)
+    public static final ConfigOption<Boolean> TABLE_EXEC_LOCAL_HASH_AGG_ADAPTIVE_ENABLED =
+            ConfigOptions.key("table.exec.local-hash-agg.adaptive.enabled")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription(
+                            "Whether to enable adaptive local hash aggregation. Adaptive local hash "
+                                    + "aggregation is an optimization of local hash aggregation, which can adaptively "
+                                    + "determine whether to continue to do local hash aggregation according to the distinct "
+                                    + "value rate of sampling data. If distinct value rate bigger than defined threshold "
+                                    + "(see parameter: table.exec.local-hash-agg.adaptive.distinct-value-rate-threshold), "
+                                    + "we will stop aggregating and just send the input data to the downstream after a simple "
+                                    + "projection. Otherwise, we will continue to do aggregation. Adaptive local hash aggregation "
+                                    + "only works in batch mode. Default value of this parameter is true.");
+
+    @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH)
+    public static final ConfigOption<Long> TABLE_EXEC_LOCAL_HASH_AGG_ADAPTIVE_SAMPLING_THRESHOLD =
+            ConfigOptions.key("table.exec.local-hash-agg.adaptive.sampling-threshold")
+                    .longType()
+                    .defaultValue(500000L)
+                    .withDescription(
+                            "If adaptive local hash aggregation is enabled, this value defines how "
+                                    + "many records will be used as sampled data to calculate distinct value rate "
+                                    + "(see parameter: table.exec.local-hash-agg.adaptive.distinct-value-rate-threshold) "
+                                    + "for the local aggregate. The higher the sampling threshold, the more accurate "
+                                    + "the distinct value rate is. But as the sampling threshold increases, local "
+                                    + "aggregation is meaningless when the distinct values rate is low. "
+                                    + "The default value is 500000.");
+
+    @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH)
+    public static final ConfigOption<Double>
+            TABLE_EXEC_LOCAL_HASH_AGG_ADAPTIVE_DISTINCT_VALUE_RATE_THRESHOLD =
+                    ConfigOptions.key(
+                                    "table.exec.local-hash-agg.adaptive.distinct-value-rate-threshold")
+                            .doubleType()
+                            .defaultValue(0.5d)
+                            .withDescription(
+                                    "The distinct value rate can be defined as the number of local "
+                                            + "aggregation results for the sampled data divided by the sampling "
+                                            + "threshold (see "
+                                            + TABLE_EXEC_LOCAL_HASH_AGG_ADAPTIVE_SAMPLING_THRESHOLD
+                                                    .key()
+                                            + "). "
+                                            + "If the computed result is lower than the given configuration value, "
+                                            + "the remaining input records proceed to do local aggregation, otherwise "
+                                            + "the remaining input records are subjected to simple projection which "
+                                            + "calculation cost is less than local aggregation. The default value is 0.5.");
+
     // ------------------------------------------------------------------------
     //  Async Lookup Options
     // ------------------------------------------------------------------------
@@ -332,6 +391,49 @@ public class ExecutionConfigOptions {
                             "Output mode for asynchronous operations which will convert to {@see AsyncDataStream.OutputMode}, ORDERED by default. "
                                     + "If set to ALLOW_UNORDERED, will attempt to use {@see AsyncDataStream.OutputMode.UNORDERED} when it does not "
                                     + "affect the correctness of the result, otherwise ORDERED will be still used.");
+
+    // ------------------------------------------------------------------------
+    //  Async Scalar Function
+    // ------------------------------------------------------------------------
+    @Documentation.TableOption(execMode = Documentation.ExecMode.STREAMING)
+    public static final ConfigOption<Integer> TABLE_EXEC_ASYNC_SCALAR_BUFFER_CAPACITY =
+            key("table.exec.async-scalar.buffer-capacity")
+                    .intType()
+                    .defaultValue(10)
+                    .withDescription(
+                            "The max number of async i/o operation that the async lookup join can trigger.");
+
+    @Documentation.TableOption(execMode = Documentation.ExecMode.STREAMING)
+    public static final ConfigOption<Duration> TABLE_EXEC_ASYNC_SCALAR_TIMEOUT =
+            key("table.exec.async-scalar.timeout")
+                    .durationType()
+                    .defaultValue(Duration.ofMinutes(3))
+                    .withDescription(
+                            "The async timeout for the asynchronous operation to complete.");
+
+    @Documentation.TableOption(execMode = Documentation.ExecMode.STREAMING)
+    public static final ConfigOption<RetryStrategy> TABLE_EXEC_ASYNC_SCALAR_RETRY_STRATEGY =
+            key("table.exec.async-scalar.retry-strategy")
+                    .enumType(RetryStrategy.class)
+                    .defaultValue(RetryStrategy.FIXED_DELAY)
+                    .withDescription(
+                            "Restart strategy which will be used, FIXED_DELAY by default.");
+
+    @Documentation.TableOption(execMode = Documentation.ExecMode.STREAMING)
+    public static final ConfigOption<Duration> TABLE_EXEC_ASYNC_SCALAR_RETRY_DELAY =
+            key("table.exec.async-scalar.retry-delay")
+                    .durationType()
+                    .defaultValue(Duration.ofMillis(100))
+                    .withDescription("The delay to wait before trying again.");
+
+    @Documentation.TableOption(execMode = Documentation.ExecMode.STREAMING)
+    public static final ConfigOption<Integer> TABLE_EXEC_ASYNC_SCALAR_MAX_ATTEMPTS =
+            key("table.exec.async-scalar.max-attempts")
+                    .intType()
+                    .defaultValue(3)
+                    .withDescription(
+                            "The max number of async retry attempts to make before task "
+                                    + "execution is failed.");
 
     // ------------------------------------------------------------------------
     //  MiniBatch Options
@@ -388,6 +490,14 @@ public class ExecutionConfigOptions {
                                     + "Operators that can be disabled include \"NestedLoopJoin\", \"ShuffleHashJoin\", \"BroadcastHashJoin\", "
                                     + "\"SortMergeJoin\", \"HashAgg\", \"SortAgg\".\n"
                                     + "By default no operator is disabled.");
+
+    @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH_STREAMING)
+    public static final ConfigOption<Boolean> TABLE_EXEC_OPERATOR_FUSION_CODEGEN_ENABLED =
+            key("table.exec.operator-fusion-codegen.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "If true, multiple physical operators will be compiled into a single operator by planner which can improve the performance.");
 
     /** @deprecated Use {@link ExecutionOptions#BATCH_SHUFFLE_MODE} instead. */
     @Deprecated
@@ -542,6 +652,18 @@ public class ExecutionConfigOptions {
                                     + "In Flink 1.15.x the pattern was wrongly defined as '<id>_<type>_<version>_<transformation>' "
                                     + "which would prevent migrations in the future.");
 
+    @Documentation.TableOption(execMode = Documentation.ExecMode.STREAMING)
+    public static final ConfigOption<Duration> TABLE_EXEC_INTERVAL_JOIN_MIN_CLEAN_UP_INTERVAL =
+            key("table.exec.interval-join.min-cleanup-interval")
+                    .durationType()
+                    .defaultValue(Duration.ofMillis(0))
+                    .withDescription(
+                            "Specifies a minimum time interval for how long cleanup unmatched records in the interval join operator. "
+                                    + "Before Flink 1.18, the default value of this param was the half of interval duration. "
+                                    + "Note: Set this option greater than 0 will cause unmatched records in outer joins to be output later than watermark, "
+                                    + "leading to possible discarding of these records by downstream watermark-dependent operators, such as window operators. "
+                                    + "The default value is 0, which means it will clean up unmatched records immediately.");
+
     // ------------------------------------------------------------------------------------------
     // Enum option types
     // ------------------------------------------------------------------------------------------
@@ -624,6 +746,28 @@ public class ExecutionConfigOptions {
         FORCE
     }
 
+    /** Rowtime attribute insertion strategy for the sink. */
+    @PublicEvolving
+    public enum RowtimeInserter implements DescribedEnum {
+        ENABLED(
+                text(
+                        "Insert a rowtime attribute (if available) into the underlying stream record. "
+                                + "This requires at most one time attribute in the input for the sink.")),
+        DISABLED(text("Do not insert the rowtime attribute into the underlying stream record."));
+
+        private final InlineElement description;
+
+        RowtimeInserter(InlineElement description) {
+            this.description = description;
+        }
+
+        @Internal
+        @Override
+        public InlineElement getDescription() {
+            return description;
+        }
+    }
+
     /** Output mode for asynchronous operations, equivalent to {@see AsyncDataStream.OutputMode}. */
     @PublicEvolving
     public enum AsyncOutputMode {
@@ -637,6 +781,16 @@ public class ExecutionConfigOptions {
          * result, otherwise ORDERED will be still used.
          */
         ALLOW_UNORDERED
+    }
+
+    /** Retry strategy in the case of failure. */
+    @PublicEvolving
+    public enum RetryStrategy {
+        /** When a failure occurs, don't retry. */
+        NO_RETRY,
+
+        /** A fixed delay before retrying again. */
+        FIXED_DELAY
     }
 
     /** Determine if CAST operates using the legacy behaviour or the new one. */

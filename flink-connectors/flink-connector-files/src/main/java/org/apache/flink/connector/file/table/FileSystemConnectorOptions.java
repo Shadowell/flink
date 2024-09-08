@@ -27,6 +27,7 @@ import org.apache.flink.configuration.description.InlineElement;
 import org.apache.flink.table.factories.FactoryUtil;
 
 import java.time.Duration;
+import java.util.List;
 
 import static org.apache.flink.configuration.ConfigOptions.key;
 import static org.apache.flink.configuration.description.TextElement.text;
@@ -67,6 +68,17 @@ public class FileSystemConnectorOptions {
                             "The file statistics type which the source could provide. "
                                     + "The statistics reporting is a heavy operation in some cases,"
                                     + "this config allows users to choose the statistics type according to different situations.");
+
+    public static final ConfigOption<String> SOURCE_PATH_REGEX_PATTERN =
+            key("source.path.regex-pattern")
+                    .stringType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "The regex pattern to filter files or directories in the directory of the `path` option. "
+                                    + "This regex pattern should be matched with the absolute file path."
+                                    + "For example, if we want to get all files under some path like '/dir', "
+                                    + "the table should set 'path'='/dir' and 'source.regex-pattern'='/dir/.*'."
+                                    + "The hidden files and directories will not be matched.");
 
     public static final ConfigOption<MemorySize> SINK_ROLLING_POLICY_FILE_SIZE =
             key("sink.rolling-policy.file-size")
@@ -220,6 +232,18 @@ public class FileSystemConnectorOptions {
                             "The partition commit policy class for implement"
                                     + " PartitionCommitPolicy interface. Only work in custom commit policy");
 
+    public static final ConfigOption<List<String>> SINK_PARTITION_COMMIT_POLICY_CLASS_PARAMETERS =
+            key("sink.partition-commit.policy.class.parameters")
+                    .stringType()
+                    .asList()
+                    .noDefaultValue()
+                    .withDescription(
+                            "The parameters passed to the constructor of the custom commit policy, "
+                                    + " with multiple parameters separated by semicolons, such as 'param1;param2'."
+                                    + " The configuration value will be split into a list (['param1', 'param2'])"
+                                    + " and passed to the constructor of the custom commit policy class."
+                                    + " This option is optional, if not configured, default constructor will be used.");
+
     public static final ConfigOption<String> SINK_PARTITION_COMMIT_SUCCESS_FILE_NAME =
             key("sink.partition-commit.success-file.name")
                     .stringType()
@@ -244,6 +268,14 @@ public class FileSystemConnectorOptions {
                     .noDefaultValue()
                     .withDescription(
                             "The compaction target file size, the default value is the rolling file size.");
+
+    public static final ConfigOption<Integer> COMPACTION_PARALLELISM =
+            key("compaction.parallelism")
+                    .intType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "Defines a custom parallelism for the compaction operator in batch mode. By default, if this option is not define, "
+                                    + "the planner will use the parallelism of the sink as the parallelism. ");
 
     public static final ConfigOption<Integer> SINK_PARALLELISM = FactoryUtil.SINK_PARALLELISM;
 

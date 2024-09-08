@@ -33,6 +33,7 @@ import org.apache.flink.core.memory.DataOutputView;
 import org.apache.flink.core.memory.DataOutputViewStreamWrapper;
 import org.apache.flink.runtime.checkpoint.OperatorSubtaskState;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.metrics.groups.TaskIOMetricGroup;
 import org.apache.flink.runtime.operators.testutils.MockEnvironment;
 import org.apache.flink.runtime.operators.testutils.MockEnvironmentBuilder;
 import org.apache.flink.runtime.operators.testutils.MockInputSplitProvider;
@@ -40,8 +41,8 @@ import org.apache.flink.runtime.state.CheckpointableKeyedStateBackend;
 import org.apache.flink.runtime.state.KeyGroupStatePartitionStreamProvider;
 import org.apache.flink.runtime.state.KeyedStateCheckpointOutputStream;
 import org.apache.flink.runtime.state.LocalRecoveryConfig;
-import org.apache.flink.runtime.state.LocalRecoveryDirectoryProvider;
-import org.apache.flink.runtime.state.LocalRecoveryDirectoryProviderImpl;
+import org.apache.flink.runtime.state.LocalSnapshotDirectoryProvider;
+import org.apache.flink.runtime.state.LocalSnapshotDirectoryProviderImpl;
 import org.apache.flink.runtime.state.OperatorStateCheckpointOutputStream;
 import org.apache.flink.runtime.state.StateBackend;
 import org.apache.flink.runtime.state.StateInitializationContext;
@@ -58,6 +59,7 @@ import org.apache.flink.streaming.api.operators.StreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.tasks.ProcessingTimeService;
+import org.apache.flink.streaming.runtime.tasks.StreamTaskCancellationContext;
 import org.apache.flink.streaming.util.KeyedOneInputStreamOperatorTestHarness;
 import org.apache.flink.util.TernaryBoolean;
 import org.apache.flink.util.TestLogger;
@@ -176,13 +178,16 @@ public class StreamOperatorSnapshotRestoreTest extends TestLogger {
         JobVertexID jobVertexID = new JobVertexID();
         int subtaskIdx = 0;
 
-        LocalRecoveryDirectoryProvider directoryProvider =
+        LocalSnapshotDirectoryProvider directoryProvider =
                 mode == ONLY_JM_RECOVERY
                         ? null
-                        : new LocalRecoveryDirectoryProviderImpl(
+                        : new LocalSnapshotDirectoryProviderImpl(
                                 temporaryFolder.newFolder(), jobID, jobVertexID, subtaskIdx);
 
-        LocalRecoveryConfig localRecoveryConfig = new LocalRecoveryConfig(directoryProvider);
+        LocalRecoveryConfig localRecoveryConfig =
+                (directoryProvider == null)
+                        ? LocalRecoveryConfig.BACKUP_AND_RECOVERY_DISABLED
+                        : LocalRecoveryConfig.backupAndRecoveryEnabled(directoryProvider);
 
         MockEnvironment mockEnvironment =
                 new MockEnvironmentBuilder()
@@ -232,11 +237,13 @@ public class StreamOperatorSnapshotRestoreTest extends TestLogger {
                 new InternalTimeServiceManager.Provider() {
                     @Override
                     public <K> InternalTimeServiceManager<K> create(
+                            TaskIOMetricGroup taskIOMetricGroup,
                             CheckpointableKeyedStateBackend<K> keyedStatedBackend,
                             ClassLoader userClassloader,
                             KeyContext keyContext,
                             ProcessingTimeService processingTimeService,
-                            Iterable<KeyGroupStatePartitionStreamProvider> rawKeyedStates)
+                            Iterable<KeyGroupStatePartitionStreamProvider> rawKeyedStates,
+                            StreamTaskCancellationContext cancellationContext)
                             throws IOException {
                         return null;
                     }

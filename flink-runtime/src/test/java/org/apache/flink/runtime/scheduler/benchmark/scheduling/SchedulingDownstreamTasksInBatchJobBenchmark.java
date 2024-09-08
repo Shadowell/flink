@@ -21,14 +21,17 @@ package org.apache.flink.runtime.scheduler.benchmark.scheduling;
 import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.executiongraph.ExecutionVertex;
 import org.apache.flink.runtime.scheduler.benchmark.JobConfiguration;
-import org.apache.flink.runtime.scheduler.strategy.PipelinedRegionSchedulingStrategy;
+import org.apache.flink.runtime.scheduler.strategy.SchedulingStrategy;
+import org.apache.flink.runtime.scheduler.strategy.VertexwiseSchedulingStrategy;
+
+import static org.apache.flink.runtime.scheduler.benchmark.SchedulerBenchmarkUtils.createSchedulingStrategy;
 
 /**
  * The benchmark of scheduling downstream task in a BATCH job. The related method is {@link
- * PipelinedRegionSchedulingStrategy#onExecutionStateChange}.
+ * VertexwiseSchedulingStrategy#onExecutionStateChange}.
  */
 public class SchedulingDownstreamTasksInBatchJobBenchmark extends SchedulingBenchmarkBase {
-    private PipelinedRegionSchedulingStrategy schedulingStrategy;
+    private SchedulingStrategy schedulingStrategy;
 
     private int parallelism;
 
@@ -36,9 +39,8 @@ public class SchedulingDownstreamTasksInBatchJobBenchmark extends SchedulingBenc
     public void setup(JobConfiguration jobConfiguration) throws Exception {
         super.setup(jobConfiguration);
 
-        schedulingStrategy =
-                new PipelinedRegionSchedulingStrategy(schedulerOperations, schedulingTopology);
-
+        schedulingStrategy = createSchedulingStrategy(jobConfiguration, schedulingTopology);
+        schedulingStrategy.startScheduling();
         parallelism = jobConfiguration.getParallelism();
     }
 
@@ -46,14 +48,15 @@ public class SchedulingDownstreamTasksInBatchJobBenchmark extends SchedulingBenc
         for (int i = 0; i < parallelism - 1; i++) {
             ExecutionVertex taskVertex =
                     executionGraph.getJobVertex(jobVertices.get(0).getID()).getTaskVertices()[i];
-            taskVertex.finishAllBlockingPartitions();
+            taskVertex.finishPartitionsIfNeeded();
 
             schedulingStrategy.onExecutionStateChange(taskVertex.getID(), ExecutionState.FINISHED);
         }
         ExecutionVertex lastVertex =
                 executionGraph.getJobVertex(jobVertices.get(0).getID())
                         .getTaskVertices()[parallelism - 1];
-        lastVertex.finishAllBlockingPartitions();
+        lastVertex.finishPartitionsIfNeeded();
+
         schedulingStrategy.onExecutionStateChange(lastVertex.getID(), ExecutionState.FINISHED);
     }
 }

@@ -22,7 +22,6 @@ import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.JobID;
-import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.Configuration;
@@ -30,29 +29,25 @@ import org.apache.flink.configuration.DescribedEnum;
 import org.apache.flink.configuration.IllegalConfigurationException;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.configuration.description.InlineElement;
+import org.apache.flink.contrib.streaming.state.RocksDBMemoryControllerUtils.RocksDBMemoryFactory;
+import org.apache.flink.contrib.streaming.state.sstmerge.RocksDBManualCompactionConfig;
 import org.apache.flink.core.execution.SavepointFormatType;
-import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.core.fs.Path;
-import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.memory.OpaqueMemoryResource;
-import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
 import org.apache.flink.runtime.state.AbstractManagedMemoryStateBackend;
 import org.apache.flink.runtime.state.ConfigurableStateBackend;
 import org.apache.flink.runtime.state.DefaultOperatorStateBackendBuilder;
-import org.apache.flink.runtime.state.KeyGroupRange;
-import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.LocalRecoveryConfig;
 import org.apache.flink.runtime.state.OperatorStateBackend;
-import org.apache.flink.runtime.state.OperatorStateHandle;
 import org.apache.flink.runtime.state.StreamCompressionDecorator;
 import org.apache.flink.runtime.state.metrics.LatencyTrackingStateConfig;
-import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.util.AbstractID;
 import org.apache.flink.util.DynamicCodeLoadingException;
 import org.apache.flink.util.FileUtils;
 import org.apache.flink.util.FlinkRuntimeException;
+import org.apache.flink.util.MdcUtils;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.TernaryBoolean;
 
@@ -70,17 +65,20 @@ import java.lang.reflect.Field;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 import static org.apache.flink.configuration.description.TextElement.text;
+import static org.apache.flink.contrib.streaming.state.RocksDBConfigurableOptions.INCREMENTAL_RESTORE_ASYNC_COMPACT_AFTER_RESCALE;
 import static org.apache.flink.contrib.streaming.state.RocksDBConfigurableOptions.RESTORE_OVERLAP_FRACTION_THRESHOLD;
+import static org.apache.flink.contrib.streaming.state.RocksDBConfigurableOptions.USE_DELETE_FILES_IN_RANGE_DURING_RESCALING;
+import static org.apache.flink.contrib.streaming.state.RocksDBConfigurableOptions.USE_INGEST_DB_RESTORE_MODE;
 import static org.apache.flink.contrib.streaming.state.RocksDBConfigurableOptions.WRITE_BATCH_SIZE;
 import static org.apache.flink.contrib.streaming.state.RocksDBOptions.CHECKPOINT_TRANSFER_THREAD_NUM;
-import static org.apache.flink.contrib.streaming.state.RocksDBOptions.TIMER_SERVICE_FACTORY;
 import static org.apache.flink.util.Preconditions.checkArgument;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
@@ -144,8 +142,10 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
     /** The configuration for memory settings (pool sizes, etc.). */
     private final RocksDBMemoryConfiguration memoryConfiguration;
 
-    /** This determines the type of priority queue state. */
-    @Nullable private PriorityQueueStateType priorityQueueStateType;
+    /**
+     * The configuration for rocksdb priorityQueue state settings (priorityQueue state type, etc.).
+     */
+    private final RocksDBPriorityQueueConfig priorityQueueConfig;
 
     /** The default rocksdb property-based metrics options. */
     private final RocksDBNativeMetricOptions nativeMetricOptions;
@@ -174,8 +174,31 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
      * The threshold of the overlap fraction between the handle's key-group range and target
      * key-group range.
      */
-    private double overlapFractionThreshold;
+    private final double overlapFractionThreshold;
+
+    /**
+     * Whether we use the optimized Ingest/Clip DB method for rescaling RocksDB incremental
+     * checkpoints.
+     */
+    private final TernaryBoolean useIngestDbRestoreMode;
+
+    /**
+     * Whether we trigger an async compaction after restores for which we detect state in the
+     * database (including tombstones) that exceed the proclaimed key-groups range of the backend.
+     */
+    private final TernaryBoolean incrementalRestoreAsyncCompactAfterRescale;
+
+    /**
+     * Whether to leverage deleteFilesInRange API to clean up useless rocksdb files during
+     * rescaling.
+     */
+    private final TernaryBoolean rescalingUseDeleteFilesInRange;
+
+    /** Factory for Write Buffer Manager and Block Cache. */
+    private RocksDBMemoryFactory rocksDBMemoryFactory;
     // ------------------------------------------------------------------------
+
+    private final RocksDBManualCompactionConfig manualCompactionConfig;
 
     /** Creates a new {@code EmbeddedRocksDBStateBackend} for storing local state. */
     public EmbeddedRocksDBStateBackend() {
@@ -203,6 +226,12 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
         this.memoryConfiguration = new RocksDBMemoryConfiguration();
         this.writeBatchSize = UNDEFINED_WRITE_BATCH_SIZE;
         this.overlapFractionThreshold = UNDEFINED_OVERLAP_FRACTION_THRESHOLD;
+        this.rocksDBMemoryFactory = RocksDBMemoryFactory.DEFAULT;
+        this.priorityQueueConfig = new RocksDBPriorityQueueConfig();
+        this.useIngestDbRestoreMode = TernaryBoolean.UNDEFINED;
+        this.incrementalRestoreAsyncCompactAfterRescale = TernaryBoolean.UNDEFINED;
+        this.rescalingUseDeleteFilesInRange = TernaryBoolean.UNDEFINED;
+        this.manualCompactionConfig = null;
     }
 
     /**
@@ -236,11 +265,9 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
                         original.memoryConfiguration, config);
         this.memoryConfiguration.validate();
 
-        if (null == original.priorityQueueStateType) {
-            this.priorityQueueStateType = config.get(TIMER_SERVICE_FACTORY);
-        } else {
-            this.priorityQueueStateType = original.priorityQueueStateType;
-        }
+        this.priorityQueueConfig =
+                RocksDBPriorityQueueConfig.fromOtherAndConfiguration(
+                        original.priorityQueueConfig, config);
 
         // configure local directories
         if (original.localRocksDbDirectories != null) {
@@ -298,6 +325,29 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
         checkArgument(
                 overlapFractionThreshold >= 0 && this.overlapFractionThreshold <= 1,
                 "Overlap fraction threshold of restoring should be between 0 and 1");
+
+        incrementalRestoreAsyncCompactAfterRescale =
+                TernaryBoolean.mergeTernaryBooleanWithConfig(
+                        original.incrementalRestoreAsyncCompactAfterRescale,
+                        INCREMENTAL_RESTORE_ASYNC_COMPACT_AFTER_RESCALE,
+                        config);
+
+        useIngestDbRestoreMode =
+                TernaryBoolean.mergeTernaryBooleanWithConfig(
+                        original.useIngestDbRestoreMode, USE_INGEST_DB_RESTORE_MODE, config);
+
+        rescalingUseDeleteFilesInRange =
+                TernaryBoolean.mergeTernaryBooleanWithConfig(
+                        original.rescalingUseDeleteFilesInRange,
+                        USE_DELETE_FILES_IN_RANGE_DURING_RESCALING,
+                        config);
+
+        this.rocksDBMemoryFactory = original.rocksDBMemoryFactory;
+
+        this.manualCompactionConfig =
+                original.manualCompactionConfig != null
+                        ? original.manualCompactionConfig
+                        : RocksDBManualCompactionConfig.from(config);
     }
 
     // ------------------------------------------------------------------------
@@ -392,48 +442,8 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
 
     @Override
     public <K> AbstractKeyedStateBackend<K> createKeyedStateBackend(
-            Environment env,
-            JobID jobID,
-            String operatorIdentifier,
-            TypeSerializer<K> keySerializer,
-            int numberOfKeyGroups,
-            KeyGroupRange keyGroupRange,
-            TaskKvStateRegistry kvStateRegistry,
-            TtlTimeProvider ttlTimeProvider,
-            MetricGroup metricGroup,
-            @Nonnull Collection<KeyedStateHandle> stateHandles,
-            CloseableRegistry cancelStreamRegistry)
-            throws IOException {
-        return createKeyedStateBackend(
-                env,
-                jobID,
-                operatorIdentifier,
-                keySerializer,
-                numberOfKeyGroups,
-                keyGroupRange,
-                kvStateRegistry,
-                ttlTimeProvider,
-                metricGroup,
-                stateHandles,
-                cancelStreamRegistry,
-                1.0);
-    }
-
-    @Override
-    public <K> AbstractKeyedStateBackend<K> createKeyedStateBackend(
-            Environment env,
-            JobID jobID,
-            String operatorIdentifier,
-            TypeSerializer<K> keySerializer,
-            int numberOfKeyGroups,
-            KeyGroupRange keyGroupRange,
-            TaskKvStateRegistry kvStateRegistry,
-            TtlTimeProvider ttlTimeProvider,
-            MetricGroup metricGroup,
-            @Nonnull Collection<KeyedStateHandle> stateHandles,
-            CloseableRegistry cancelStreamRegistry,
-            double managedMemoryFraction)
-            throws IOException {
+            KeyedStateBackendParameters<K> parameters) throws IOException {
+        Environment env = parameters.getEnv();
 
         // first, make sure that the RocksDB JNI library is loaded
         // we do this explicitly here to have better error handling
@@ -441,7 +451,8 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
         ensureRocksDBIsLoaded(tempDir);
 
         // replace all characters that are not legal for filenames with underscore
-        String fileCompatibleIdentifier = operatorIdentifier.replaceAll("[^a-zA-Z0-9\\-]", "_");
+        String fileCompatibleIdentifier =
+                parameters.getOperatorIdentifier().replaceAll("[^a-zA-Z0-9\\-]", "_");
 
         lazyInitializeForJob(env, fileCompatibleIdentifier);
 
@@ -460,66 +471,80 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
 
         final OpaqueMemoryResource<RocksDBSharedResources> sharedResources =
                 RocksDBOperationUtils.allocateSharedCachesIfConfigured(
-                        memoryConfiguration, env.getMemoryManager(), managedMemoryFraction, LOG);
+                        memoryConfiguration,
+                        env,
+                        parameters.getManagedMemoryFraction(),
+                        LOG,
+                        rocksDBMemoryFactory);
         if (sharedResources != null) {
             LOG.info("Obtained shared RocksDB cache of size {} bytes", sharedResources.getSize());
         }
         final RocksDBResourceContainer resourceContainer =
                 createOptionsAndResourceContainer(
-                        sharedResources, nativeMetricOptions.isStatisticsEnabled());
+                        sharedResources,
+                        instanceBasePath,
+                        nativeMetricOptions.isStatisticsEnabled());
 
         ExecutionConfig executionConfig = env.getExecutionConfig();
         StreamCompressionDecorator keyGroupCompressionDecorator =
                 getCompressionDecorator(executionConfig);
 
         LatencyTrackingStateConfig latencyTrackingStateConfig =
-                latencyTrackingConfigBuilder.setMetricGroup(metricGroup).build();
+                latencyTrackingConfigBuilder.setMetricGroup(parameters.getMetricGroup()).build();
         RocksDBKeyedStateBackendBuilder<K> builder =
                 new RocksDBKeyedStateBackendBuilder<>(
-                                operatorIdentifier,
+                                parameters.getOperatorIdentifier(),
                                 env.getUserCodeClassLoader().asClassLoader(),
                                 instanceBasePath,
                                 resourceContainer,
                                 stateName -> resourceContainer.getColumnOptions(),
-                                kvStateRegistry,
-                                keySerializer,
-                                numberOfKeyGroups,
-                                keyGroupRange,
+                                parameters.getKvStateRegistry(),
+                                parameters.getKeySerializer(),
+                                parameters.getNumberOfKeyGroups(),
+                                parameters.getKeyGroupRange(),
                                 executionConfig,
                                 localRecoveryConfig,
-                                getPriorityQueueStateType(),
-                                ttlTimeProvider,
+                                priorityQueueConfig,
+                                parameters.getTtlTimeProvider(),
                                 latencyTrackingStateConfig,
-                                metricGroup,
-                                stateHandles,
+                                parameters.getMetricGroup(),
+                                parameters.getCustomInitializationMetrics(),
+                                parameters.getStateHandles(),
                                 keyGroupCompressionDecorator,
-                                cancelStreamRegistry)
+                                parameters.getCancelStreamRegistry())
                         .setEnableIncrementalCheckpointing(isIncrementalCheckpointsEnabled())
                         .setNumberOfTransferingThreads(getNumberOfTransferThreads())
                         .setNativeMetricOptions(
                                 resourceContainer.getMemoryWatcherOptions(nativeMetricOptions))
                         .setWriteBatchSize(getWriteBatchSize())
-                        .setOverlapFractionThreshold(getOverlapFractionThreshold());
+                        .setOverlapFractionThreshold(getOverlapFractionThreshold())
+                        .setIncrementalRestoreAsyncCompactAfterRescale(
+                                getIncrementalRestoreAsyncCompactAfterRescale())
+                        .setUseIngestDbRestoreMode(getUseIngestDbRestoreMode())
+                        .setRescalingUseDeleteFilesInRange(isRescalingUseDeleteFilesInRange())
+                        .setIOExecutor(
+                                MdcUtils.scopeToJob(
+                                        jobId,
+                                        parameters.getEnv().getIOManager().getExecutorService()))
+                        .setManualCompactionConfig(
+                                manualCompactionConfig == null
+                                        ? RocksDBManualCompactionConfig.getDefault()
+                                        : manualCompactionConfig);
         return builder.build();
     }
 
     @Override
     public OperatorStateBackend createOperatorStateBackend(
-            Environment env,
-            String operatorIdentifier,
-            @Nonnull Collection<OperatorStateHandle> stateHandles,
-            CloseableRegistry cancelStreamRegistry)
-            throws Exception {
-
+            OperatorStateBackendParameters parameters) throws Exception {
         // the default for RocksDB; eventually there can be a operator state backend based on
         // RocksDB, too.
         final boolean asyncSnapshots = true;
         return new DefaultOperatorStateBackendBuilder(
-                        env.getUserCodeClassLoader().asClassLoader(),
-                        env.getExecutionConfig(),
+                        parameters.getEnv().getUserCodeClassLoader().asClassLoader(),
+                        parameters.getEnv().getExecutionConfig(),
                         asyncSnapshots,
-                        stateHandles,
-                        cancelStreamRegistry)
+                        parameters.getStateHandles(),
+                        parameters.getCancelStreamRegistry())
                 .build();
     }
 
@@ -717,9 +742,7 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
      * @return The type of the priority queue state.
      */
     public PriorityQueueStateType getPriorityQueueStateType() {
-        return priorityQueueStateType == null
-                ? TIMER_SERVICE_FACTORY.defaultValue()
-                : priorityQueueStateType;
+        return priorityQueueConfig.getPriorityQueueStateType();
     }
 
     /**
@@ -727,7 +750,7 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
      * not explicitly set.
      */
     public void setPriorityQueueStateType(PriorityQueueStateType priorityQueueStateType) {
-        this.priorityQueueStateType = checkNotNull(priorityQueueStateType);
+        this.priorityQueueConfig.setPriorityQueueStateType(priorityQueueStateType);
     }
 
     // ------------------------------------------------------------------------
@@ -738,7 +761,7 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
      * Sets the predefined options for RocksDB.
      *
      * <p>If user-configured options within {@link RocksDBConfigurableOptions} is set (through
-     * flink-conf.yaml) or a user-defined options factory is set (via {@link
+     * config.yaml) or a user-defined options factory is set (via {@link
      * #setRocksDBOptions(RocksDBOptionsFactory)}), then the options from the factory are applied on
      * top of the here specified predefined options and customized options.
      *
@@ -754,7 +777,7 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
      * PredefinedOptions#DEFAULT}.
      *
      * <p>If user-configured options within {@link RocksDBConfigurableOptions} is set (through
-     * flink-conf.yaml) of a user-defined options factory is set (via {@link
+     * config.yaml) of a user-defined options factory is set (via {@link
      * #setRocksDBOptions(RocksDBOptionsFactory)}), then the options from the factory are applied on
      * top of the predefined and customized options.
      *
@@ -834,10 +857,29 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
         this.writeBatchSize = writeBatchSize;
     }
 
+    /** Set RocksDBMemoryFactory. */
+    public void setRocksDBMemoryFactory(RocksDBMemoryFactory rocksDBMemoryFactory) {
+        this.rocksDBMemoryFactory = checkNotNull(rocksDBMemoryFactory);
+    }
+
     double getOverlapFractionThreshold() {
         return overlapFractionThreshold == UNDEFINED_OVERLAP_FRACTION_THRESHOLD
                 ? RESTORE_OVERLAP_FRACTION_THRESHOLD.defaultValue()
                 : overlapFractionThreshold;
+    }
+
+    boolean getIncrementalRestoreAsyncCompactAfterRescale() {
+        return incrementalRestoreAsyncCompactAfterRescale.getOrDefault(
+                INCREMENTAL_RESTORE_ASYNC_COMPACT_AFTER_RESCALE.defaultValue());
+    }
+
+    boolean getUseIngestDbRestoreMode() {
+        return useIngestDbRestoreMode.getOrDefault(USE_INGEST_DB_RESTORE_MODE.defaultValue());
+    }
+
+    boolean isRescalingUseDeleteFilesInRange() {
+        return rescalingUseDeleteFilesInRange.getOrDefault(
+                USE_DELETE_FILES_IN_RANGE_DURING_RESCALING.defaultValue());
     }
 
     // ------------------------------------------------------------------------
@@ -849,6 +891,8 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
             base = new Configuration();
         }
         Configuration configuration = new Configuration();
+        Map<String, String> baseMap = base.toMap();
+        Map<String, String> onTopMap = onTop.toMap();
         for (ConfigOption<?> option : RocksDBConfigurableOptions.CANDIDATE_CONFIGS) {
             Optional<?> baseValue = base.getOptional(option);
             Optional<?> topValue = onTop.getOptional(option);
@@ -856,20 +900,25 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
             if (topValue.isPresent() || baseValue.isPresent()) {
                 Object validValue = topValue.isPresent() ? topValue.get() : baseValue.get();
                 RocksDBConfigurableOptions.checkArgumentValid(option, validValue);
-                configuration.setString(option.key(), validValue.toString());
+                String valueString =
+                        topValue.isPresent()
+                                ? onTopMap.get(option.key())
+                                : baseMap.get(option.key());
+                configuration.setString(option.key(), valueString);
             }
         }
         return configuration;
     }
 
     @VisibleForTesting
-    RocksDBResourceContainer createOptionsAndResourceContainer() {
-        return createOptionsAndResourceContainer(null, false);
+    RocksDBResourceContainer createOptionsAndResourceContainer(@Nullable File instanceBasePath) {
+        return createOptionsAndResourceContainer(null, instanceBasePath, false);
     }
 
     @VisibleForTesting
     private RocksDBResourceContainer createOptionsAndResourceContainer(
             @Nullable OpaqueMemoryResource<RocksDBSharedResources> sharedResources,
+            @Nullable File instanceBasePath,
             boolean enableStatistics) {
 
         return new RocksDBResourceContainer(
@@ -877,6 +926,7 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
                 predefinedOptions != null ? predefinedOptions : PredefinedOptions.DEFAULT,
                 rocksDbOptionsFactory,
                 sharedResources,
+                instanceBasePath,
                 enableStatistics);
     }
 
@@ -900,6 +950,13 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
 
     @VisibleForTesting
     static void ensureRocksDBIsLoaded(String tempDirectory) throws IOException {
+        ensureRocksDBIsLoaded(tempDirectory, NativeLibraryLoader::getInstance);
+    }
+
+    @VisibleForTesting
+    static void ensureRocksDBIsLoaded(
+            String tempDirectory, Supplier<NativeLibraryLoader> nativeLibraryLoaderSupplier)
+            throws IOException {
         synchronized (EmbeddedRocksDBStateBackend.class) {
             if (!rocksDbInitialized) {
 
@@ -935,7 +992,8 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
                         rocksLibFolder.mkdirs();
 
                         // explicitly load the JNI dependency if it has not been loaded before
-                        NativeLibraryLoader.getInstance()
+                        nativeLibraryLoaderSupplier
+                                .get()
                                 .loadLibrary(rocksLibFolder.getAbsolutePath());
 
                         // this initialization here should validate that the loading succeeded

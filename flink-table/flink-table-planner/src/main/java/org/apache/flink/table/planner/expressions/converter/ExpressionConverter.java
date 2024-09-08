@@ -26,6 +26,7 @@ import org.apache.flink.table.expressions.Expression;
 import org.apache.flink.table.expressions.ExpressionVisitor;
 import org.apache.flink.table.expressions.FieldReferenceExpression;
 import org.apache.flink.table.expressions.LocalReferenceExpression;
+import org.apache.flink.table.expressions.NestedFieldReferenceExpression;
 import org.apache.flink.table.expressions.TimeIntervalUnit;
 import org.apache.flink.table.expressions.TimePointUnit;
 import org.apache.flink.table.expressions.TypeLiteralExpression;
@@ -34,7 +35,6 @@ import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
 import org.apache.flink.table.planner.calcite.RexFieldVariable;
 import org.apache.flink.table.planner.expressions.RexNodeExpression;
 import org.apache.flink.table.planner.expressions.converter.CallExpressionConvertRule.ConvertContext;
-import org.apache.flink.table.planner.utils.ShortcutUtils;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.TimeType;
 
@@ -63,19 +63,12 @@ import java.util.Optional;
 import java.util.stream.Collectors;
 
 import static org.apache.flink.table.planner.typeutils.SymbolUtil.commonToCalcite;
+import static org.apache.flink.table.planner.utils.ShortcutUtils.unwrapContext;
 import static org.apache.flink.table.planner.utils.TimestampStringUtils.fromLocalDateTime;
 import static org.apache.flink.table.runtime.types.LogicalTypeDataTypeConverter.fromDataTypeToLogicalType;
 
 /** Visit expression to generator {@link RexNode}. */
 public class ExpressionConverter implements ExpressionVisitor<RexNode> {
-
-    private static final List<CallExpressionConvertRule> FUNCTION_CONVERT_CHAIN =
-            Arrays.asList(
-                    new LegacyScalarFunctionConvertRule(),
-                    new FunctionDefinitionConvertRule(),
-                    new OverConvertRule(),
-                    new DirectConvertRule(),
-                    new CustomizedConvertRule());
 
     private final RelBuilder relBuilder;
     private final FlinkTypeFactory typeFactory;
@@ -85,14 +78,22 @@ public class ExpressionConverter implements ExpressionVisitor<RexNode> {
         this.relBuilder = relBuilder;
         this.typeFactory = (FlinkTypeFactory) relBuilder.getRexBuilder().getTypeFactory();
         this.dataTypeFactory =
-                ShortcutUtils.unwrapContext(relBuilder.getCluster())
-                        .getCatalogManager()
-                        .getDataTypeFactory();
+                unwrapContext(relBuilder.getCluster()).getCatalogManager().getDataTypeFactory();
+    }
+
+    private List<CallExpressionConvertRule> getFunctionConvertChain(boolean isBatchMode) {
+        return Arrays.asList(
+                new LegacyScalarFunctionConvertRule(),
+                new FunctionDefinitionConvertRule(),
+                new OverConvertRule(),
+                DirectConvertRule.instance(isBatchMode),
+                new CustomizedConvertRule());
     }
 
     @Override
     public RexNode visit(CallExpression call) {
-        for (CallExpressionConvertRule rule : FUNCTION_CONVERT_CHAIN) {
+        boolean isBatchMode = unwrapContext(relBuilder).isBatchMode();
+        for (CallExpressionConvertRule rule : getFunctionConvertChain(isBatchMode)) {
             Optional<RexNode> converted = rule.convert(call, newFunctionContext());
             if (converted.isPresent()) {
                 return converted.get();
@@ -200,6 +201,17 @@ public class ExpressionConverter implements ExpressionVisitor<RexNode> {
         // So the output fields order will be changed too.
         // See RelBuilder.aggregate, it use ImmutableBitSet to store groupings,
         return relBuilder.field(fieldReference.getName());
+    }
+
+    @Override
+    public RexNode visit(NestedFieldReferenceExpression nestedFieldReference) {
+        String[] fieldNames = nestedFieldReference.getFieldNames();
+        RexNode fieldAccess = relBuilder.field(fieldNames[0]);
+        for (int i = 1; i < fieldNames.length; i++) {
+            fieldAccess =
+                    relBuilder.getRexBuilder().makeFieldAccess(fieldAccess, fieldNames[i], true);
+        }
+        return fieldAccess;
     }
 
     @Override

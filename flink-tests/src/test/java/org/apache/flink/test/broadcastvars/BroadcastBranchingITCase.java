@@ -20,6 +20,7 @@ package org.apache.flink.test.broadcastvars;
 
 import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.api.common.functions.JoinFunction;
+import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.functions.RichFlatMapFunction;
 import org.apache.flink.api.java.DataSet;
 import org.apache.flink.api.java.ExecutionEnvironment;
@@ -28,8 +29,7 @@ import org.apache.flink.api.java.operators.JoinOperator;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.api.java.tuple.Tuple4;
-import org.apache.flink.configuration.Configuration;
-import org.apache.flink.test.util.JavaProgramTestBase;
+import org.apache.flink.test.util.JavaProgramTestBaseJUnit4;
 import org.apache.flink.util.Collector;
 
 import java.util.Collection;
@@ -38,7 +38,7 @@ import java.util.List;
 import static org.apache.flink.test.util.TestBaseUtils.compareResultAsText;
 
 /** Test broadcast input after branching. */
-public class BroadcastBranchingITCase extends JavaProgramTestBase {
+public class BroadcastBranchingITCase extends JavaProgramTestBaseJUnit4 {
     private static final String RESULT = "(2,112)\n";
 
     //              Sc1(id,a,b,c) --
@@ -159,7 +159,7 @@ public class BroadcastBranchingITCase extends JavaProgramTestBase {
         private Collection<Tuple2<String, Integer>> zs;
 
         @Override
-        public void open(Configuration parameters) throws Exception {
+        public void open(OpenContext openContext) throws Exception {
             this.zs = getRuntimeContext().getBroadcastVariable("z");
         }
 

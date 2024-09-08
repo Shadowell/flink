@@ -22,7 +22,7 @@ import org.apache.flink.api.dag.Transformation
 import org.apache.flink.configuration.ExecutionOptions
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectReader
 import org.apache.flink.streaming.api.graph.StreamGraph
-import org.apache.flink.table.api.{ExplainDetail, PlanReference, TableConfig, TableException}
+import org.apache.flink.table.api._
 import org.apache.flink.table.api.PlanReference.{ContentPlanReference, FilePlanReference, ResourcePlanReference}
 import org.apache.flink.table.catalog.{CatalogManager, FunctionCatalog}
 import org.apache.flink.table.delegation.{Executor, InternalPlan}
@@ -92,7 +92,14 @@ class StreamPlanner(
     transformations ++ planner.extraTransformations
   }
 
-  override def explain(operations: util.List[Operation], extraDetails: ExplainDetail*): String = {
+  override def explain(
+      operations: util.List[Operation],
+      format: ExplainFormat,
+      extraDetails: ExplainDetail*): String = {
+    if (format != ExplainFormat.TEXT) {
+      throw new UnsupportedOperationException(
+        s"Unsupported explain format [${format.getClass.getCanonicalName}]")
+    }
     val (sinkRelNodes, optimizedRelNodes, execGraph, streamGraph) = getExplainGraphs(operations)
 
     val sb = new mutable.StringBuilder
@@ -106,7 +113,12 @@ class StreamPlanner(
         sb.append(System.lineSeparator)
     }
 
-    sb.append("== Optimized Physical Plan ==")
+    val withAdvice = extraDetails.contains(ExplainDetail.PLAN_ADVICE)
+    if (withAdvice) {
+      sb.append("== Optimized Physical Plan With Advice ==")
+    } else {
+      sb.append("== Optimized Physical Plan ==")
+    }
     sb.append(System.lineSeparator)
     val explainLevel = if (extraDetails.contains(ExplainDetail.ESTIMATED_COST)) {
       SqlExplainLevel.ALL_ATTRIBUTES
@@ -114,11 +126,21 @@ class StreamPlanner(
       SqlExplainLevel.DIGEST_ATTRIBUTES
     }
     val withChangelogTraits = extraDetails.contains(ExplainDetail.CHANGELOG_MODE)
-    optimizedRelNodes.foreach {
-      rel =>
-        sb.append(
-          FlinkRelOptUtil.toString(rel, explainLevel, withChangelogTraits = withChangelogTraits))
-        sb.append(System.lineSeparator)
+    if (withAdvice) {
+      sb.append(
+        FlinkRelOptUtil
+          .toString(
+            optimizedRelNodes,
+            explainLevel,
+            withChangelogTraits = withChangelogTraits,
+            withAdvice = true))
+    } else {
+      optimizedRelNodes.foreach {
+        rel =>
+          sb.append(
+            FlinkRelOptUtil.toString(rel, explainLevel, withChangelogTraits = withChangelogTraits))
+          sb.append(System.lineSeparator)
+      }
     }
 
     sb.append("== Optimized Execution Plan ==")
@@ -145,57 +167,6 @@ class StreamPlanner(
       functionCatalog,
       catalogManager,
       classLoader)
-  }
-
-  override def loadPlan(planReference: PlanReference): InternalPlan = {
-    val ctx = createSerdeContext
-    val objectReader: ObjectReader = JsonSerdeUtil.createObjectReader(ctx)
-    val execNodeGraph = planReference match {
-      case filePlanReference: FilePlanReference =>
-        objectReader.readValue(filePlanReference.getFile, classOf[ExecNodeGraph])
-      case contentPlanReference: ContentPlanReference =>
-        objectReader.readValue(contentPlanReference.getContent, classOf[ExecNodeGraph])
-      case resourcePlanReference: ResourcePlanReference =>
-        val url = resourcePlanReference.getClassLoader
-          .getResource(resourcePlanReference.getResourcePath)
-        if (url == null) {
-          throw new IOException("Cannot load the plan reference from classpath: " + planReference)
-        }
-        objectReader.readValue(new File(url.toURI), classOf[ExecNodeGraph])
-      case _ =>
-        throw new IllegalStateException(
-          "Unknown PlanReference. This is a bug, please contact the developers")
-    }
-
-    new ExecNodeGraphInternalPlan(
-      JsonSerdeUtil
-        .createObjectWriter(ctx)
-        .withDefaultPrettyPrinter()
-        .writeValueAsString(execNodeGraph),
-      execNodeGraph)
-  }
-
-  override def compilePlan(modifyOperations: util.List[ModifyOperation]): InternalPlan = {
-    beforeTranslation()
-    val relNodes = modifyOperations.map(translateToRel)
-    val optimizedRelNodes = optimize(relNodes)
-    val execGraph = translateToExecNodeGraph(optimizedRelNodes, isCompiled = true)
-    afterTranslation()
-
-    new ExecNodeGraphInternalPlan(
-      JsonSerdeUtil
-        .createObjectWriter(createSerdeContext)
-        .withDefaultPrettyPrinter()
-        .writeValueAsString(execGraph),
-      execGraph)
-  }
-
-  override def translatePlan(plan: InternalPlan): util.List[Transformation[_]] = {
-    beforeTranslation()
-    val execGraph = plan.asInstanceOf[ExecNodeGraphInternalPlan].getExecNodeGraph
-    val transformations = translateToPlan(execGraph)
-    afterTranslation()
-    transformations
   }
 
   override def explainPlan(plan: InternalPlan, extraDetails: ExplainDetail*): String = {

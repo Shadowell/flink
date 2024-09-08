@@ -21,6 +21,7 @@ package org.apache.flink.test.operators;
 import org.apache.flink.api.common.InvalidProgramException;
 import org.apache.flink.api.common.functions.FlatJoinFunction;
 import org.apache.flink.api.common.functions.JoinFunction;
+import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.functions.RichFlatJoinFunction;
 import org.apache.flink.api.common.operators.base.JoinOperatorBase.JoinHint;
 import org.apache.flink.api.java.DataSet;
@@ -31,11 +32,10 @@ import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.api.java.tuple.Tuple5;
 import org.apache.flink.api.java.tuple.Tuple7;
 import org.apache.flink.api.java.typeutils.GenericTypeInfo;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.test.operators.util.CollectionDataSets;
 import org.apache.flink.test.operators.util.CollectionDataSets.CustomType;
 import org.apache.flink.test.operators.util.CollectionDataSets.POJO;
-import org.apache.flink.test.util.MultipleProgramsTestBase;
+import org.apache.flink.test.util.MultipleProgramsTestBaseJUnit4;
 import org.apache.flink.util.Collector;
 
 import org.junit.Test;
@@ -53,7 +53,7 @@ import static org.apache.flink.test.util.TestBaseUtils.compareResultAsTuples;
  */
 @SuppressWarnings("serial")
 @RunWith(Parameterized.class)
-public class OuterJoinITCase extends MultipleProgramsTestBase {
+public class OuterJoinITCase extends MultipleProgramsTestBaseJUnit4 {
 
     public OuterJoinITCase(TestExecutionMode mode) {
         super(mode);
@@ -753,7 +753,7 @@ public class OuterJoinITCase extends MultipleProgramsTestBase {
         private int broadcast;
 
         @Override
-        public void open(Configuration config) {
+        public void open(OpenContext openContext) {
             Collection<Integer> ints = this.getRuntimeContext().getBroadcastVariable("ints");
             int sum = 0;
             for (Integer i : ints) {

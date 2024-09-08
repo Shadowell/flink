@@ -18,6 +18,7 @@
 
 package org.apache.flink.optimizer.plantranslate;
 
+import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.aggregators.AggregatorRegistry;
 import org.apache.flink.api.common.aggregators.AggregatorWithName;
@@ -34,6 +35,7 @@ import org.apache.flink.configuration.AlgorithmOptions;
 import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.GlobalConfiguration;
+import org.apache.flink.configuration.JobManagerOptions;
 import org.apache.flink.optimizer.CompilerException;
 import org.apache.flink.optimizer.dag.TempMode;
 import org.apache.flink.optimizer.plan.BulkIterationPlanNode;
@@ -172,9 +174,8 @@ public class JobGraphGenerator implements Visitor<PlanNode> {
     }
 
     public JobGraphGenerator(Configuration config) {
-        this.defaultMaxFan = config.getInteger(AlgorithmOptions.SPILLING_MAX_FAN);
-        this.defaultSortSpillingThreshold =
-                config.getFloat(AlgorithmOptions.SORT_SPILLING_THRESHOLD);
+        this.defaultMaxFan = config.get(AlgorithmOptions.SPILLING_MAX_FAN);
+        this.defaultSortSpillingThreshold = config.get(AlgorithmOptions.SORT_SPILLING_THRESHOLD);
         this.useLargeRecordHandler =
                 config.getBoolean(
                         ConfigConstants.USE_LARGE_RECORD_HANDLER_KEY,
@@ -210,6 +211,8 @@ public class JobGraphGenerator implements Visitor<PlanNode> {
         this.iterationStack = new ArrayList<IterationPlanNode>();
 
         this.sharingGroup = new SlotSharingGroup();
+
+        ExecutionConfig executionConfig = program.getOriginalPlan().getExecutionConfig();
 
         // this starts the traversal that generates the job graph
         program.accept(this);
@@ -261,11 +264,18 @@ public class JobGraphGenerator implements Visitor<PlanNode> {
                     JobGraphBuilder.newBatchJobGraphBuilder()
                             .setJobId(jobId)
                             .setJobName(program.getJobName())
-                            .setExecutionConfig(program.getOriginalPlan().getExecutionConfig())
+                            .setExecutionConfig(executionConfig)
                             .addJobVertices(vertices.values())
                             .addJobVertices(auxVertices)
                             .addUserArtifacts(userArtifacts)
                             .build();
+
+            if (executionConfig.getSchedulerType().isPresent()
+                    && executionConfig.getSchedulerType().get()
+                            == JobManagerOptions.SchedulerType.AdaptiveBatch) {
+                graph.setDynamic(true);
+            }
+
         } catch (IOException e) {
             throw new CompilerException(
                     "Could not serialize the ExecutionConfig."

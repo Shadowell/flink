@@ -23,6 +23,7 @@ import org.apache.flink.table.planner.plan.metadata.FlinkRelMetadataQuery
 import com.google.common.collect.ImmutableList
 import org.apache.calcite.plan.{RelOptRule, RelOptRuleCall}
 import org.apache.calcite.plan.RelOptRule.{any, operand}
+import org.apache.calcite.rel.RelCollations
 import org.apache.calcite.rel.core.{Aggregate, AggregateCall, RelFactories}
 import org.apache.calcite.rel.core.Aggregate.Group
 import org.apache.calcite.tools.RelBuilderFactory
@@ -43,7 +44,7 @@ class AggregateReduceGroupingRule(relBuilderFactory: RelBuilderFactory)
 
   override def matches(call: RelOptRuleCall): Boolean = {
     val agg: Aggregate = call.rel(0)
-    agg.getGroupCount > 1 && agg.getGroupType == Group.SIMPLE && !agg.indicator
+    agg.getGroupCount > 1 && agg.getGroupType == Group.SIMPLE
   }
 
   override def onMatch(call: RelOptRuleCall): Unit = {
@@ -92,8 +93,11 @@ class AggregateReduceGroupingRule(relBuilderFactory: RelBuilderFactory)
           FlinkSqlOperatorTable.AUXILIARY_GROUP,
           false,
           false,
+          false,
           ImmutableList.of(column),
           -1,
+          null,
+          RelCollations.EMPTY,
           fieldType,
           fieldName)
     }.toList
@@ -102,7 +106,6 @@ class AggregateReduceGroupingRule(relBuilderFactory: RelBuilderFactory)
     val newAgg = agg.copy(
       agg.getTraitSet,
       input,
-      agg.indicator, // always false here
       newGrouping,
       ImmutableList.of(newGrouping),
       newAggCalls

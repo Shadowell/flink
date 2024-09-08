@@ -149,15 +149,17 @@ public class FileSystemTableSink extends AbstractFileSystemTable
             ProviderContext providerContext, DataStream<RowData> dataStream, Context sinkContext) {
         final int inputParallelism = dataStream.getParallelism();
         final int parallelism = Optional.ofNullable(configuredParallelism).orElse(inputParallelism);
+        boolean parallelismConfigued = configuredParallelism != null;
 
         if (sinkContext.isBounded()) {
-            return createBatchSink(dataStream, sinkContext, parallelism);
+            return createBatchSink(dataStream, sinkContext, parallelism, parallelismConfigued);
         } else {
             if (overwrite) {
                 throw new IllegalStateException("Streaming mode not support overwrite.");
             }
 
-            return createStreamingSink(providerContext, dataStream, sinkContext, parallelism);
+            return createStreamingSink(
+                    providerContext, dataStream, sinkContext, parallelism, parallelismConfigued);
         }
     }
 
@@ -170,33 +172,53 @@ public class FileSystemTableSink extends AbstractFileSystemTable
     }
 
     private DataStreamSink<RowData> createBatchSink(
-            DataStream<RowData> inputStream, Context sinkContext, final int parallelism) {
+            DataStream<RowData> inputStream,
+            Context sinkContext,
+            final int parallelism,
+            boolean parallelismConfigured) {
         FileSystemOutputFormat.Builder<RowData> builder = new FileSystemOutputFormat.Builder<>();
-        builder.setPartitionComputer(partitionComputer());
-        builder.setDynamicGrouped(dynamicGrouping);
-        builder.setPartitionColumns(partitionKeys.toArray(new String[0]));
-        builder.setFormatFactory(createOutputFormatFactory(sinkContext));
-        builder.setMetaStoreFactory(new EmptyMetaStoreFactory(path));
-        builder.setOverwrite(overwrite);
-        builder.setStaticPartitions(staticPartitions);
-        builder.setTempPath(toStagingPath());
-        builder.setOutputFileConfig(
-                OutputFileConfig.builder().withPartPrefix("part-" + UUID.randomUUID()).build());
-        return inputStream
-                .writeUsingOutputFormat(builder.build())
-                .setParallelism(parallelism)
-                .name("Filesystem");
+        builder.setPartitionComputer(partitionComputer())
+                .setDynamicGrouped(dynamicGrouping)
+                .setPartitionColumns(partitionKeys.toArray(new String[0]))
+                .setFormatFactory(createOutputFormatFactory(sinkContext))
+                .setMetaStoreFactory(new EmptyMetaStoreFactory(path))
+                .setOverwrite(overwrite)
+                .setStaticPartitions(staticPartitions)
+                .setPath(path)
+                .setOutputFileConfig(
+                        OutputFileConfig.builder()
+                                .withPartPrefix("part-" + UUID.randomUUID())
+                                .build())
+                .setPartitionCommitPolicyFactory(
+                        new PartitionCommitPolicyFactory(
+                                tableOptions.get(
+                                        FileSystemConnectorOptions
+                                                .SINK_PARTITION_COMMIT_POLICY_KIND),
+                                tableOptions.get(
+                                        FileSystemConnectorOptions
+                                                .SINK_PARTITION_COMMIT_POLICY_CLASS),
+                                tableOptions.get(
+                                        FileSystemConnectorOptions
+                                                .SINK_PARTITION_COMMIT_SUCCESS_FILE_NAME),
+                                tableOptions.get(
+                                        FileSystemConnectorOptions
+                                                .SINK_PARTITION_COMMIT_POLICY_CLASS_PARAMETERS)));
+
+        DataStreamSink<RowData> sink = inputStream.writeUsingOutputFormat(builder.build());
+        sink.getTransformation().setParallelism(parallelism, parallelismConfigured);
+        return sink.name("Filesystem");
     }
 
     private DataStreamSink<?> createStreamingSink(
             ProviderContext providerContext,
             DataStream<RowData> dataStream,
             Context sinkContext,
-            final int parallelism) {
+            final int parallelism,
+            boolean parallelismConfigured) {
         FileSystemFactory fsFactory = FileSystem::get;
         RowDataPartitionComputer computer = partitionComputer();
 
-        boolean autoCompaction = tableOptions.getBoolean(AUTO_COMPACTION);
+        boolean autoCompaction = tableOptions.get(AUTO_COMPACTION);
         Object writer = createWriter(sinkContext);
         boolean isEncoder = writer instanceof Encoder;
         TableBucketAssigner assigner = new TableBucketAssigner(computer);
@@ -265,7 +287,8 @@ public class FileSystemTableSink extends AbstractFileSystemTable
                             path,
                             reader,
                             compactionSize,
-                            parallelism);
+                            parallelism,
+                            parallelismConfigured);
         } else {
             writerStream =
                     StreamingSink.writer(
@@ -275,7 +298,8 @@ public class FileSystemTableSink extends AbstractFileSystemTable
                             bucketsBuilder,
                             parallelism,
                             partitionKeys,
-                            tableOptions);
+                            tableOptions,
+                            parallelismConfigured);
         }
 
         return StreamingSink.sink(
@@ -347,19 +371,6 @@ public class FileSystemTableSink extends AbstractFileSystemTable
                         "Compaction reader not support DataStructure converter.");
             }
         };
-    }
-
-    private Path toStagingPath() {
-        Path stagingDir = new Path(path, ".staging_" + System.currentTimeMillis());
-        try {
-            FileSystem fs = stagingDir.getFileSystem();
-            Preconditions.checkState(
-                    fs.exists(stagingDir) || fs.mkdirs(stagingDir),
-                    "Failed to create staging dir " + stagingDir);
-            return stagingDir;
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
     }
 
     @SuppressWarnings("unchecked")

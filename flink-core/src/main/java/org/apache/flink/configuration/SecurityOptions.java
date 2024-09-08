@@ -18,9 +18,13 @@
 
 package org.apache.flink.configuration;
 
+import org.apache.flink.annotation.Experimental;
+import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.annotation.docs.Documentation;
 import org.apache.flink.configuration.description.Description;
+import org.apache.flink.core.security.token.DelegationTokenProvider;
 
+import java.security.KeyStore;
 import java.time.Duration;
 import java.util.List;
 
@@ -32,7 +36,12 @@ import static org.apache.flink.configuration.description.TextElement.text;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /** The set of configuration options relating to security. */
+@PublicEvolving
 public class SecurityOptions {
+
+    public static final String DELEGATION_TOKEN_PROVIDER_PREFIX =
+            DelegationTokenProvider.CONFIG_PREFIX + ".<serviceName>";
+    private static final String DEFAULT_KEYSTORE_DOC = "JVM default keystore type";
 
     // ------------------------------------------------------------------------
     //  Custom Security Service Loader
@@ -110,6 +119,8 @@ public class SecurityOptions {
                                     + " (for example, `Client,KafkaClient` to use the credentials for ZooKeeper authentication and for"
                                     + " Kafka authentication)");
 
+    /** @deprecated Use {@link #DELEGATION_TOKENS_ENABLED}. */
+    @Deprecated
     @Documentation.Section(Documentation.Sections.SECURITY_AUTH_KERBEROS)
     public static final ConfigOption<Boolean> KERBEROS_FETCH_DELEGATION_TOKEN =
             key("security.kerberos.fetch.delegation-token")
@@ -132,6 +143,8 @@ public class SecurityOptions {
                     .withDescription(
                             "The time period when keytab login happens automatically in order to always have a valid TGT.");
 
+    /** @deprecated Use {@link #DELEGATION_TOKENS_RENEWAL_RETRY_BACKOFF}. */
+    @Deprecated
     @Documentation.Section(Documentation.Sections.SECURITY_AUTH_KERBEROS)
     public static final ConfigOption<Duration> KERBEROS_TOKENS_RENEWAL_RETRY_BACKOFF =
             key("security.kerberos.tokens.renewal.retry.backoff")
@@ -140,6 +153,8 @@ public class SecurityOptions {
                     .withDescription(
                             "The time period how long to wait before retrying to obtain new delegation tokens after a failure.");
 
+    /** @deprecated Use {@link #DELEGATION_TOKENS_RENEWAL_TIME_RATIO}. */
+    @Deprecated
     @Documentation.Section(Documentation.Sections.SECURITY_AUTH_KERBEROS)
     public static final ConfigOption<Double> KERBEROS_TOKENS_RENEWAL_TIME_RATIO =
             key("security.kerberos.tokens.renewal.time-ratio")
@@ -156,9 +171,74 @@ public class SecurityOptions {
                     .noDefaultValue()
                     .withDeprecatedKeys("yarn.security.kerberos.additionalFileSystems")
                     .withDescription(
-                            "A comma-separated list of Kerberos-secured Hadoop filesystems Flink is going to access. For example, "
-                                    + "security.kerberos.access.hadoopFileSystems=hdfs://namenode2:9002,hdfs://namenode3:9003. "
+                            "A semicolon-separated list of Kerberos-secured Hadoop filesystems Flink is going to access. For example, "
+                                    + "security.kerberos.access.hadoopFileSystems=hdfs://namenode2:9002;hdfs://namenode3:9003. "
                                     + "The JobManager needs to have access to these filesystems to retrieve the security tokens.");
+
+    // ------------------------------------------------------------------------
+    //  Delegation Token Options
+    // ------------------------------------------------------------------------
+
+    @Documentation.Section(value = Documentation.Sections.SECURITY_DELEGATION_TOKEN, position = 1)
+    public static final ConfigOption<Boolean> DELEGATION_TOKENS_ENABLED =
+            key("security.delegation.tokens.enabled")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDeprecatedKeys(KERBEROS_FETCH_DELEGATION_TOKEN.key())
+                    .withDescription(
+                            "Indicates whether to start delegation tokens system for external services.");
+
+    @Documentation.Section(value = Documentation.Sections.SECURITY_DELEGATION_TOKEN, position = 2)
+    public static final ConfigOption<Duration> DELEGATION_TOKENS_RENEWAL_RETRY_BACKOFF =
+            key("security.delegation.tokens.renewal.retry.backoff")
+                    .durationType()
+                    .defaultValue(Duration.ofHours(1))
+                    .withDeprecatedKeys(KERBEROS_TOKENS_RENEWAL_RETRY_BACKOFF.key())
+                    .withDescription(
+                            "The time period how long to wait before retrying to obtain new delegation tokens after a failure.");
+
+    @Documentation.Section(value = Documentation.Sections.SECURITY_DELEGATION_TOKEN, position = 3)
+    public static final ConfigOption<Double> DELEGATION_TOKENS_RENEWAL_TIME_RATIO =
+            key("security.delegation.tokens.renewal.time-ratio")
+                    .doubleType()
+                    .defaultValue(0.75)
+                    .withDeprecatedKeys(KERBEROS_TOKENS_RENEWAL_TIME_RATIO.key())
+                    .withDescription(
+                            "Ratio of the tokens's expiration time when new credentials should be re-obtained.");
+
+    @Documentation.SuffixOption(DELEGATION_TOKEN_PROVIDER_PREFIX)
+    @Documentation.Section(value = Documentation.Sections.SECURITY_DELEGATION_TOKEN, position = 4)
+    public static final ConfigOption<Boolean> DELEGATION_TOKEN_PROVIDER_ENABLED =
+            key("enabled")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription(
+                            "Controls whether to obtain credentials for services when security is "
+                                    + "enabled. By default, credentials for all supported services "
+                                    + "are retrieved when those services are configured, but it's "
+                                    + "possible to disable that behavior if it somehow conflicts "
+                                    + "with the application being run.");
+
+    /**
+     * Returns a view over the given configuration via which options can be set/retrieved for the
+     * given provider.
+     *
+     * <pre>
+     *     Configuration config = ...
+     *     SecurityOptions.forProvider(config, "my_provider")
+     *         .set(SecurityOptions.DELEGATION_TOKEN_PROVIDER_ENABLED, false)
+     *         ...
+     * </pre>
+     *
+     * @param configuration backing configuration
+     * @param providerName provider name
+     * @return view over configuration
+     */
+    @Experimental
+    public static Configuration forProvider(Configuration configuration, String providerName) {
+        return new DelegatingConfiguration(
+                configuration, DelegationTokenProvider.CONFIG_PREFIX + "." + providerName + ".");
+    }
 
     // ------------------------------------------------------------------------
     //  ZooKeeper Security Options
@@ -197,7 +277,7 @@ public class SecurityOptions {
                                     + "Specific internal components (rpc, data transport, blob server) may optionally override "
                                     + "this through their own settings.");
 
-    /** Enable SSL for internal communication (akka rpc, netty data transport, blob server). */
+    /** Enable SSL for internal communication (pekko rpc, netty data transport, blob server). */
     @Documentation.Section(Documentation.Sections.SECURITY_SSL)
     public static final ConfigOption<Boolean> SSL_INTERNAL_ENABLED =
             key("security.ssl.internal.enabled")
@@ -308,6 +388,17 @@ public class SecurityOptions {
                             "The secret to decrypt the key in the keystore "
                                     + "for Flink's internal endpoints (rpc, data transport, blob server).");
 
+    /** For internal SSL, the type of the keystore. */
+    @Documentation.Section(Documentation.Sections.SECURITY_SSL)
+    @Documentation.OverrideDefault(DEFAULT_KEYSTORE_DOC)
+    public static final ConfigOption<String> SSL_INTERNAL_KEYSTORE_TYPE =
+            key("security.ssl.internal.keystore-type")
+                    .stringType()
+                    .defaultValue(KeyStore.getDefaultType())
+                    .withDescription(
+                            "The type of keystore "
+                                    + "for Flink's internal endpoints (rpc, data transport, blob server).");
+
     /**
      * For internal SSL, the truststore file containing the public CA certificates to verify the ssl
      * peers.
@@ -329,6 +420,17 @@ public class SecurityOptions {
                     .noDefaultValue()
                     .withDescription(
                             "The password to decrypt the truststore "
+                                    + "for Flink's internal endpoints (rpc, data transport, blob server).");
+
+    /** For internal SSL, the type of the truststore. */
+    @Documentation.Section(Documentation.Sections.SECURITY_SSL)
+    @Documentation.OverrideDefault(DEFAULT_KEYSTORE_DOC)
+    public static final ConfigOption<String> SSL_INTERNAL_TRUSTSTORE_TYPE =
+            key("security.ssl.internal.truststore-type")
+                    .stringType()
+                    .defaultValue(KeyStore.getDefaultType())
+                    .withDescription(
+                            "The type of truststore "
                                     + "for Flink's internal endpoints (rpc, data transport, blob server).");
 
     /** For internal SSL, the sha1 fingerprint of the internal certificate to verify the client. */
@@ -379,6 +481,16 @@ public class SecurityOptions {
                             "The secret to decrypt the key in the keystore "
                                     + "for Flink's external REST endpoints.");
 
+    /** For external (REST) SSL, the type of the keystore. */
+    @Documentation.Section(Documentation.Sections.SECURITY_SSL)
+    @Documentation.OverrideDefault(DEFAULT_KEYSTORE_DOC)
+    public static final ConfigOption<String> SSL_REST_KEYSTORE_TYPE =
+            key("security.ssl.rest.keystore-type")
+                    .stringType()
+                    .defaultValue(KeyStore.getDefaultType())
+                    .withDescription(
+                            "The type of the keystore for Flink's external REST endpoints.");
+
     /**
      * For external (REST) SSL, the truststore file containing the public CA certificates to verify
      * the ssl peers.
@@ -401,6 +513,16 @@ public class SecurityOptions {
                     .withDescription(
                             "The password to decrypt the truststore "
                                     + "for Flink's external REST endpoints.");
+
+    /** For external (REST) SSL, the type of the truststore. */
+    @Documentation.Section(Documentation.Sections.SECURITY_SSL)
+    @Documentation.OverrideDefault(DEFAULT_KEYSTORE_DOC)
+    public static final ConfigOption<String> SSL_REST_TRUSTSTORE_TYPE =
+            key("security.ssl.rest.truststore-type")
+                    .stringType()
+                    .defaultValue(KeyStore.getDefaultType())
+                    .withDescription(
+                            "The type of the truststore for Flink's external REST endpoints.");
 
     /** For external (REST) SSL, the sha1 fingerprint of the rest client certificate to verify. */
     @Documentation.Section(Documentation.Sections.SECURITY_SSL)
@@ -554,20 +676,20 @@ public class SecurityOptions {
      */
     public static boolean isInternalSSLEnabled(Configuration sslConfig) {
         @SuppressWarnings("deprecation")
-        final boolean fallbackFlag = sslConfig.getBoolean(SSL_ENABLED);
-        return sslConfig.getBoolean(SSL_INTERNAL_ENABLED, fallbackFlag);
+        final boolean fallbackFlag = sslConfig.get(SSL_ENABLED);
+        return sslConfig.get(SSL_INTERNAL_ENABLED, fallbackFlag);
     }
 
     /** Checks whether SSL for the external REST endpoint is enabled. */
     public static boolean isRestSSLEnabled(Configuration sslConfig) {
         @SuppressWarnings("deprecation")
-        final boolean fallbackFlag = sslConfig.getBoolean(SSL_ENABLED);
-        return sslConfig.getBoolean(SSL_REST_ENABLED, fallbackFlag);
+        final boolean fallbackFlag = sslConfig.get(SSL_ENABLED);
+        return sslConfig.get(SSL_REST_ENABLED, fallbackFlag);
     }
 
     /** Checks whether mutual SSL authentication for the external REST endpoint is enabled. */
     public static boolean isRestSSLAuthenticationEnabled(Configuration sslConfig) {
         checkNotNull(sslConfig, "sslConfig");
-        return isRestSSLEnabled(sslConfig) && sslConfig.getBoolean(SSL_REST_AUTHENTICATION_ENABLED);
+        return isRestSSLEnabled(sslConfig) && sslConfig.get(SSL_REST_AUTHENTICATION_ENABLED);
     }
 }

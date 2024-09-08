@@ -25,10 +25,12 @@ import org.apache.flink.configuration.SecurityOptions;
 import org.apache.commons.lang3.StringUtils;
 
 import java.io.File;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
+import static org.apache.flink.configuration.SecurityOptions.KERBEROS_RELOGIN_PERIOD;
 import static org.apache.flink.configuration.SecurityOptions.SECURITY_CONTEXT_FACTORY_CLASSES;
 import static org.apache.flink.configuration.SecurityOptions.SECURITY_MODULE_FACTORY_CLASSES;
 import static org.apache.flink.util.Preconditions.checkNotNull;
@@ -52,6 +54,8 @@ public class SecurityConfiguration {
     private final boolean isZkSaslDisable;
 
     private final boolean useTicketCache;
+
+    private final Duration tgtRenewalPeriod;
 
     private final String keytab;
 
@@ -86,15 +90,14 @@ public class SecurityConfiguration {
             List<String> securityContextFactory,
             List<String> securityModuleFactories) {
         this.flinkConfig = checkNotNull(flinkConf);
-        this.isZkSaslDisable = flinkConf.getBoolean(SecurityOptions.ZOOKEEPER_SASL_DISABLE);
-        this.keytab = flinkConf.getString(SecurityOptions.KERBEROS_LOGIN_KEYTAB);
-        this.principal = flinkConf.getString(SecurityOptions.KERBEROS_LOGIN_PRINCIPAL);
-        this.useTicketCache = flinkConf.getBoolean(SecurityOptions.KERBEROS_LOGIN_USETICKETCACHE);
-        this.loginContextNames =
-                parseList(flinkConf.getString(SecurityOptions.KERBEROS_LOGIN_CONTEXTS));
-        this.zkServiceName = flinkConf.getString(SecurityOptions.ZOOKEEPER_SASL_SERVICE_NAME);
-        this.zkLoginContextName =
-                flinkConf.getString(SecurityOptions.ZOOKEEPER_SASL_LOGIN_CONTEXT_NAME);
+        this.isZkSaslDisable = flinkConf.get(SecurityOptions.ZOOKEEPER_SASL_DISABLE);
+        this.keytab = flinkConf.get(SecurityOptions.KERBEROS_LOGIN_KEYTAB);
+        this.principal = flinkConf.get(SecurityOptions.KERBEROS_LOGIN_PRINCIPAL);
+        this.useTicketCache = flinkConf.get(SecurityOptions.KERBEROS_LOGIN_USETICKETCACHE);
+        this.tgtRenewalPeriod = flinkConf.get(KERBEROS_RELOGIN_PERIOD);
+        this.loginContextNames = parseList(flinkConf.get(SecurityOptions.KERBEROS_LOGIN_CONTEXTS));
+        this.zkServiceName = flinkConf.get(SecurityOptions.ZOOKEEPER_SASL_SERVICE_NAME);
+        this.zkLoginContextName = flinkConf.get(SecurityOptions.ZOOKEEPER_SASL_LOGIN_CONTEXT_NAME);
         this.securityModuleFactories = Collections.unmodifiableList(securityModuleFactories);
         this.securityContextFactory = securityContextFactory;
         validate();
@@ -114,6 +117,10 @@ public class SecurityConfiguration {
 
     public boolean useTicketCache() {
         return useTicketCache;
+    }
+
+    public Duration getTgtRenewalPeriod() {
+        return tgtRenewalPeriod;
     }
 
     public Configuration getFlinkConfig() {

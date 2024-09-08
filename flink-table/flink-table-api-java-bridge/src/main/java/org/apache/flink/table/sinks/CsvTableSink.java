@@ -129,8 +129,8 @@ public class CsvTableSink implements AppendStreamTableSink<Row> {
             sink.setParallelism(numFiles);
         } else {
             // if file number is not set, use input parallelism to make it chained.
-            csvRows.setParallelism(dataStream.getParallelism());
-            sink.setParallelism(dataStream.getParallelism());
+            csvRows.getTransformation().setParallelism(dataStream.getParallelism(), false);
+            sink.getTransformation().setParallelism(dataStream.getParallelism(), false);
         }
 
         sink.name(TableConnectorUtils.generateRuntimeName(CsvTableSink.class, fieldNames));
@@ -162,6 +162,7 @@ public class CsvTableSink implements AppendStreamTableSink<Row> {
     }
 
     /** Formats a Row into a String with fields separated by the field delimiter. */
+    @Internal
     public static class CsvFormatter implements MapFunction<Row, String> {
         private static final long serialVersionUID = 1L;
 

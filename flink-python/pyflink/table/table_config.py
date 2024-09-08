@@ -36,7 +36,7 @@ class TableConfig(object):
     This class is a pure API class that abstracts configuration from various sources. Currently,
     configuration can be set in any of the following layers (in the given order):
 
-    - flink-conf.yaml
+    - config.yaml
     - CLI parameters
     - :class:`~pyflink.datastream.StreamExecutionEnvironment` when bridging to DataStream API
     - :func:`~EnvironmentSettings.Builder.with_configuration`
@@ -106,8 +106,8 @@ class TableConfig(object):
         jars_key = jvm.org.apache.flink.configuration.PipelineOptions.JARS.key()
         classpaths_key = jvm.org.apache.flink.configuration.PipelineOptions.CLASSPATHS.key()
         if key in [jars_key, classpaths_key]:
-            add_jars_to_context_class_loader(value.split(";"))
-
+            jar_urls = Configuration.parse_jars_value(value, jvm)
+            add_jars_to_context_class_loader(jar_urls)
         return self
 
     def get_local_timezone(self) -> str:
@@ -281,6 +281,13 @@ class TableConfig(object):
         """
         self._j_table_config.addConfiguration(configuration._j_configuration)
 
+    def to_map(self) -> dict:
+        """
+        Calls the toMap method of the underlying Java TableConfig to get the configuration map.
+        :return: A Python dictionary containing the configuration key value pairs.
+        """
+        return dict(self._j_table_config.toMap())
+
     def get_sql_dialect(self) -> SqlDialect:
         """
         Returns the current SQL dialect.
@@ -321,11 +328,11 @@ class TableConfig(object):
         .. note::
 
             Please make sure the uploaded python environment matches the platform that the cluster
-            is running on and that the python version must be 3.6 or higher.
+            is running on and that the python version must be 3.7 or higher.
 
         .. note::
 
-            The python udf worker depends on Apache Beam (version == 2.38.0).
+            The python udf worker depends on Apache Beam (version == 2.43.0).
             Please ensure that the specified environment meets the above requirements.
 
         :param python_exec: The path of python interpreter.

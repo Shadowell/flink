@@ -23,7 +23,6 @@ export interface JvmInfo {
 }
 
 export interface EnvironmentInfo {
-  environment: Array<{ key: string; value: string }>;
   jvm: JvmInfo;
   classpath: string[];
 }
@@ -43,5 +42,6 @@ export interface Configuration {
     'web-history': boolean;
     'web-submit': boolean;
     'web-cancel': boolean;
+    'web-rescale': boolean;
   };
 }

@@ -36,6 +36,10 @@ Flink 为 Kafka、Hive 和不同的文件系统提供了预定义的连接器。
 
 本页重点介绍如何开发自定义的用户定义连接器。
 
+{{< hint warning >}}从 Flink v1.16 开始, TableEnvironment 引入了一个用户类加载器，以在 table 程序、SQL Client、SQL Gateway 中保持一致的类加载行为。该类加载器会统一管理所有的用户 jar 包，包括通过 `ADD JAR` 或 `CREATE FUNCTION .. USING JAR ..` 添加的 jar 资源。
+ 在用户自定义连接器中，应该将 `Thread.currentThread().getContextClassLoader()` 替换成该用户类加载器去加载类。否则，可能会发生 `ClassNotFoundException` 的异常。该用户类加载器可以通过 `DynamicTableFactory.Context` 获得。
+{{< /hint >}}
+
 概述
 --------
 
@@ -154,7 +158,11 @@ Flink 会对工厂类逐个进行检查，确保其“标识符”是全局唯�
 
 可以实现更多的功能接口来优化数据源，比如实现 `SupportsProjectionPushDown` 接口，这样在运行时在 source 端就处理数据。在 `org.apache.flink.table.connector.source.abilities` 包下可以找到各种功能接口，更多内容可查看 [source abilities table](#source-abilities)。
 
-实现 `ScanTableSource` 接口的类必须能够生产 Flink 内部数据结构，因此每条记录都会按照`org.apache.flink.table.data.RowData` 的方式进行处理。Flink 运行时提供了转换机制保证 source 端可以处理常见的数据结构，并且在最后进行转换。
+返回的 **_scan runtime provider_** 提供了读取数据的运行时实现。有多种运行时实现的接口，其中 `SourceProvider` 是推荐使用的核心接口。
+
+不管使用那种运行时实现的接口，source 端的运行时实现必须能够生产 Flink 内部数据结构，因此每条记录都会按照`org.apache.flink.table.data.RowData` 的方式进行处理。Flink 运行时提供了转换机制保证 source 端可以处理常见的数据结构，并且在最后进行转换。
+
+为了支持指定并行度，动态表的工厂类需要支持在 `org.apache.flink.table.factories.FactoryUtil` 中定义的 `scan.parallelism` 可选参数，并将参数的值传递给一个实现了 `ParallelismProvider` 接口的运行时实现接口。
 
 <a name="lookup-table-source"></a>
 
@@ -211,6 +219,10 @@ Flink 会对工厂类逐个进行检查，确保其“标识符”是全局唯�
         <td>{{< gh_link file="flink-table/flink-table-common/src/main/java/org/apache/flink/table/connector/source/abilities/SupportsSourceWatermark.java" name="SupportsSourceWatermark" >}}</td>
         <td>支持使用 <code>ScanTableSource</code> 中提供的水印策略。当使用 <code>CREATE TABLE</code> DDL 时，<可以使用></可以使用> <code>SOURCE_WATERMARK()</code> 来告诉 planner 调用这个接口中的水印策略方法。</td>
     </tr>
+    <tr>
+        <td>{{< gh_link file="flink-table/flink-table-common/src/main/java/org/apache/flink/table/connector/source/abilities/SupportsRowLevelModificationScan.java" name="SupportsRowLevelModificationScan" >}}</td>
+        <td>支持将读数据的上下文 <code>RowLevelModificationScanContext</code> 从 <code>ScanTableSource</code> 传递给实现了 <code>SupportsRowLevelDelete</code>，<code>SupportsRowLevelUpdate</code> 的 sink 端。
+    </tr>
     </tbody>
 </table>
 
@@ -232,7 +244,11 @@ Flink 会对工厂类逐个进行检查，确保其“标识符”是全局唯�
 
 可以实现 `SupportsOverwrite` 等功能接口，在 sink 端处理数据。可以在 `org.apache.flink.table.connector.sink.abilities` 包下找到各种功能接口，更多内容可查看[sink abilities table](#sink-abilities)。
 
-实现 `DynamicTableSink` 接口的类必须能够处理 Flink 内部数据结构，因此每条记录都会按照 `org.apache.flink.table.data.RowData` 的方式进行处理。Flink 运行时提供了转换机制来保证在最开始进行数据类型转换，以便 sink 端可以处理常见的数据结构。
+返回的 **_sink runtime provider_** 提供了写出数据的运行时实现。有多种运行时实现的接口，其中 `SinkV2Provider` 是推荐使用的核心接口。
+
+不管使用那种运行时实现的接口，sink 端的运行时实现必须能够处理 Flink 内部数据结构，因此每条记录都会按照 `org.apache.flink.table.data.RowData` 的方式进行处理。Flink 运行时提供了转换机制来保证在最开始进行数据类型转换，以便 sink 端可以处理常见的数据结构。
+
+为了支持指定并行度，动态表的工厂类需要支持在 `org.apache.flink.table.factories.FactoryUtil` 中定义的 `sink.parallelism` 可选参数，并将参数的值传递给一个实现了 `ParallelismProvider` 接口的运行时实现接口。
 
 <a name="sink-abilities"></a>
 
@@ -252,11 +268,31 @@ Flink 会对工厂类逐个进行检查，确保其“标识符”是全局唯�
     </tr>
     <tr>
         <td>{{< gh_link file="flink-table/flink-table-common/src/main/java/org/apache/flink/table/connector/sink/abilities/SupportsPartitioning.java" name="SupportsPartitioning" >}}</td>
-        <td>支持 <code>DynamicTableSink</code> 写入元数据列。</td>
+        <td>支持 <code>DynamicTableSink</code> 写入分区数据。</td>
+    </tr>
+    <tr>
+        <td>{{< gh_link file="flink-table/flink-table-common/src/main/java/org/apache/flink/table/connector/source/abilities/SupportsBucketing.java" name="SupportsBucketing" >}}</td>
+        <td>Enables bucketing for a <code>DynamicTableSink</code>.</td>
     </tr>
     <tr>
         <td>{{< gh_link file="flink-table/flink-table-common/src/main/java/org/apache/flink/table/connector/sink/abilities/SupportsWritingMetadata.java" name="SupportsWritingMetadata" >}}</td>
-        <td>支持 <code>DynamicTableSource</code> 写入元数据列。sink 端会在消费数据行时，在最后接受相应的元数据信息并进行持久化，其中包括元数据的格式信息。</td>
+        <td>支持 <code>DynamicTableSink</code> 写入元数据列。Sink 端会在消费数据行时，在最后接受相应的元数据信息并进行持久化，其中包括元数据的格式信息。</td>
+    </tr>
+    <tr>
+        <td>{{< gh_link file="flink-table/flink-table-common/src/main/java/org/apache/flink/table/connector/sink/abilities/SupportsDeletePushDown.java" name="SupportsDeletePushDown" >}}</td>
+        <td>支持将 <code>DELETE</code> 语句中的过滤条件下推到 <code>DynamicTableSink</code>，sink 端可以直接根据过滤条件来删除数据。</td>
+    </tr>
+    <tr>
+        <td>{{< gh_link file="flink-table/flink-table-common/src/main/java/org/apache/flink/table/connector/sink/abilities/SupportsRowLevelDelete.java" name="SupportsRowLevelDelete" >}}</td>
+        <td>支持 <code>DynamicTableSink</code> 根据行级别的变更来删除已有的数据。该接口的实现者需要告诉 Planner 如何产生这些行变更，并且需要消费这些行变更从而达到删除数据的目的。</td>
+    </tr>
+    <tr>
+        <td>{{< gh_link file="flink-table/flink-table-common/src/main/java/org/apache/flink/table/connector/sink/abilities/SupportsRowLevelUpdate.java" name="SupportsRowLevelUpdate" >}}</td>
+        <td>支持 <code>DynamicTableSink</code> 根据行级别的变更来更新已有的数据。该接口的实现者需要告诉 Planner 如何产生这些行变更，并且需要消费这些行变更从而达到更新数据的目的。</td>
+    </tr>
+    <tr>
+        <td>{{< gh_link file="flink-table/flink-table-common/src/main/java/org/apache/flink/table/connector/sink/abilities/SupportsStaging.java" name="SupportsStaging" >}}</td>
+        <td>支持 <code>DynamicTableSink</code> 提供 CTAS(CREATE TABLE AS SELECT) 或 RTAS([CREATE OR] REPLACE TABLE AS SELECT) 的原子性语义。该接口的实现者需要返回一个提供原子性语义实现的 <code>StagedTable</code> 对象。</td>
     </tr>
     </tbody>
 </table>
@@ -728,7 +764,7 @@ public class SocketSourceFunction extends RichSourceFunction<RowData> implements
   }
 
   @Override
-  public void open(Configuration parameters) throws Exception {
+  public void open(OpenContext openContext) throws Exception {
     deserializer.open(() -> getRuntimeContext().getMetricGroup());
   }
 

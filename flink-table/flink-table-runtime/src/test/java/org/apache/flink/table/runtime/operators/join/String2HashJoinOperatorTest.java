@@ -25,6 +25,7 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.tasks.TwoInputStreamTask;
 import org.apache.flink.streaming.runtime.tasks.TwoInputStreamTaskTestHarness;
 import org.apache.flink.streaming.util.TestHarnessUtil;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.data.binary.BinaryRowData;
@@ -45,14 +46,14 @@ import org.apache.flink.table.runtime.util.JoinUtil;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.types.logical.VarCharType;
 
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.Serializable;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 
 /** Test for {@link HashJoinOperator}. */
-public class String2HashJoinOperatorTest implements Serializable {
+class String2HashJoinOperatorTest implements Serializable {
 
     private InternalTypeInfo<RowData> typeInfo =
             InternalTypeInfo.ofFields(VarCharType.STRING_TYPE, VarCharType.STRING_TYPE);
@@ -115,7 +116,7 @@ public class String2HashJoinOperatorTest implements Serializable {
     }
 
     @Test
-    public void testInnerHashJoin() throws Exception {
+    void testInnerHashJoin() throws Exception {
 
         init(false, false, true);
 
@@ -161,7 +162,7 @@ public class String2HashJoinOperatorTest implements Serializable {
     }
 
     @Test
-    public void testProbeOuterHashJoin() throws Exception {
+    void testProbeOuterHashJoin() throws Exception {
 
         init(true, false, false);
 
@@ -208,7 +209,7 @@ public class String2HashJoinOperatorTest implements Serializable {
     }
 
     @Test
-    public void testBuildOuterHashJoin() throws Exception {
+    void testBuildOuterHashJoin() throws Exception {
 
         init(false, true, false);
 
@@ -255,7 +256,7 @@ public class String2HashJoinOperatorTest implements Serializable {
     }
 
     @Test
-    public void testFullOuterHashJoin() throws Exception {
+    void testFullOuterHashJoin() throws Exception {
 
         init(true, true, true);
 
@@ -398,11 +399,27 @@ public class String2HashJoinOperatorTest implements Serializable {
                 };
         boolean[] filterNulls = new boolean[] {true};
 
+        int maxNumFileHandles =
+                ExecutionConfigOptions.TABLE_EXEC_SORT_MAX_NUM_FILE_HANDLES.defaultValue();
+        boolean compressionEnable =
+                ExecutionConfigOptions.TABLE_EXEC_SPILL_COMPRESSION_ENABLED.defaultValue();
+        int compressionBlockSize =
+                (int)
+                        ExecutionConfigOptions.TABLE_EXEC_SPILL_COMPRESSION_BLOCK_SIZE
+                                .defaultValue()
+                                .getBytes();
+        boolean asyncMergeEnable =
+                ExecutionConfigOptions.TABLE_EXEC_SORT_ASYNC_MERGE_ENABLED.defaultValue();
+
         SortMergeJoinFunction sortMergeJoinFunction =
                 new SortMergeJoinFunction(
                         0,
                         flinkJoinType,
                         buildLeft,
+                        maxNumFileHandles,
+                        compressionEnable,
+                        compressionBlockSize,
+                        asyncMergeEnable,
                         condFuncCode,
                         probeProjectionCode,
                         buildProjectionCode,
@@ -416,6 +433,8 @@ public class String2HashJoinOperatorTest implements Serializable {
         return HashJoinOperator.newHashJoinOperator(
                 hashJoinType,
                 buildLeft,
+                compressionEnable,
+                compressionBlockSize,
                 condFuncCode,
                 reverseJoinFunction,
                 filterNulls,

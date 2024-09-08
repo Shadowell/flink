@@ -258,8 +258,7 @@ public class NetworkBufferPool
                                             + " or you may increase the timeout which is %dms by setting the key '%s'.",
                                     getConfigDescription(),
                                     requestSegmentsTimeout.toMillis(),
-                                    NettyShuffleEnvironmentOptions
-                                            .NETWORK_EXCLUSIVE_BUFFERS_REQUEST_TIMEOUT_MILLISECONDS
+                                    NettyShuffleEnvironmentOptions.NETWORK_BUFFERS_REQUEST_TIMEOUT
                                             .key()));
                 }
             }
@@ -366,36 +365,38 @@ public class NetworkBufferPool
         }
     }
 
-    public long getNumberOfRequestedMemorySegments() {
+    public long getEstimatedNumberOfRequestedMemorySegments() {
         long requestedSegments = 0;
         synchronized (factoryLock) {
             for (LocalBufferPool bufferPool : allBufferPools) {
-                requestedSegments += bufferPool.getNumberOfRequestedMemorySegments();
+                requestedSegments += bufferPool.getEstimatedNumberOfRequestedMemorySegments();
             }
         }
         return requestedSegments;
     }
 
-    public long getRequestedMemory() {
-        return getNumberOfRequestedMemorySegments() * memorySegmentSize;
+    public long getEstimatedRequestedMemory() {
+        return getEstimatedNumberOfRequestedMemorySegments() * memorySegmentSize;
     }
 
-    public int getRequestedSegmentsUsage() {
+    public int getEstimatedRequestedSegmentsUsage() {
         int totalNumberOfMemorySegments = getTotalNumberOfMemorySegments();
         return totalNumberOfMemorySegments == 0
                 ? 0
                 : Math.toIntExact(
-                        100L * getNumberOfRequestedMemorySegments() / totalNumberOfMemorySegments);
+                        100L
+                                * getEstimatedNumberOfRequestedMemorySegments()
+                                / totalNumberOfMemorySegments);
     }
 
     @VisibleForTesting
     Optional<String> getUsageWarning() {
-        int currentUsage = getRequestedSegmentsUsage();
+        int currentUsage = getEstimatedRequestedSegmentsUsage();
         Optional<String> message = Optional.empty();
         // do not log warning if the value hasn't changed to avoid spamming warnings.
         if (currentUsage >= USAGE_WARNING_THRESHOLD && lastCheckedUsage != currentUsage) {
             long totalMemory = getTotalMemory();
-            long requestedMemory = getRequestedMemory();
+            long requestedMemory = getEstimatedRequestedMemory();
             long missingMemory = requestedMemory - totalMemory;
             message =
                     Optional.of(

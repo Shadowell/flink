@@ -43,4 +43,23 @@ public interface ParserResource {
 
     @Resources.BaseMessage("CREATE FUNCTION USING JAR syntax is not applicable to {0} language.")
     Resources.ExInst<ParseException> createFunctionUsingJar(String language);
+
+    @Resources.BaseMessage("WITH DRAIN could only be used after WITH SAVEPOINT.")
+    Resources.ExInst<ParseException> withDrainOnlyUsedWithSavepoint();
+
+    @Resources.BaseMessage("Bucket count must be a positive integer.")
+    Resources.ExInst<ParseException> bucketCountMustBePositiveInteger();
+
+    @Resources.BaseMessage(
+            "MATERIALIZED TABLE only supports define interval type FRESHNESS, please refer to the materialized table document.")
+    Resources.ExInst<ParseException> unsupportedFreshnessType();
+
+    @Resources.BaseMessage("CREATE TEMPORARY MATERIALIZED TABLE is not supported.")
+    Resources.ExInst<ParseException> createTemporaryMaterializedTableUnsupported();
+
+    @Resources.BaseMessage("REPLACE MATERIALIZED TABLE is not supported.")
+    Resources.ExInst<ParseException> replaceMaterializedTableUnsupported();
+
+    @Resources.BaseMessage("DROP TEMPORARY MATERIALIZED TABLE is not supported.")
+    Resources.ExInst<ParseException> dropTemporaryMaterializedTableUnsupported();
 }

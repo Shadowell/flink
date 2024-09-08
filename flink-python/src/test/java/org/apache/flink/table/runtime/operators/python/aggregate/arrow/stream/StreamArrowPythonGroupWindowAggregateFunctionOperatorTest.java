@@ -37,10 +37,10 @@ import org.apache.flink.table.runtime.groupwindow.WindowEnd;
 import org.apache.flink.table.runtime.groupwindow.WindowStart;
 import org.apache.flink.table.runtime.operators.python.aggregate.arrow.AbstractArrowPythonAggregateFunctionOperator;
 import org.apache.flink.table.runtime.operators.window.Window;
-import org.apache.flink.table.runtime.operators.window.assigners.SlidingWindowAssigner;
-import org.apache.flink.table.runtime.operators.window.assigners.WindowAssigner;
-import org.apache.flink.table.runtime.operators.window.triggers.EventTimeTriggers;
-import org.apache.flink.table.runtime.operators.window.triggers.Trigger;
+import org.apache.flink.table.runtime.operators.window.groupwindow.assigners.GroupWindowAssigner;
+import org.apache.flink.table.runtime.operators.window.groupwindow.assigners.SlidingWindowAssigner;
+import org.apache.flink.table.runtime.operators.window.groupwindow.triggers.EventTimeTriggers;
+import org.apache.flink.table.runtime.operators.window.groupwindow.triggers.Trigger;
 import org.apache.flink.table.runtime.utils.PassThroughPythonAggregateFunctionRunner;
 import org.apache.flink.table.runtime.utils.PythonTestUtils;
 import org.apache.flink.table.types.logical.BigIntType;
@@ -155,7 +155,7 @@ class StreamArrowPythonGroupWindowAggregateFunctionOperatorTest
     @Test
     void testFinishBundleTriggeredOnCheckpoint() throws Exception {
         Configuration conf = new Configuration();
-        conf.setInteger(PythonOptions.MAX_BUNDLE_SIZE, 10);
+        conf.set(PythonOptions.MAX_BUNDLE_SIZE, 10);
         OneInputStreamOperatorTestHarness<RowData, RowData> testHarness = getTestHarness(conf);
 
         long initialTime = 0L;
@@ -244,7 +244,7 @@ class StreamArrowPythonGroupWindowAggregateFunctionOperatorTest
     @Test
     void testFinishBundleTriggeredByCount() throws Exception {
         Configuration conf = new Configuration();
-        conf.setInteger(PythonOptions.MAX_BUNDLE_SIZE, 4);
+        conf.set(PythonOptions.MAX_BUNDLE_SIZE, 4);
         OneInputStreamOperatorTestHarness<RowData, RowData> testHarness = getTestHarness(conf);
 
         long initialTime = 0L;
@@ -324,90 +324,6 @@ class StreamArrowPythonGroupWindowAggregateFunctionOperatorTest
         expectedOutput.add(new Watermark(20000L));
 
         assertOutputEquals("Output was not correct.", expectedOutput, testHarness.getOutput());
-    }
-
-    @Test
-    void testFinishBundleTriggeredByTime() throws Exception {
-        Configuration conf = new Configuration();
-        conf.setInteger(PythonOptions.MAX_BUNDLE_SIZE, 10);
-        conf.setLong(PythonOptions.MAX_BUNDLE_TIME_MILLS, 1000L);
-        OneInputStreamOperatorTestHarness<RowData, RowData> testHarness = getTestHarness(conf);
-
-        long initialTime = 0L;
-        ConcurrentLinkedQueue<Object> expectedOutput = new ConcurrentLinkedQueue<>();
-
-        testHarness.open();
-
-        testHarness.processElement(
-                new StreamRecord<>(newBinaryRow(true, "c1", "c2", 0L, 0L), initialTime + 1));
-        testHarness.processElement(
-                new StreamRecord<>(newBinaryRow(true, "c1", "c4", 1L, 6000L), initialTime + 2));
-        testHarness.processElement(
-                new StreamRecord<>(newBinaryRow(true, "c1", "c6", 2L, 10000L), initialTime + 3));
-        testHarness.processElement(
-                new StreamRecord<>(newBinaryRow(true, "c2", "c8", 3L, 0L), initialTime + 4));
-        testHarness.processWatermark(new Watermark(20000L));
-        assertOutputEquals(
-                "FinishBundle should not be triggered.", expectedOutput, testHarness.getOutput());
-
-        testHarness.setProcessingTime(1000L);
-        expectedOutput.add(
-                new StreamRecord<>(
-                        newRow(
-                                true,
-                                "c1",
-                                0L,
-                                TimestampData.fromEpochMillis(-5000L),
-                                TimestampData.fromEpochMillis(5000L))));
-
-        expectedOutput.add(
-                new StreamRecord<>(
-                        newRow(
-                                true,
-                                "c2",
-                                3L,
-                                TimestampData.fromEpochMillis(-5000L),
-                                TimestampData.fromEpochMillis(5000L))));
-        expectedOutput.add(
-                new StreamRecord<>(
-                        newRow(
-                                true,
-                                "c2",
-                                3L,
-                                TimestampData.fromEpochMillis(0L),
-                                TimestampData.fromEpochMillis(10000L))));
-
-        expectedOutput.add(
-                new StreamRecord<>(
-                        newRow(
-                                true,
-                                "c1",
-                                0L,
-                                TimestampData.fromEpochMillis(0L),
-                                TimestampData.fromEpochMillis(10000L))));
-
-        expectedOutput.add(
-                new StreamRecord<>(
-                        newRow(
-                                true,
-                                "c1",
-                                1L,
-                                TimestampData.fromEpochMillis(5000L),
-                                TimestampData.fromEpochMillis(15000L))));
-        expectedOutput.add(
-                new StreamRecord<>(
-                        newRow(
-                                true,
-                                "c1",
-                                2L,
-                                TimestampData.fromEpochMillis(10000L),
-                                TimestampData.fromEpochMillis(20000L))));
-
-        expectedOutput.add(new Watermark(20000L));
-
-        assertOutputEquals("Output was not correct.", expectedOutput, testHarness.getOutput());
-
-        testHarness.close();
     }
 
     @Override
@@ -493,7 +409,7 @@ class StreamArrowPythonGroupWindowAggregateFunctionOperatorTest
                 RowType udfInputType,
                 RowType udfOutputType,
                 int inputTimeFieldIndex,
-                WindowAssigner windowAssigner,
+                GroupWindowAssigner windowAssigner,
                 Trigger trigger,
                 long allowedLateness,
                 NamedWindowProperty[] namedProperties,
@@ -517,7 +433,7 @@ class StreamArrowPythonGroupWindowAggregateFunctionOperatorTest
         @Override
         public PythonFunctionRunner createPythonFunctionRunner() {
             return new PassThroughPythonAggregateFunctionRunner(
-                    getRuntimeContext().getTaskName(),
+                    getRuntimeContext().getTaskInfo().getTaskName(),
                     PythonTestUtils.createTestProcessEnvironmentManager(),
                     udfInputType,
                     udfOutputType,

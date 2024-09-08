@@ -16,10 +16,15 @@
  * limitations under the License.
  */
 
-import { ChangeDetectorRef, Component, Inject, OnDestroy, OnInit, Type } from '@angular/core';
+import { DecimalPipe, NgIf } from '@angular/common';
+import { ChangeDetectionStrategy, ChangeDetectorRef, Component, Inject, OnDestroy, OnInit, Type } from '@angular/core';
 import { of, Subject } from 'rxjs';
 import { catchError, map, mergeMap, takeUntil } from 'rxjs/operators';
 
+import { DynamicHostComponent } from '@flink-runtime-web/components/dynamic/dynamic-host.component';
+import { HumanizeBytesPipe } from '@flink-runtime-web/components/humanize-bytes.pipe';
+import { HumanizeDatePipe } from '@flink-runtime-web/components/humanize-date.pipe';
+import { HumanizeDurationPipe } from '@flink-runtime-web/components/humanize-duration.pipe';
 import { VertexTaskManagerDetail } from '@flink-runtime-web/interfaces';
 import {
   JOB_OVERVIEW_MODULE_CONFIG,
@@ -28,6 +33,7 @@ import {
 } from '@flink-runtime-web/pages/job/overview/job-overview.config';
 import { JobService } from '@flink-runtime-web/services';
 import { typeDefinition } from '@flink-runtime-web/utils/strong-type';
+import { NzTableModule } from 'ng-zorro-antd/table';
 import { NzTableSortFn } from 'ng-zorro-antd/table/src/table.types';
 
 import { JobLocalService } from '../../job-local.service';
@@ -41,16 +47,27 @@ function createSortFn(
 @Component({
   selector: 'flink-job-overview-drawer-taskmanagers',
   templateUrl: './job-overview-drawer-taskmanagers.component.html',
-  styleUrls: ['./job-overview-drawer-taskmanagers.component.less']
+  styleUrls: ['./job-overview-drawer-taskmanagers.component.less'],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [
+    NzTableModule,
+    NgIf,
+    HumanizeBytesPipe,
+    DecimalPipe,
+    HumanizeDatePipe,
+    HumanizeDurationPipe,
+    DynamicHostComponent
+  ],
+  standalone: true
 })
 export class JobOverviewDrawerTaskmanagersComponent implements OnInit, OnDestroy {
-  public readonly trackByHost = (_: number, node: VertexTaskManagerDetail): string => node.host;
+  public readonly trackByEndpoint = (_: number, node: VertexTaskManagerDetail): string => node.endpoint;
 
   public readonly sortReadBytesFn = createSortFn(item => item.metrics?.['read-bytes']);
   public readonly sortReadRecordsFn = createSortFn(item => item.metrics?.['read-records']);
   public readonly sortWriteBytesFn = createSortFn(item => item.metrics?.['write-bytes']);
   public readonly sortWriteRecordsFn = createSortFn(item => item.metrics?.['write-records']);
-  public readonly sortHostFn = createSortFn(item => item.host);
+  public readonly sortEndpointFn = createSortFn(item => item.endpoint);
   public readonly sortStartTimeFn = createSortFn(item => item['start-time']);
   public readonly sortDurationFn = createSortFn(item => item.duration);
   public readonly sortEndTimeFn = createSortFn(item => item['end-time']);

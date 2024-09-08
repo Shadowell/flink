@@ -93,9 +93,9 @@ class StreamArrowPythonRowTimeBoundedRangeOperatorTest
     }
 
     @Test
-    void testFinishBundleTriggeredOnCheckpoint() throws Exception {
+    void testFinishBundleTriggeredOnWatermark() throws Exception {
         Configuration conf = new Configuration();
-        conf.setInteger(PythonOptions.MAX_BUNDLE_SIZE, 10);
+        conf.set(PythonOptions.MAX_BUNDLE_SIZE, 10);
         OneInputStreamOperatorTestHarness<RowData, RowData> testHarness = getTestHarness(conf);
 
         long initialTime = 0L;
@@ -113,11 +113,6 @@ class StreamArrowPythonRowTimeBoundedRangeOperatorTest
                 new StreamRecord<>(newBinaryRow(true, "c2", "c8", 3L, 2L), initialTime + 3));
         testHarness.processWatermark(new Watermark(10000L));
 
-        assertOutputEquals(
-                "FinishBundle should not be triggered.", expectedOutput, testHarness.getOutput());
-        // checkpoint trigger finishBundle
-        testHarness.prepareSnapshotPreBarrier(0L);
-
         expectedOutput.add(new StreamRecord<>(newRow(true, "c1", "c2", 0L, 1L, 0L)));
         expectedOutput.add(new StreamRecord<>(newRow(true, "c1", "c4", 1L, 1L, 0L)));
         expectedOutput.add(new StreamRecord<>(newRow(true, "c2", "c8", 3L, 2L, 3L)));
@@ -132,7 +127,7 @@ class StreamArrowPythonRowTimeBoundedRangeOperatorTest
     @Test
     void testFinishBundleTriggeredByCount() throws Exception {
         Configuration conf = new Configuration();
-        conf.setInteger(PythonOptions.MAX_BUNDLE_SIZE, 4);
+        conf.set(PythonOptions.MAX_BUNDLE_SIZE, 4);
         OneInputStreamOperatorTestHarness<RowData, RowData> testHarness = getTestHarness(conf);
 
         long initialTime = 0L;
@@ -159,42 +154,6 @@ class StreamArrowPythonRowTimeBoundedRangeOperatorTest
         expectedOutput.add(new StreamRecord<>(newRow(true, "c2", "c8", 3L, 2L, 3L)));
         expectedOutput.add(new StreamRecord<>(newRow(true, "c1", "c6", 2L, 10L, 2L)));
         expectedOutput.add(new Watermark(1000L));
-        assertOutputEquals("Output was not correct.", expectedOutput, testHarness.getOutput());
-
-        testHarness.close();
-    }
-
-    @Test
-    void testFinishBundleTriggeredByTime() throws Exception {
-        Configuration conf = new Configuration();
-        conf.setInteger(PythonOptions.MAX_BUNDLE_SIZE, 10);
-        conf.setLong(PythonOptions.MAX_BUNDLE_TIME_MILLS, 1000L);
-        OneInputStreamOperatorTestHarness<RowData, RowData> testHarness = getTestHarness(conf);
-
-        long initialTime = 0L;
-        ConcurrentLinkedQueue<Object> expectedOutput = new ConcurrentLinkedQueue<>();
-
-        testHarness.open();
-
-        testHarness.processElement(
-                new StreamRecord<>(newBinaryRow(true, "c1", "c2", 0L, 1L), initialTime + 1));
-        testHarness.processElement(
-                new StreamRecord<>(newBinaryRow(true, "c1", "c4", 1L, 1L), initialTime + 2));
-        testHarness.processElement(
-                new StreamRecord<>(newBinaryRow(true, "c1", "c6", 2L, 10L), initialTime + 3));
-        testHarness.processElement(
-                new StreamRecord<>(newBinaryRow(true, "c2", "c8", 3L, 2L), initialTime + 3));
-        testHarness.processWatermark(new Watermark(10000L));
-        assertOutputEquals(
-                "FinishBundle should not be triggered.", expectedOutput, testHarness.getOutput());
-
-        testHarness.setProcessingTime(1000L);
-        expectedOutput.add(new StreamRecord<>(newRow(true, "c1", "c2", 0L, 1L, 0L)));
-        expectedOutput.add(new StreamRecord<>(newRow(true, "c1", "c4", 1L, 1L, 0L)));
-        expectedOutput.add(new StreamRecord<>(newRow(true, "c2", "c8", 3L, 2L, 3L)));
-        expectedOutput.add(new StreamRecord<>(newRow(true, "c1", "c6", 2L, 10L, 2L)));
-        expectedOutput.add(new Watermark(10000L));
-
         assertOutputEquals("Output was not correct.", expectedOutput, testHarness.getOutput());
 
         testHarness.close();
@@ -322,7 +281,7 @@ class StreamArrowPythonRowTimeBoundedRangeOperatorTest
         @Override
         public PythonFunctionRunner createPythonFunctionRunner() {
             return new PassThroughPythonAggregateFunctionRunner(
-                    getRuntimeContext().getTaskName(),
+                    getRuntimeContext().getTaskInfo().getTaskName(),
                     PythonTestUtils.createTestProcessEnvironmentManager(),
                     udfInputType,
                     udfOutputType,

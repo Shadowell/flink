@@ -19,6 +19,7 @@
 package org.apache.flink.table.planner.codegen;
 
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeConfig;
 import org.apache.flink.table.planner.plan.utils.SorMergeJoinOperatorUtil;
 import org.apache.flink.table.runtime.generated.GeneratedJoinCondition;
@@ -33,7 +34,7 @@ import org.apache.flink.table.types.logical.RowType;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** Test for adaptive {@link LongHashJoinGenerator}. */
-public class LongAdaptiveHashJoinGeneratorTest extends Int2AdaptiveHashJoinOperatorTest {
+class LongAdaptiveHashJoinGeneratorTest extends Int2AdaptiveHashJoinOperatorTest {
 
     @Override
     public Object newOperator(
@@ -46,19 +47,19 @@ public class LongAdaptiveHashJoinGeneratorTest extends Int2AdaptiveHashJoinOpera
     }
 
     @Override
-    public void testBuildLeftAntiJoinFallbackToSMJ() {}
+    protected void testBuildLeftAntiJoinFallbackToSMJ() {}
 
     @Override
-    public void testBuildLeftSemiJoinFallbackToSMJ() {}
+    protected void testBuildLeftSemiJoinFallbackToSMJ() {}
 
     @Override
-    public void testBuildFirstHashLeftOutJoinFallbackToSMJ() {}
+    protected void testBuildFirstHashLeftOutJoinFallbackToSMJ() {}
 
     @Override
-    public void testBuildSecondHashRightOutJoinFallbackToSMJ() {}
+    protected void testBuildSecondHashRightOutJoinFallbackToSMJ() {}
 
     @Override
-    public void testBuildFirstHashFullOutJoinFallbackToSMJ() {}
+    protected void testBuildFirstHashFullOutJoinFallbackToSMJ() {}
 
     static Object getLongHashJoinOperator(
             FlinkJoinType flinkJoinType,
@@ -128,6 +129,11 @@ public class LongAdaptiveHashJoinGeneratorTest extends Int2AdaptiveHashJoinOpera
                 reverseJoinFunction,
                 condFunc,
                 buildLeft,
+                ExecutionConfigOptions.TABLE_EXEC_SPILL_COMPRESSION_ENABLED.defaultValue(),
+                (int)
+                        ExecutionConfigOptions.TABLE_EXEC_SPILL_COMPRESSION_BLOCK_SIZE
+                                .defaultValue()
+                                .getBytes(),
                 sortMergeJoinFunction);
     }
 }

@@ -24,23 +24,23 @@ import org.apache.flink.contrib.streaming.state.RocksDBKeyedStateBackend.RocksDb
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.core.memory.DataOutputView;
 import org.apache.flink.core.memory.DataOutputViewStreamWrapper;
+import org.apache.flink.runtime.checkpoint.filemerging.FileMergingSnapshotManager;
 import org.apache.flink.runtime.state.CheckpointStreamFactory;
 import org.apache.flink.runtime.state.CheckpointStreamWithResultProvider;
 import org.apache.flink.runtime.state.CheckpointedStateScope;
 import org.apache.flink.runtime.state.DirectoryStateHandle;
+import org.apache.flink.runtime.state.IncrementalKeyedStateHandle.HandleAndLocalPath;
 import org.apache.flink.runtime.state.IncrementalLocalKeyedStateHandle;
 import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.state.KeyedBackendSerializationProxy;
 import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.LocalRecoveryConfig;
-import org.apache.flink.runtime.state.LocalRecoveryDirectoryProvider;
+import org.apache.flink.runtime.state.LocalSnapshotDirectoryProvider;
 import org.apache.flink.runtime.state.PlaceholderStreamStateHandle;
 import org.apache.flink.runtime.state.SnapshotDirectory;
 import org.apache.flink.runtime.state.SnapshotResources;
 import org.apache.flink.runtime.state.SnapshotResult;
 import org.apache.flink.runtime.state.SnapshotStrategy;
-import org.apache.flink.runtime.state.StateHandleID;
-import org.apache.flink.runtime.state.StateObject;
 import org.apache.flink.runtime.state.StateUtil;
 import org.apache.flink.runtime.state.StreamStateHandle;
 import org.apache.flink.runtime.state.metainfo.StateMetaInfoSnapshot;
@@ -62,12 +62,14 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /**
  * Abstract base class for {@link SnapshotStrategy} implementations for RocksDB state backend.
@@ -183,9 +185,9 @@ public abstract class RocksDBSnapshotStrategyBase<K, R extends SnapshotResources
     protected SnapshotDirectory prepareLocalSnapshotDirectory(long checkpointId)
             throws IOException {
 
-        if (localRecoveryConfig.isLocalRecoveryEnabled()) {
+        if (localRecoveryConfig.isLocalBackupEnabled()) {
             // create a "permanent" snapshot directory for local recovery.
-            LocalRecoveryDirectoryProvider directoryProvider =
+            LocalSnapshotDirectoryProvider directoryProvider =
                     localRecoveryConfig
                             .getLocalStateDirectoryProvider()
                             .orElseThrow(LocalRecoveryConfig.localRecoveryNotEnabled());
@@ -228,12 +230,12 @@ public abstract class RocksDBSnapshotStrategyBase<K, R extends SnapshotResources
     }
 
     protected void cleanupIncompleteSnapshot(
-            @Nonnull List<StateObject> statesToDiscard,
+            @Nonnull CloseableRegistry tmpResourcesRegistry,
             @Nonnull SnapshotDirectory localBackupDirectory) {
         try {
-            StateUtil.bestEffortDiscardAllStateObjects(statesToDiscard);
+            tmpResourcesRegistry.close();
         } catch (Exception e) {
-            LOG.warn("Could not properly discard states.", e);
+            LOG.warn("Could not properly clean tmp resources.", e);
         }
 
         if (localBackupDirectory.isSnapshotCompleted()) {
@@ -252,13 +254,14 @@ public abstract class RocksDBSnapshotStrategyBase<K, R extends SnapshotResources
     @Nonnull
     protected SnapshotResult<StreamStateHandle> materializeMetaData(
             @Nonnull CloseableRegistry snapshotCloseableRegistry,
+            @Nonnull CloseableRegistry tmpResourcesRegistry,
             @Nonnull List<StateMetaInfoSnapshot> stateMetaInfoSnapshots,
             long checkpointId,
             @Nonnull CheckpointStreamFactory checkpointStreamFactory)
             throws Exception {
 
         CheckpointStreamWithResultProvider streamWithResultProvider =
-                localRecoveryConfig.isLocalRecoveryEnabled()
+                localRecoveryConfig.isLocalBackupEnabled()
                         ? CheckpointStreamWithResultProvider.createDuplicatingStream(
                                 checkpointId,
                                 CheckpointedStateScope.EXCLUSIVE,
@@ -287,6 +290,8 @@ public abstract class RocksDBSnapshotStrategyBase<K, R extends SnapshotResources
                 SnapshotResult<StreamStateHandle> result =
                         streamWithResultProvider.closeAndFinalizeCheckpointStreamResult();
                 streamWithResultProvider = null;
+                tmpResourcesRegistry.registerCloseable(
+                        () -> StateUtil.discardStateObjectQuietly(result));
                 return result;
             } else {
                 throw new IOException("Stream already closed and cannot return a handle.");
@@ -299,7 +304,7 @@ public abstract class RocksDBSnapshotStrategyBase<K, R extends SnapshotResources
     }
 
     @Override
-    public abstract void close();
+    public abstract void close() throws IOException;
 
     /** Common operation in native rocksdb snapshot result supplier. */
     protected abstract class RocksDBSnapshotOperation
@@ -316,6 +321,8 @@ public abstract class RocksDBSnapshotStrategyBase<K, R extends SnapshotResources
         /** Local directory for the RocksDB native backup. */
         @Nonnull protected final SnapshotDirectory localBackupDirectory;
 
+        @Nonnull protected final CloseableRegistry tmpResourcesRegistry;
+
         protected RocksDBSnapshotOperation(
                 long checkpointId,
                 @Nonnull CheckpointStreamFactory checkpointStreamFactory,
@@ -325,11 +332,12 @@ public abstract class RocksDBSnapshotStrategyBase<K, R extends SnapshotResources
             this.checkpointStreamFactory = checkpointStreamFactory;
             this.stateMetaInfoSnapshots = stateMetaInfoSnapshots;
             this.localBackupDirectory = localBackupDirectory;
+            this.tmpResourcesRegistry = new CloseableRegistry();
         }
 
         protected Optional<KeyedStateHandle> getLocalSnapshot(
                 @Nullable StreamStateHandle localStreamStateHandle,
-                Map<StateHandleID, StreamStateHandle> sharedStateHandleIDs)
+                List<HandleAndLocalPath> sharedState)
                 throws IOException {
             final DirectoryStateHandle directoryStateHandle =
                     localBackupDirectory.completeSnapshotAndGetHandle();
@@ -341,7 +349,7 @@ public abstract class RocksDBSnapshotStrategyBase<K, R extends SnapshotResources
                                 directoryStateHandle,
                                 keyGroupRange,
                                 localStreamStateHandle,
-                                sharedStateHandleIDs));
+                                sharedState));
             } else {
                 return Optional.empty();
             }
@@ -385,23 +393,35 @@ public abstract class RocksDBSnapshotStrategyBase<K, R extends SnapshotResources
     }
 
     protected static final PreviousSnapshot EMPTY_PREVIOUS_SNAPSHOT =
-            new PreviousSnapshot(Collections.emptyMap());
+            new PreviousSnapshot(Collections.emptyList());
 
     /** Previous snapshot with uploaded sst files. */
     protected static class PreviousSnapshot {
 
-        @Nullable private final Map<StateHandleID, Long> confirmedSstFiles;
+        @Nonnull private final Map<String, StreamStateHandle> confirmedSstFiles;
 
-        protected PreviousSnapshot(@Nullable Map<StateHandleID, Long> confirmedSstFiles) {
-            this.confirmedSstFiles = confirmedSstFiles;
+        protected PreviousSnapshot(@Nullable Collection<HandleAndLocalPath> confirmedSstFiles) {
+            this.confirmedSstFiles =
+                    confirmedSstFiles != null
+                            ? confirmedSstFiles.stream()
+                                    .collect(
+                                            Collectors.toMap(
+                                                    HandleAndLocalPath::getLocalPath,
+                                                    HandleAndLocalPath::getHandle))
+                            : Collections.emptyMap();
         }
 
-        protected Optional<StreamStateHandle> getUploaded(StateHandleID stateHandleID) {
-            if (confirmedSstFiles != null && confirmedSstFiles.containsKey(stateHandleID)) {
-                // we introduce a placeholder state handle, that is replaced with the
-                // original from the shared state registry (created from a previous checkpoint)
+        protected Optional<StreamStateHandle> getUploaded(String filename) {
+            if (confirmedSstFiles.containsKey(filename)) {
+                StreamStateHandle handle = confirmedSstFiles.get(filename);
+                // We introduce a placeholder state handle to reduce network transfer overhead,
+                // it will be replaced by the original handle from the shared state registry
+                // (created from a previous checkpoint).
                 return Optional.of(
-                        new PlaceholderStreamStateHandle(confirmedSstFiles.get(stateHandleID)));
+                        new PlaceholderStreamStateHandle(
+                                handle.getStreamStateHandleID(),
+                                handle.getStateSize(),
+                                FileMergingSnapshotManager.isFileMergingHandle(handle)));
             } else {
                 // Don't use any uploaded but not confirmed handles because they might be deleted
                 // (by TM) if the previous checkpoint failed. See FLINK-25395

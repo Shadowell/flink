@@ -19,13 +19,11 @@
 package org.apache.flink.cep.nfa;
 
 import org.apache.flink.annotation.VisibleForTesting;
+import org.apache.flink.api.common.functions.DefaultOpenContext;
 import org.apache.flink.api.common.functions.RuntimeContext;
 import org.apache.flink.api.common.functions.util.FunctionUtils;
-import org.apache.flink.api.common.typeutils.CompositeTypeSerializerConfigSnapshot;
 import org.apache.flink.api.common.typeutils.CompositeTypeSerializerSnapshot;
-import org.apache.flink.api.common.typeutils.CompositeTypeSerializerUtil;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.api.common.typeutils.TypeSerializerSchemaCompatibility;
 import org.apache.flink.api.common.typeutils.TypeSerializerSnapshot;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
@@ -41,6 +39,7 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataOutputView;
 import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.util.CollectionUtil;
 import org.apache.flink.util.FlinkRuntimeException;
 import org.apache.flink.util.Preconditions;
 
@@ -100,7 +99,7 @@ public class NFA<T> {
 
     /**
      * The length of a windowed pattern, as specified using the {@link
-     * org.apache.flink.cep.pattern.Pattern#within(Time)} Pattern.within(Time)} method.
+     * org.apache.flink.cep.pattern.Pattern#within(Time) Pattern.within(Time)} method.
      */
     private final long windowTime;
 
@@ -122,7 +121,7 @@ public class NFA<T> {
     }
 
     private Map<String, State<T>> loadStates(final Collection<State<T>> validStates) {
-        Map<String, State<T>> tmp = new HashMap<>(4);
+        Map<String, State<T>> tmp = CollectionUtil.newHashMapWithExpectedSize(4);
         for (State<T> state : validStates) {
             tmp.put(state.getName(), state);
         }
@@ -203,7 +202,7 @@ public class NFA<T> {
             for (StateTransition<T> transition : state.getStateTransitions()) {
                 IterativeCondition condition = transition.getCondition();
                 FunctionUtils.setFunctionRuntimeContext(condition, cepRuntimeContext);
-                FunctionUtils.openFunction(condition, conf);
+                FunctionUtils.openFunction(condition, DefaultOpenContext.INSTANCE);
             }
         }
     }
@@ -273,12 +272,15 @@ public class NFA<T> {
             advanceTime(
                     final SharedBufferAccessor<T> sharedBufferAccessor,
                     final NFAState nfaState,
-                    final long timestamp)
+                    final long timestamp,
+                    final AfterMatchSkipStrategy afterMatchSkipStrategy)
                     throws Exception {
 
-        final Collection<Map<String, List<T>>> pendingMatches = new ArrayList<>();
+        final List<Map<String, List<T>>> result = new ArrayList<>();
         final Collection<Tuple2<Map<String, List<T>>, Long>> timeoutResult = new ArrayList<>();
         final PriorityQueue<ComputationState> newPartialMatches =
+                new PriorityQueue<>(NFAState.COMPUTATION_STATE_COMPARATOR);
+        final PriorityQueue<ComputationState> potentialMatches =
                 new PriorityQueue<>(NFAState.COMPUTATION_STATE_COMPARATOR);
 
         for (ComputationState computationState : nfaState.getPartialMatches()) {
@@ -297,13 +299,16 @@ public class NFA<T> {
                             computationState.getStartTimestamp(),
                             windowTime);
             if (isTimeoutForPreviousEvent || isTimeoutForFirstEvent) {
+                nfaState.setStateChanged();
+
                 if (getState(computationState).isPending()) {
-                    // extract the Pending State
-                    Map<String, List<T>> pendingPattern =
-                            sharedBufferAccessor.materializeMatch(
-                                    extractCurrentMatches(sharedBufferAccessor, computationState));
-                    pendingMatches.add(pendingPattern);
-                } else if (handleTimeout) {
+                    // save pending states for after-match pruning, where those states will be
+                    // released
+                    potentialMatches.add(computationState);
+                    continue;
+                }
+
+                if (handleTimeout) {
                     // extract the timed out event pattern
                     Map<String, List<T>> timedOutPattern =
                             sharedBufferAccessor.materializeMatch(
@@ -318,20 +323,29 @@ public class NFA<T> {
                                             : computationState.getStartTimestamp() + windowTime));
                 }
 
+                // release timeout states
                 sharedBufferAccessor.releaseNode(
                         computationState.getPreviousBufferEntry(), computationState.getVersion());
-
-                nfaState.setStateChanged();
             } else {
                 newPartialMatches.add(computationState);
             }
         }
 
+        // If a timeout partial match "frees" some completed matches
+        // Or if completed not-followed-by matches need pruning
+        processMatchesAccordingToSkipStrategy(
+                sharedBufferAccessor,
+                nfaState,
+                afterMatchSkipStrategy,
+                potentialMatches,
+                newPartialMatches,
+                result);
+
         nfaState.setNewPartialMatches(newPartialMatches);
 
         sharedBufferAccessor.advanceTime(timestamp);
 
-        return Tuple2.of(pendingMatches, timeoutResult);
+        return Tuple2.of(result, timeoutResult);
     }
 
     private boolean isStateTimedOut(
@@ -352,7 +366,7 @@ public class NFA<T> {
 
         final PriorityQueue<ComputationState> newPartialMatches =
                 new PriorityQueue<>(NFAState.COMPUTATION_STATE_COMPARATOR);
-        final PriorityQueue<ComputationState> potentialMatches =
+        PriorityQueue<ComputationState> potentialMatches =
                 new PriorityQueue<>(NFAState.COMPUTATION_STATE_COMPARATOR);
 
         // iterate over all current computations
@@ -409,28 +423,13 @@ public class NFA<T> {
         }
 
         List<Map<String, List<T>>> result = new ArrayList<>();
-        if (afterMatchSkipStrategy.isSkipStrategy()) {
-            processMatchesAccordingToSkipStrategy(
-                    sharedBufferAccessor,
-                    nfaState,
-                    afterMatchSkipStrategy,
-                    potentialMatches,
-                    newPartialMatches,
-                    result);
-        } else {
-            for (ComputationState match : potentialMatches) {
-                Map<String, List<T>> materializedMatch =
-                        sharedBufferAccessor.materializeMatch(
-                                sharedBufferAccessor
-                                        .extractPatterns(
-                                                match.getPreviousBufferEntry(), match.getVersion())
-                                        .get(0));
-
-                result.add(materializedMatch);
-                sharedBufferAccessor.releaseNode(
-                        match.getPreviousBufferEntry(), match.getVersion());
-            }
-        }
+        processMatchesAccordingToSkipStrategy(
+                sharedBufferAccessor,
+                nfaState,
+                afterMatchSkipStrategy,
+                potentialMatches,
+                newPartialMatches,
+                result);
 
         nfaState.setNewPartialMatches(newPartialMatches);
 
@@ -448,35 +447,36 @@ public class NFA<T> {
 
         nfaState.getCompletedMatches().addAll(potentialMatches);
 
-        ComputationState earliestMatch = nfaState.getCompletedMatches().peek();
+        ComputationState earliestMatch;
+        while ((earliestMatch = nfaState.getCompletedMatches().peek()) != null) {
 
-        if (earliestMatch != null) {
-
-            ComputationState earliestPartialMatch;
-            while (earliestMatch != null
-                    && ((earliestPartialMatch = partialMatches.peek()) == null
-                            || isEarlier(earliestMatch, earliestPartialMatch))) {
-
-                nfaState.setStateChanged();
-                nfaState.getCompletedMatches().poll();
-                List<Map<String, List<EventId>>> matchedResult =
-                        sharedBufferAccessor.extractPatterns(
-                                earliestMatch.getPreviousBufferEntry(), earliestMatch.getVersion());
-
-                afterMatchSkipStrategy.prune(partialMatches, matchedResult, sharedBufferAccessor);
-
-                afterMatchSkipStrategy.prune(
-                        nfaState.getCompletedMatches(), matchedResult, sharedBufferAccessor);
-
-                result.add(sharedBufferAccessor.materializeMatch(matchedResult.get(0)));
-                sharedBufferAccessor.releaseNode(
-                        earliestMatch.getPreviousBufferEntry(), earliestMatch.getVersion());
-                earliestMatch = nfaState.getCompletedMatches().peek();
+            // Care for ordering when it's not NO_SKIP
+            if (afterMatchSkipStrategy.isSkipStrategy()) {
+                ComputationState earliestPartialMatch = partialMatches.peek();
+                if (earliestPartialMatch != null
+                        && !isEarlier(earliestMatch, earliestPartialMatch)) {
+                    break;
+                }
             }
 
-            nfaState.getPartialMatches()
-                    .removeIf(pm -> pm.getStartEventID() != null && !partialMatches.contains(pm));
+            nfaState.setStateChanged();
+            nfaState.getCompletedMatches().poll();
+            List<Map<String, List<EventId>>> matchedResult =
+                    sharedBufferAccessor.extractPatterns(
+                            earliestMatch.getPreviousBufferEntry(), earliestMatch.getVersion());
+
+            afterMatchSkipStrategy.prune(partialMatches, matchedResult, sharedBufferAccessor);
+
+            afterMatchSkipStrategy.prune(
+                    nfaState.getCompletedMatches(), matchedResult, sharedBufferAccessor);
+
+            result.add(sharedBufferAccessor.materializeMatch(matchedResult.get(0)));
+            sharedBufferAccessor.releaseNode(
+                    earliestMatch.getPreviousBufferEntry(), earliestMatch.getVersion());
         }
+
+        nfaState.getPartialMatches()
+                .removeIf(pm -> pm.getStartEventID() != null && !partialMatches.contains(pm));
     }
 
     private boolean isEarlier(
@@ -977,41 +977,6 @@ public class NFA<T> {
         }
     }
 
-    /**
-     * @deprecated This snapshot class is no longer in use, and only maintained for backwards
-     *     compatibility purposes. It is fully replaced by {@link MigratedNFASerializerSnapshot}.
-     */
-    @Deprecated
-    public static final class NFASerializerConfigSnapshot<T>
-            extends CompositeTypeSerializerConfigSnapshot<MigratedNFA<T>> {
-
-        private static final int VERSION = 1;
-
-        /** This empty constructor is required for deserializing the configuration. */
-        public NFASerializerConfigSnapshot() {}
-
-        public NFASerializerConfigSnapshot(
-                TypeSerializer<T> eventSerializer,
-                TypeSerializer<org.apache.flink.cep.nfa.SharedBuffer<T>> sharedBufferSerializer) {
-
-            super(eventSerializer, sharedBufferSerializer);
-        }
-
-        @Override
-        public int getVersion() {
-            return VERSION;
-        }
-
-        @Override
-        public TypeSerializerSchemaCompatibility<MigratedNFA<T>> resolveSchemaCompatibility(
-                TypeSerializer<MigratedNFA<T>> newSerializer) {
-            return CompositeTypeSerializerUtil.delegateCompatibilityCheckToNewSnapshot(
-                    newSerializer,
-                    new MigratedNFASerializerSnapshot<>(),
-                    getNestedSerializerSnapshots());
-        }
-    }
-
     /** A {@link TypeSerializerSnapshot} for the legacy {@link NFASerializer}. */
     @SuppressWarnings("deprecation")
     public static final class MigratedNFASerializerSnapshot<T>
@@ -1019,9 +984,7 @@ public class NFA<T> {
 
         private static final int VERSION = 2;
 
-        public MigratedNFASerializerSnapshot() {
-            super(NFASerializer.class);
-        }
+        public MigratedNFASerializerSnapshot() {}
 
         MigratedNFASerializerSnapshot(NFASerializer<T> legacyNfaSerializer) {
             super(legacyNfaSerializer);

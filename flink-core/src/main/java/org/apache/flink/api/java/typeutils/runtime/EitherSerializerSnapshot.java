@@ -19,10 +19,8 @@
 package org.apache.flink.api.java.typeutils.runtime;
 
 import org.apache.flink.annotation.Internal;
-import org.apache.flink.api.common.typeutils.CompositeTypeSerializerUtil;
 import org.apache.flink.api.common.typeutils.NestedSerializersSnapshotDelegate;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.api.common.typeutils.TypeSerializerSchemaCompatibility;
 import org.apache.flink.api.common.typeutils.TypeSerializerSnapshot;
 import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataOutputView;
@@ -79,20 +77,16 @@ public final class EitherSerializerSnapshot<L, R> implements TypeSerializerSnaps
             throws IOException {
         switch (readVersion) {
             case 1:
-                readV1(in, classLoader);
-                break;
+                throw new UnsupportedOperationException(
+                        String.format(
+                                "No longer supported version [%d]. Please upgrade first to Flink 1.16. ",
+                                readVersion));
             case 2:
                 readV2(in, classLoader);
                 break;
             default:
                 throw new IllegalArgumentException("Unrecognized version: " + readVersion);
         }
-    }
-
-    private void readV1(DataInputView in, ClassLoader classLoader) throws IOException {
-        nestedSnapshot =
-                NestedSerializersSnapshotDelegate.legacyReadNestedSerializerSnapshots(
-                        in, classLoader);
     }
 
     private void readV2(DataInputView in, ClassLoader classLoader) throws IOException {
@@ -108,19 +102,8 @@ public final class EitherSerializerSnapshot<L, R> implements TypeSerializerSnaps
                 nestedSnapshot.getRestoredNestedSerializer(1));
     }
 
-    @Override
-    public TypeSerializerSchemaCompatibility<Either<L, R>> resolveSchemaCompatibility(
-            TypeSerializer<Either<L, R>> newSerializer) {
-        checkState(nestedSnapshot != null);
-
-        if (newSerializer instanceof EitherSerializer) {
-            // delegate compatibility check to the new snapshot class
-            return CompositeTypeSerializerUtil.delegateCompatibilityCheckToNewSnapshot(
-                    newSerializer,
-                    new JavaEitherSerializerSnapshot<>(),
-                    nestedSnapshot.getNestedSerializerSnapshots());
-        } else {
-            return TypeSerializerSchemaCompatibility.incompatible();
-        }
+    @Nullable
+    public TypeSerializerSnapshot<?>[] getNestedSerializerSnapshots() {
+        return nestedSnapshot == null ? null : nestedSnapshot.getNestedSerializerSnapshots();
     }
 }

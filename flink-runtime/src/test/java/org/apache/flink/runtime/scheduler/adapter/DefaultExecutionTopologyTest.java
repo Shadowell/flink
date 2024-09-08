@@ -40,7 +40,7 @@ import org.apache.flink.testutils.TestingUtils;
 import org.apache.flink.testutils.executor.TestExecutorExtension;
 import org.apache.flink.util.IterableUtils;
 
-import org.apache.flink.shaded.guava30.com.google.common.collect.Sets;
+import org.apache.flink.shaded.guava32.com.google.common.collect.Sets;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -66,7 +66,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /** Unit tests for {@link DefaultExecutionTopology}. */
 class DefaultExecutionTopologyTest {
     @RegisterExtension
-    static final TestExecutorExtension<ScheduledExecutorService> EXECUTOR_RESOURCE =
+    private static final TestExecutorExtension<ScheduledExecutorService> EXECUTOR_RESOURCE =
             TestingUtils.defaultExecutorExtension();
 
     private DefaultExecutionGraph executionGraph;
@@ -105,20 +105,24 @@ class DefaultExecutionTopologyTest {
     }
 
     @Test
-    void testResultPartitionStateSupplier() {
-        final IntermediateResultPartition intermediateResultPartition =
-                IterableUtils.toStream(executionGraph.getAllExecutionVertices())
-                        .flatMap(v -> v.getProducedPartitions().values().stream())
-                        .findAny()
-                        .get();
+    void testResultPartitionStateSupplier() throws Exception {
+        final JobVertex[] jobVertices = createJobVertices(BLOCKING);
+        executionGraph = createExecutionGraph(EXECUTOR_RESOURCE.getExecutor(), jobVertices);
+        adapter = DefaultExecutionTopology.fromExecutionGraph(executionGraph);
+
+        final ExecutionJobVertex ejv = executionGraph.getJobVertex(jobVertices[0].getID());
+        ExecutionVertex ev = ejv.getTaskVertices()[0];
+        IntermediateResultPartition intermediateResultPartition =
+                ev.getProducedPartitions().values().stream().findAny().get();
 
         final DefaultResultPartition schedulingResultPartition =
                 adapter.getResultPartition(intermediateResultPartition.getPartitionId());
 
         assertThat(schedulingResultPartition.getState()).isEqualTo(ResultPartitionState.CREATED);
 
-        intermediateResultPartition.markDataProduced();
-        assertThat(schedulingResultPartition.getState()).isEqualTo(ResultPartitionState.CONSUMABLE);
+        ev.finishPartitionsIfNeeded();
+        assertThat(schedulingResultPartition.getState())
+                .isEqualTo(ResultPartitionState.ALL_DATA_PRODUCED);
     }
 
     @Test
@@ -150,7 +154,7 @@ class DefaultExecutionTopologyTest {
     }
 
     @Test
-    void testErrorIfCoLocatedTasksAreNotInSameRegion() throws Exception {
+    void testErrorIfCoLocatedTasksAreNotInSameRegion() {
         int parallelism = 3;
         final JobVertex v1 = createNoOpVertex(parallelism);
         final JobVertex v2 = createNoOpVertex(parallelism);

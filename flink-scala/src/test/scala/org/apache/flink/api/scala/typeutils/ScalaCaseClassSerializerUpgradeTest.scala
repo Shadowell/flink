@@ -18,24 +18,35 @@
 package org.apache.flink.api.scala.typeutils
 
 import org.apache.flink.FlinkVersion
-import org.apache.flink.api.common.ExecutionConfig
-import org.apache.flink.api.common.typeutils.{TypeSerializer, TypeSerializerMatchers, TypeSerializerSchemaCompatibility, TypeSerializerUpgradeTestBase}
+import org.apache.flink.api.common.serialization.SerializerConfigImpl
+import org.apache.flink.api.common.typeutils.{TypeSerializer, TypeSerializerConditions, TypeSerializerSchemaCompatibility, TypeSerializerUpgradeTestBase}
 import org.apache.flink.api.common.typeutils.TypeSerializerUpgradeTestBase.TestSpecification
 import org.apache.flink.api.scala.createTypeInformation
 import org.apache.flink.api.scala.types.CustomCaseClass
+import org.apache.flink.api.scala.typeutils.ScalaCaseClassSerializerUpgradeTest.{ScalaCaseClassSerializerSetup, ScalaCaseClassSerializerVerifier}
 
-import org.hamcrest.Matcher
-import org.hamcrest.Matchers.is
-import org.junit.runner.RunWith
-import org.junit.runners.Parameterized
+import org.assertj.core.api.Condition
 
 import java.util
 
 /** A [[TypeSerializerUpgradeTestBase]] for [[ScalaCaseClassSerializer]]. */
-@RunWith(classOf[Parameterized])
-class ScalaCaseClassSerializerUpgradeTest(
-    spec: TestSpecification[CustomCaseClass, CustomCaseClass]
-) extends TypeSerializerUpgradeTestBase[CustomCaseClass, CustomCaseClass](spec) {}
+class ScalaCaseClassSerializerUpgradeTest
+  extends TypeSerializerUpgradeTestBase[CustomCaseClass, CustomCaseClass] {
+
+  override def createTestSpecifications(
+      migrationVersion: FlinkVersion): util.Collection[TestSpecification[_, _]] = {
+    val testSpecifications =
+      new util.ArrayList[TypeSerializerUpgradeTestBase.TestSpecification[_, _]]
+    testSpecifications.add(
+      new TypeSerializerUpgradeTestBase.TestSpecification[CustomCaseClass, CustomCaseClass](
+        "scala-case-class-serializer",
+        migrationVersion,
+        classOf[ScalaCaseClassSerializerSetup],
+        classOf[ScalaCaseClassSerializerVerifier]))
+
+    testSpecifications
+  }
+}
 
 object ScalaCaseClassSerializerUpgradeTest {
 
@@ -44,24 +55,8 @@ object ScalaCaseClassSerializerUpgradeTest {
   private val supplier =
     new util.function.Supplier[TypeSerializer[CustomCaseClass]] {
       override def get(): TypeSerializer[CustomCaseClass] =
-        typeInfo.createSerializer(new ExecutionConfig)
+        typeInfo.createSerializer(new SerializerConfigImpl)
     }
-
-  @Parameterized.Parameters(name = "Test Specification = {0}")
-  def testSpecifications(): util.Collection[TestSpecification[_, _]] = {
-    val testSpecifications =
-      new util.ArrayList[TypeSerializerUpgradeTestBase.TestSpecification[_, _]]
-    TypeSerializerUpgradeTestBase.MIGRATION_VERSIONS.forEach(
-      migrationVersion =>
-        testSpecifications.add(
-          new TypeSerializerUpgradeTestBase.TestSpecification[CustomCaseClass, CustomCaseClass](
-            "scala-case-class-serializer",
-            migrationVersion,
-            classOf[ScalaCaseClassSerializerSetup],
-            classOf[ScalaCaseClassSerializerVerifier])))
-
-    testSpecifications
-  }
 
   /**
    * This class is only public to work with
@@ -78,10 +73,12 @@ object ScalaCaseClassSerializerUpgradeTest {
     extends TypeSerializerUpgradeTestBase.UpgradeVerifier[CustomCaseClass] {
     override def createUpgradedSerializer: TypeSerializer[CustomCaseClass] = supplier.get()
 
-    override def testDataMatcher: Matcher[CustomCaseClass] = is(CustomCaseClass("flink", 11))
+    override def testDataCondition(): Condition[CustomCaseClass] = new Condition[CustomCaseClass](
+      (c: CustomCaseClass) => c.equals(CustomCaseClass("flink", 11)),
+      "is equal to CustomCaseClass(\"flink\", 11)")
 
-    override def schemaCompatibilityMatcher(
-        version: FlinkVersion): Matcher[TypeSerializerSchemaCompatibility[CustomCaseClass]] =
-      TypeSerializerMatchers.isCompatibleAsIs[CustomCaseClass]()
+    override def schemaCompatibilityCondition(
+        version: FlinkVersion): Condition[TypeSerializerSchemaCompatibility[CustomCaseClass]] =
+      TypeSerializerConditions.isCompatibleAsIs[CustomCaseClass]()
   }
 }

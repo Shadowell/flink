@@ -18,6 +18,10 @@
 
 package org.apache.flink.docs.configuration;
 
+import org.apache.flink.annotation.Experimental;
+import org.apache.flink.annotation.Internal;
+import org.apache.flink.annotation.Public;
+import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.annotation.docs.ConfigGroup;
 import org.apache.flink.annotation.docs.ConfigGroups;
 import org.apache.flink.annotation.docs.Documentation;
@@ -30,12 +34,13 @@ import org.apache.flink.configuration.description.Formatter;
 import org.apache.flink.configuration.description.HtmlFormatter;
 import org.apache.flink.configuration.description.InlineElement;
 import org.apache.flink.docs.configuration.data.TestCommonOptions;
+import org.apache.flink.docs.util.ConfigurationOptionLocator;
+import org.apache.flink.docs.util.OptionsClassLocation;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Collections;
@@ -45,12 +50,14 @@ import java.util.Map;
 
 import static org.apache.flink.configuration.description.TextElement.text;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatException;
+import static org.assertj.core.api.Assertions.assertThatNoException;
 
 /** Tests for the {@link ConfigOptionsDocGenerator}. */
 @SuppressWarnings("unused")
 class ConfigOptionsDocGeneratorTest {
 
-    static class TestConfigGroup {
+    public static class TestConfigGroup {
         public static ConfigOption<Integer> firstOption =
                 ConfigOptions.key("first.option.a")
                         .intType()
@@ -86,7 +93,7 @@ class ConfigOptionsDocGeneratorTest {
         }
     }
 
-    static class TypeTestConfigGroup {
+    public static class TypeTestConfigGroup {
         public static ConfigOption<TestEnum> enumOption =
                 ConfigOptions.key("option.enum")
                         .enumType(TestEnum.class)
@@ -192,7 +199,10 @@ class ConfigOptionsDocGeneratorTest {
                         + "    </tbody>\n"
                         + "</table>\n";
         final String htmlTable =
-                ConfigOptionsDocGenerator.generateTablesForClass(TypeTestConfigGroup.class)
+                ConfigOptionsDocGenerator.generateTablesForClass(
+                                TypeTestConfigGroup.class,
+                                ConfigurationOptionLocator.extractConfigOptions(
+                                        TypeTestConfigGroup.class))
                         .get(0)
                         .f1;
 
@@ -227,7 +237,12 @@ class ConfigOptionsDocGeneratorTest {
                         + "    </tbody>\n"
                         + "</table>\n";
         final String htmlTable =
-                ConfigOptionsDocGenerator.generateTablesForClass(TestConfigGroup.class).get(0).f1;
+                ConfigOptionsDocGenerator.generateTablesForClass(
+                                TestConfigGroup.class,
+                                ConfigurationOptionLocator.extractConfigOptions(
+                                        TestConfigGroup.class))
+                        .get(0)
+                        .f1;
 
         assertThat(htmlTable).isEqualTo(expectedTable);
     }
@@ -237,7 +252,7 @@ class ConfigOptionsDocGeneratorTest {
                 @ConfigGroup(name = "group1", keyPrefix = "a.b"),
                 @ConfigGroup(name = "group2", keyPrefix = "a.b.c.d")
             })
-    static class TestConfigPrefix {
+    public static class TestConfigPrefix {
         // should end up in the default group
         public static ConfigOption<Integer> option1 =
                 ConfigOptions.key("a.option").intType().defaultValue(2);
@@ -270,7 +285,9 @@ class ConfigOptionsDocGeneratorTest {
     @Test
     void testLongestPrefixMatching() {
         final List<Tuple2<ConfigGroup, String>> tables =
-                ConfigOptionsDocGenerator.generateTablesForClass(TestConfigPrefix.class);
+                ConfigOptionsDocGenerator.generateTablesForClass(
+                        TestConfigPrefix.class,
+                        ConfigurationOptionLocator.extractConfigOptions(TestConfigPrefix.class));
 
         assertThat(tables).hasSize(3);
         final Map<String, String> tablesConverted = new HashMap<>(tables.size());
@@ -290,7 +307,7 @@ class ConfigOptionsDocGeneratorTest {
                 @ConfigGroup(name = "firstGroup", keyPrefix = "first"),
                 @ConfigGroup(name = "secondGroup", keyPrefix = "second")
             })
-    static class TestConfigMultipleSubGroup {
+    public static class TestConfigMultipleSubGroup {
         public static ConfigOption<Integer> firstOption =
                 ConfigOptions.key("first.option.a")
                         .intType()
@@ -319,7 +336,10 @@ class ConfigOptionsDocGeneratorTest {
     @Test
     void testCreatingMultipleGroups() {
         final List<Tuple2<ConfigGroup, String>> tables =
-                ConfigOptionsDocGenerator.generateTablesForClass(TestConfigMultipleSubGroup.class);
+                ConfigOptionsDocGenerator.generateTablesForClass(
+                        TestConfigMultipleSubGroup.class,
+                        ConfigurationOptionLocator.extractConfigOptions(
+                                TestConfigMultipleSubGroup.class));
 
         assertThat(tables).hasSize(3);
         final HashMap<String, String> tablesConverted = new HashMap<>();
@@ -400,7 +420,7 @@ class ConfigOptionsDocGeneratorTest {
                                 + "</table>\n");
     }
 
-    static class TestConfigGroupWithOverriddenDefault {
+    public static class TestConfigGroupWithOverriddenDefault {
         @Documentation.OverrideDefault("default_1")
         public static ConfigOption<Integer> firstOption =
                 ConfigOptions.key("first.option.a")
@@ -445,7 +465,9 @@ class ConfigOptionsDocGeneratorTest {
                         + "</table>\n";
         final String htmlTable =
                 ConfigOptionsDocGenerator.generateTablesForClass(
-                                TestConfigGroupWithOverriddenDefault.class)
+                                TestConfigGroupWithOverriddenDefault.class,
+                                ConfigurationOptionLocator.extractConfigOptions(
+                                        TestConfigGroupWithOverriddenDefault.class))
                         .get(0)
                         .f1;
 
@@ -453,7 +475,7 @@ class ConfigOptionsDocGeneratorTest {
     }
 
     @Test
-    void testSections(@TempDir File tmpDir) throws IOException, ClassNotFoundException {
+    void testSections(@TempDir File tmpDir) throws Exception {
         final String projectRootDir = getProjectRootDir();
         final String outputDirectory = tmpDir.getAbsolutePath();
 
@@ -464,7 +486,9 @@ class ConfigOptionsDocGeneratorTest {
                 };
 
         ConfigOptionsDocGenerator.generateCommonSection(
-                projectRootDir, outputDirectory, locations, "src/test/java");
+                projectRootDir,
+                new ConfigurationOptionLocator(locations, "src/test/java"),
+                outputDirectory);
         Formatter formatter = new HtmlFormatter();
 
         String expected1 =
@@ -544,7 +568,7 @@ class ConfigOptionsDocGeneratorTest {
                 .isEqualTo(expected2);
     }
 
-    static class TestConfigGroupWithExclusion {
+    public static class TestConfigGroupWithExclusion {
         public static ConfigOption<Integer> firstOption =
                 ConfigOptions.key("first.option.a")
                         .intType()
@@ -585,7 +609,10 @@ class ConfigOptionsDocGeneratorTest {
                         + "    </tbody>\n"
                         + "</table>\n";
         final String htmlTable =
-                ConfigOptionsDocGenerator.generateTablesForClass(TestConfigGroupWithExclusion.class)
+                ConfigOptionsDocGenerator.generateTablesForClass(
+                                TestConfigGroupWithExclusion.class,
+                                ConfigurationOptionLocator.extractConfigOptions(
+                                        TestConfigGroupWithExclusion.class))
                         .get(0)
                         .f1;
 
@@ -617,7 +644,7 @@ class ConfigOptionsDocGeneratorTest {
         }
     }
 
-    static class TestConfigGroupWithEnumConstantExclusion {
+    public static class TestConfigGroupWithEnumConstantExclusion {
 
         public static ConfigOption<TestEnumWithExclusion> enumWithExclusion =
                 ConfigOptions.key("exclude.enum")
@@ -674,7 +701,9 @@ class ConfigOptionsDocGeneratorTest {
                         + "</table>\n";
         final String htmlTable =
                 ConfigOptionsDocGenerator.generateTablesForClass(
-                                TestConfigGroupWithEnumConstantExclusion.class)
+                                TestConfigGroupWithEnumConstantExclusion.class,
+                                ConfigurationOptionLocator.extractConfigOptions(
+                                        TestConfigGroupWithEnumConstantExclusion.class))
                         .get(0)
                         .f1;
 
@@ -682,11 +711,15 @@ class ConfigOptionsDocGeneratorTest {
     }
 
     @ConfigGroups(groups = {@ConfigGroup(name = "firstGroup", keyPrefix = "first")})
-    static class EmptyConfigOptions {}
+    public static class EmptyConfigOptions {}
 
     @Test
     void testClassWithoutOptionsIsIgnored() {
-        assertThat(ConfigOptionsDocGenerator.generateTablesForClass(EmptyConfigOptions.class))
+        assertThat(
+                        ConfigOptionsDocGenerator.generateTablesForClass(
+                                EmptyConfigOptions.class,
+                                ConfigurationOptionLocator.extractConfigOptions(
+                                        EmptyConfigOptions.class)))
                 .isEmpty();
     }
 
@@ -697,6 +730,47 @@ class ConfigOptionsDocGeneratorTest {
         assertThat(ConfigOptionsDocGenerator.toSnakeCase("RocksDBOptions"))
                 .isEqualTo("rocksdb_options");
         assertThat(ConfigOptionsDocGenerator.toSnakeCase("DBOptions")).isEqualTo("db_options");
+    }
+
+    @Public
+    static class PublicOptions {}
+
+    @PublicEvolving
+    static class PublicEvolvingOptions {}
+
+    @Experimental
+    static class ExperimentalOptions {}
+
+    @Internal
+    static class InternalOptions {}
+
+    static class OptionsWithoutAnnotation {}
+
+    @Test
+    void testVerifyClassAnnotation() {
+        assertThatNoException()
+                .isThrownBy(
+                        () -> ConfigOptionsDocGenerator.verifyClassAnnotation(PublicOptions.class));
+        assertThatNoException()
+                .isThrownBy(
+                        () ->
+                                ConfigOptionsDocGenerator.verifyClassAnnotation(
+                                        PublicEvolvingOptions.class));
+        assertThatNoException()
+                .isThrownBy(
+                        () ->
+                                ConfigOptionsDocGenerator.verifyClassAnnotation(
+                                        ExperimentalOptions.class));
+        assertThatException()
+                .isThrownBy(
+                        () ->
+                                ConfigOptionsDocGenerator.verifyClassAnnotation(
+                                        OptionsWithoutAnnotation.class));
+        assertThatException()
+                .isThrownBy(
+                        () ->
+                                ConfigOptionsDocGenerator.verifyClassAnnotation(
+                                        InternalOptions.class));
     }
 
     static String getProjectRootDir() {

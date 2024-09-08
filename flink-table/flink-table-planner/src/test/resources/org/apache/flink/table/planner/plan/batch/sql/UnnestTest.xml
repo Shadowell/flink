@@ -16,7 +16,26 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 <Root>
-  <TestCase name="testCrossWithUnnest">
+	<TestCase name="testUnnestWithValues">
+		<Resource name="sql">
+			<![CDATA[SELECT * FROM UNNEST(ARRAY[1,2,3])]]>
+		</Resource>
+		<Resource name="ast">
+			<![CDATA[
+LogicalProject(EXPR$0=[$0])
++- Uncollect
+   +- LogicalProject(EXPR$0=[ARRAY(1, 2, 3)])
+      +- LogicalValues(tuples=[[{ 0 }]])
+]]>
+		</Resource>
+		<Resource name="optimized exec plan">
+			<![CDATA[
+Correlate(invocation=[$UNNEST_ROWS$1(ARRAY(1, 2, 3))], correlate=[table($UNNEST_ROWS$1(ARRAY(1, 2, 3)))], select=[f0], rowType=[RecordType:peek_no_expand(INTEGER f0)], joinType=[INNER])
++- Values(tuples=[[{  }]], values=[])
+]]>
+		</Resource>
+	</TestCase>
+	<TestCase name="testCrossWithUnnest">
     <Resource name="sql">
       <![CDATA[SELECT a, s FROM MyTable, UNNEST(MyTable.c) as A (s)]]>
     </Resource>
@@ -69,12 +88,14 @@ LogicalProject(b=[$0], s=[$2])
 Calc(select=[b, f0 AS s])
 +- Correlate(invocation=[$UNNEST_ROWS$1($cor0.set)], correlate=[table($UNNEST_ROWS$1($cor0.set))], select=[b,set,f0], rowType=[RecordType(BIGINT b, BIGINT MULTISET set, BIGINT f0)], joinType=[INNER])
    +- SortWindowAggregate(groupBy=[b], window=[TumblingGroupWindow('w$, rowtime, 3000)], select=[b, Final_COLLECT(set) AS set])
-      +- Sort(orderBy=[b ASC, assignedWindow$ ASC])
-         +- Exchange(distribution=[hash[b]])
-            +- LocalSortWindowAggregate(groupBy=[b], window=[TumblingGroupWindow('w$, rowtime, 3000)], select=[b, Partial_COLLECT(b) AS set])
-               +- Sort(orderBy=[b ASC, rowtime ASC])
-                  +- Calc(select=[b, rowtime], where=[(b < 3)])
-                     +- BoundedStreamScan(table=[[default_catalog, default_database, MyTable]], fields=[a, b, c, rowtime])
+      +- Exchange(distribution=[forward])
+         +- Sort(orderBy=[b ASC, assignedWindow$ ASC])
+            +- Exchange(distribution=[hash[b]])
+               +- LocalSortWindowAggregate(groupBy=[b], window=[TumblingGroupWindow('w$, rowtime, 3000)], select=[b, Partial_COLLECT(b) AS set])
+                  +- Exchange(distribution=[forward])
+                     +- Sort(orderBy=[b ASC, rowtime ASC])
+                        +- Calc(select=[b, rowtime], where=[(b < 3)])
+                           +- BoundedStreamScan(table=[[default_catalog, default_database, MyTable]], fields=[a, b, c, rowtime])
 ]]>
     </Resource>
   </TestCase>
@@ -159,12 +180,14 @@ LogicalProject(a=[$0], s=[$2])
 Calc(select=[a, f0 AS s])
 +- Correlate(invocation=[$UNNEST_ROWS$1($cor0.set)], correlate=[table($UNNEST_ROWS$1($cor0.set))], select=[a,set,f0], rowType=[RecordType(INTEGER a, VARCHAR(2147483647) MULTISET set, VARCHAR(2147483647) f0)], joinType=[LEFT])
    +- SortAggregate(isMerge=[true], groupBy=[a], select=[a, Final_COLLECT(set) AS set])
-      +- Sort(orderBy=[a ASC])
-         +- Exchange(distribution=[hash[a]])
-            +- LocalSortAggregate(groupBy=[a], select=[a, Partial_COLLECT(b) AS set])
-               +- Sort(orderBy=[a ASC])
-                  +- Calc(select=[a, b], where=[(a < 5)])
-                     +- BoundedStreamScan(table=[[default_catalog, default_database, MyTable]], fields=[a, b, c])
+      +- Exchange(distribution=[forward])
+         +- Sort(orderBy=[a ASC])
+            +- Exchange(distribution=[hash[a]])
+               +- LocalSortAggregate(groupBy=[a], select=[a, Partial_COLLECT(b) AS set])
+                  +- Exchange(distribution=[forward])
+                     +- Sort(orderBy=[a ASC])
+                        +- Calc(select=[a, b], where=[(a < 5)])
+                           +- BoundedStreamScan(table=[[default_catalog, default_database, MyTable]], fields=[a, b, c])
 ]]>
     </Resource>
   </TestCase>
@@ -217,12 +240,14 @@ LogicalProject(b=[$0], id=[$2], point=[$3])
 Calc(select=[b, _1 AS id, _2 AS point])
 +- Correlate(invocation=[$UNNEST_ROWS$1($cor0.set)], correlate=[table($UNNEST_ROWS$1($cor0.set))], select=[b,set,_1,_2], rowType=[RecordType(INTEGER b, RecordType:peek_no_expand(INTEGER _1, VARCHAR(2147483647) _2) MULTISET set, INTEGER _1, VARCHAR(2147483647) _2)], joinType=[INNER])
    +- SortAggregate(isMerge=[true], groupBy=[b], select=[b, Final_COLLECT(set) AS set])
-      +- Sort(orderBy=[b ASC])
-         +- Exchange(distribution=[hash[b]])
-            +- LocalSortAggregate(groupBy=[b], select=[b, Partial_COLLECT(c) AS set])
-               +- Sort(orderBy=[b ASC])
-                  +- Calc(select=[b, c], where=[(b < 3)])
-                     +- BoundedStreamScan(table=[[default_catalog, default_database, MyTable]], fields=[a, b, c])
+      +- Exchange(distribution=[forward])
+         +- Sort(orderBy=[b ASC])
+            +- Exchange(distribution=[hash[b]])
+               +- LocalSortAggregate(groupBy=[b], select=[b, Partial_COLLECT(c) AS set])
+                  +- Exchange(distribution=[forward])
+                     +- Sort(orderBy=[b ASC])
+                        +- Calc(select=[b, c], where=[(b < 3)])
+                           +- BoundedStreamScan(table=[[default_catalog, default_database, MyTable]], fields=[a, b, c])
 ]]>
     </Resource>
   </TestCase>

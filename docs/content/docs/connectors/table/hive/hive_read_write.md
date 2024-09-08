@@ -152,16 +152,23 @@ following parameters in `TableConfig` (note that these parameters affect all sou
   </thead>
   <tbody>
     <tr>
-        <td><h5>table.exec.hive.infer-source-parallelism</h5></td>
-        <td style="word-wrap: break-word;">true</td>
-        <td>Boolean</td>
-        <td>If is true, source parallelism is inferred according to splits number. If is false, parallelism of source are set by config.</td>
+        <td><h5>table.exec.hive.infer-source-parallelism.mode</h5></td>
+        <td style="word-wrap: break-word;">dynamic</td>
+        <td>InferMode</td>
+        <td>An option for selecting the hive source parallelism inference mode to infer parallelism according to splits number.
+            'static' represents static inference, which will infer source parallelism at job creation stage.
+            'dynamic' represents dynamic inference, which will infer parallelism at job execution stage and could more accurately infer the source parallelism.
+            'none' represents disabling parallelism inference.
+            Note that it is still affected by the deprecated option 'table.exec.hive.infer-source-parallelism', requiring its value to be true for enabling parallelism inference.
+        </td>
     </tr>
     <tr>
         <td><h5>table.exec.hive.infer-source-parallelism.max</h5></td>
         <td style="word-wrap: break-word;">1000</td>
         <td>Integer</td>
-        <td>Sets max infer parallelism for source operator.</td>
+        <td>Sets max infer parallelism for source operator.
+            Note that the default value is effective only in the static parallelism inference mode.
+        </td>
     </tr>
   </tbody>
 </table>
@@ -198,8 +205,18 @@ Users can do some performance tuning by tuning the split's size with the follow 
     </tr>
   </tbody>
 </table>
+{{< hint warning >}}
+**NOTE**:
+- To tune the split's size, Flink will first get all files' size for all partitions.
+  If there are too many partitions, it maybe time-consuming,
+  then you can configure the job configuration `table.exec.hive.calculate-partition-size.thread-num` (3 by default) to a bigger value to enable more threads to speed up the process.
+- Currently, these configurations for tuning split size only works for the Hive table stored as ORC format.
+{{< /hint >}}
 
-**NOTE**: Currently, these two configurations only works for the Hive table stored as ORC format.
+### Read Table Statistics
+
+When the table statistic is not available from the Hive metastore, Flink will try to scan the table to get the statistic to generate a better execution plan. It may cost some time to get the statistic. To get it faster, you can use `table.exec.hive.read-statistics.thread-num` to configure how many threads to use to scan the table.
+The default value is the number of available processors in the current system and the configured value should be bigger than 0.
 
 ### Load Partition Splits
 
@@ -534,7 +551,7 @@ Also, you can manually add `SORTED BY <partition_field>` in your SQL statement t
 
 **NOTE:** 
 - The configuration `table.exec.hive.sink.sort-by-dynamic-partition.enable` only works in Flink `BATCH` mode.
-- Currently, `DISTRIBUTED BY` and `SORTED BY` is only supported when using [Hive dialect]({{< ref "docs/connectors/table/hive/hive_dialect" >}})  in Flink `BATCH` mode.
+- Currently, `DISTRIBUTED BY` and `SORTED BY` is only supported when using [Hive dialect]({{< ref "docs/dev/table/hive-compatibility/hive-dialect/overview" >}})  in Flink `BATCH` mode.
 
 ### Auto Gather Statistic
 By default, Flink will gather the statistic automatically and then committed to Hive metastore during writing Hive table.
@@ -552,6 +569,70 @@ use more threads to speed the gathering.
 
 **NOTE:**
 - Only `BATCH` mode supports to auto gather statistic, `STREAMING` mode doesn't support it yet.
+
+### File Compaction
+
+The Hive sink also supports file compactions, which allows applications to reduce the number of files generated while writing into Hive.
+
+#### Stream Mode
+
+In stream mode, the behavior is the same as `FileSystem` sink. Please refer to [File Compaction]({{< ref "docs/connectors/table/filesystem" >}}#file-compaction) for more details.
+
+#### Batch Mode
+
+When it's in batch mode and auto compaction is enabled, after finishing writing files, Flink will calculate the average size of written files for each partition. And if the average size is less than the
+configured threshold, then Flink will try to compact these files to files with a target size. The following are the table's options for file compaction.
+
+<table class="table table-bordered">
+  <thead>
+    <tr>
+        <th class="text-left" style="width: 25%">Option</th>
+        <th class="text-left" style="width: 8%">Required</th>
+        <th class="text-left" style="width: 8%">Forwarded</th>
+        <th class="text-left" style="width: 7%">Default</th>
+        <th class="text-left" style="width: 10%">Type</th>
+        <th class="text-left" style="width: 42%">Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+        <td><h5>auto-compaction</h5></td>
+        <td>optional</td>
+        <td>no</td>
+        <td style="word-wrap: break-word;">false</td>
+        <td>Boolean</td>
+        <td>Whether to enable automatic compaction in Hive sink or not. The data will be written to temporary files first. The temporary files are invisible before compaction.</td>
+    </tr>
+    <tr>
+        <td><h5>compaction.small-files.avg-size</h5></td>
+        <td>optional</td>
+        <td>yes</td>
+        <td style="word-wrap: break-word;">16MB</td>
+        <td>MemorySize</td>
+        <td>The threshold for file compaction. If the average size of the files is less than this value, Flink will then compact these files. the default value is 16MB.</td>
+    </tr>
+    <tr>
+        <td><h5>compaction.file-size</h5></td>
+        <td>optional</td>
+        <td>yes</td>
+        <td style="word-wrap: break-word;">(none)</td>
+        <td>MemorySize</td>
+        <td>The compaction target file size, the default value is the <a href="{{< ref "docs/connectors/table/filesystem" >}}#sink-rolling-policy-file-size">rolling file size</a>.</td>
+    </tr>
+    <tr>
+        <td><h5>compaction.parallelism</h5></td>
+        <td>optional</td>
+        <td>no</td>
+        <td style="word-wrap: break-word;">(none)</td>
+        <td>Integer</td>
+        <td>
+        The parallelism to compact files. If not set, it will use the <a href="{{< ref "docs/connectors/table/filesystem" >}}#sink-parallelism">sink parallelism</a>.
+        When using <a href="{{< ref "docs/deployment/elastic_scaling" >}}#adaptive-batch-scheduler">adaptive batch scheduler</a>, the parallelism of the compact operator deduced by the scheduler may be small, which will cause taking much time to finish compaction.
+        In such a case, please remember to set this option to a bigger value manually.
+        </td>
+    </tr>
+  </tbody>
+</table>
 
 ## Formats
 

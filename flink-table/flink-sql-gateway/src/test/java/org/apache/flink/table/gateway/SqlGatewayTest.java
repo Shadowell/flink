@@ -41,19 +41,19 @@ import static org.assertj.core.api.AssertionsForClassTypes.assertThat;
 import static org.assertj.core.api.AssertionsForClassTypes.assertThatThrownBy;
 
 /** Tests for the {@link SqlGateway}. */
-public class SqlGatewayTest {
+class SqlGatewayTest {
 
     private Map<String, String> originalEnv;
     private ByteArrayOutputStream output;
 
     @BeforeEach
-    public void before(@TempDir File tempFolder) throws IOException {
+    void before(@TempDir File tempFolder) throws IOException {
         originalEnv = System.getenv();
 
         // prepare yaml
-        File confYaml = new File(tempFolder, "flink-conf.yaml");
+        File confYaml = new File(tempFolder, "config.yaml");
         if (!confYaml.createNewFile()) {
-            throw new IOException("Can't create testing flink-conf.yaml file.");
+            throw new IOException("Can't create testing config.yaml file.");
         }
         // adjust the test environment for the purposes of this test
         Map<String, String> map = new HashMap<>(System.getenv());
@@ -64,7 +64,7 @@ public class SqlGatewayTest {
     }
 
     @AfterEach
-    public void cleanup() throws Exception {
+    void cleanup() throws Exception {
         CommonTestUtils.setEnv(originalEnv);
         if (output != null) {
             output.close();
@@ -72,7 +72,7 @@ public class SqlGatewayTest {
     }
 
     @Test
-    public void testPrintStartGatewayHelp() {
+    void testPrintStartGatewayHelp() {
         String[] args = new String[] {"--help"};
         SqlGateway.startSqlGateway(new PrintStream(output), args);
 
@@ -87,11 +87,11 @@ public class SqlGatewayTest {
     }
 
     @Test
-    public void testConfigureSqlGateway() throws Exception {
+    void testConfigureSqlGateway() throws Exception {
         String id = UUID.randomUUID().toString();
         String[] args =
                 new String[] {
-                    "-Dsql-gateway.endpoint.type=mocked",
+                    "-Dsql-gateway.endpoint.type=[mocked]",
                     "-Dsql-gateway.endpoint.mocked.id=" + id,
                     "-Dsql-gateway.endpoint.mocked.host=localhost",
                     "-Dsql-gateway.endpoint.mocked.port=9999"
@@ -121,7 +121,7 @@ public class SqlGatewayTest {
     }
 
     @Test
-    public void testFailedToStartSqlGateway() {
+    void testFailedToStartSqlGateway() {
         try (PrintStream stream = new PrintStream(output)) {
             assertThatThrownBy(() -> SqlGateway.startSqlGateway(stream, new String[0]))
                     .doesNotHaveToString(

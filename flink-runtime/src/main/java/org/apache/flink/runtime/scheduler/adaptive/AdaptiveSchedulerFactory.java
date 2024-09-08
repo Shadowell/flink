@@ -21,16 +21,19 @@ package org.apache.flink.runtime.scheduler.adaptive;
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.JobManagerOptions;
+import org.apache.flink.configuration.StateRecoveryOptions;
+import org.apache.flink.core.failure.FailureEnricher;
 import org.apache.flink.runtime.blob.BlobWriter;
 import org.apache.flink.runtime.blocklist.BlocklistOperations;
 import org.apache.flink.runtime.checkpoint.CheckpointRecoveryFactory;
 import org.apache.flink.runtime.checkpoint.CheckpointsCleaner;
 import org.apache.flink.runtime.concurrent.ComponentMainThreadExecutor;
 import org.apache.flink.runtime.executiongraph.JobStatusListener;
-import org.apache.flink.runtime.executiongraph.failover.flip1.RestartBackoffTimeStrategy;
-import org.apache.flink.runtime.executiongraph.failover.flip1.RestartBackoffTimeStrategyFactoryLoader;
+import org.apache.flink.runtime.executiongraph.failover.RestartBackoffTimeStrategy;
+import org.apache.flink.runtime.executiongraph.failover.RestartBackoffTimeStrategyFactoryLoader;
 import org.apache.flink.runtime.io.network.partition.JobMasterPartitionTracker;
 import org.apache.flink.runtime.jobgraph.JobGraph;
+import org.apache.flink.runtime.jobgraph.JobResourceRequirements;
 import org.apache.flink.runtime.jobmaster.ExecutionDeploymentTracker;
 import org.apache.flink.runtime.jobmaster.slotpool.DeclarativeSlotPool;
 import org.apache.flink.runtime.jobmaster.slotpool.SlotPoolService;
@@ -45,21 +48,14 @@ import org.apache.flink.runtime.shuffle.ShuffleMaster;
 
 import org.slf4j.Logger;
 
-import java.time.Duration;
+import java.util.Collection;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
 
 /** Factory for the adaptive scheduler. */
 public class AdaptiveSchedulerFactory implements SchedulerNGFactory {
 
-    private final Duration initialResourceAllocationTimeout;
-    private final Duration resourceStabilizationTimeout;
-
-    public AdaptiveSchedulerFactory(
-            Duration initialResourceAllocationTimeout, Duration resourceStabilizationTimeout) {
-        this.initialResourceAllocationTimeout = initialResourceAllocationTimeout;
-        this.resourceStabilizationTimeout = resourceStabilizationTimeout;
-    }
+    public AdaptiveSchedulerFactory() {}
 
     @Override
     public SchedulerNG createInstance(
@@ -82,6 +78,7 @@ public class AdaptiveSchedulerFactory implements SchedulerNGFactory {
             ComponentMainThreadExecutor mainThreadExecutor,
             FatalErrorHandler fatalErrorHandler,
             JobStatusListener jobStatusListener,
+            Collection<FailureEnricher> failureEnrichers,
             BlocklistOperations blocklistOperations)
             throws Exception {
         final DeclarativeSlotPool declarativeSlotPool =
@@ -96,6 +93,7 @@ public class AdaptiveSchedulerFactory implements SchedulerNGFactory {
                                 jobGraph.getSerializedExecutionConfig()
                                         .deserializeValue(userCodeLoader)
                                         .getRestartStrategy(),
+                                jobGraph.getJobConfiguration(),
                                 jobMasterConfiguration,
                                 jobGraph.isCheckpointingEnabled())
                         .create();
@@ -106,7 +104,9 @@ public class AdaptiveSchedulerFactory implements SchedulerNGFactory {
                 jobGraph.getJobID());
 
         final SlotSharingSlotAllocator slotAllocator =
-                createSlotSharingSlotAllocator(declarativeSlotPool);
+                createSlotSharingSlotAllocator(
+                        declarativeSlotPool,
+                        jobMasterConfiguration.get(StateRecoveryOptions.LOCAL_RECOVERY));
 
         final ExecutionGraphFactory executionGraphFactory =
                 new DefaultExecutionGraphFactory(
@@ -122,7 +122,10 @@ public class AdaptiveSchedulerFactory implements SchedulerNGFactory {
                         partitionTracker);
 
         return new AdaptiveScheduler(
+                AdaptiveScheduler.Settings.of(
+                        jobMasterConfiguration, jobGraph.getCheckpointingSettings()),
                 jobGraph,
+                JobResourceRequirements.readFromJobGraph(jobGraph).orElse(null),
                 jobMasterConfiguration,
                 declarativeSlotPool,
                 slotAllocator,
@@ -130,14 +133,13 @@ public class AdaptiveSchedulerFactory implements SchedulerNGFactory {
                 userCodeLoader,
                 new CheckpointsCleaner(),
                 checkpointRecoveryFactory,
-                initialResourceAllocationTimeout,
-                resourceStabilizationTimeout,
                 jobManagerJobMetricGroup,
                 restartBackoffTimeStrategy,
                 initializationTimestamp,
                 mainThreadExecutor,
                 fatalErrorHandler,
                 jobStatusListener,
+                failureEnrichers,
                 executionGraphFactory);
     }
 
@@ -147,10 +149,11 @@ public class AdaptiveSchedulerFactory implements SchedulerNGFactory {
     }
 
     public static SlotSharingSlotAllocator createSlotSharingSlotAllocator(
-            DeclarativeSlotPool declarativeSlotPool) {
+            DeclarativeSlotPool declarativeSlotPool, boolean localRecoveryEnabled) {
         return SlotSharingSlotAllocator.createSlotSharingSlotAllocator(
                 declarativeSlotPool::reserveFreeSlot,
                 declarativeSlotPool::freeReservedSlot,
-                declarativeSlotPool::containsFreeSlot);
+                declarativeSlotPool::containsFreeSlot,
+                localRecoveryEnabled);
     }
 }

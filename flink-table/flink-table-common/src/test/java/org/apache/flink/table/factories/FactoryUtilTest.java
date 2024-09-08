@@ -21,8 +21,10 @@ package org.apache.flink.table.factories;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.core.testutils.FlinkAssertions;
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.catalog.Catalog;
+import org.apache.flink.table.catalog.CatalogStore;
 import org.apache.flink.table.catalog.CommonCatalogOptions;
 import org.apache.flink.table.connector.sink.DynamicTableSink;
 import org.apache.flink.table.connector.source.DynamicTableSource;
@@ -33,12 +35,15 @@ import org.apache.flink.table.factories.TestFormatFactory.DecodingFormatMock;
 import org.apache.flink.table.factories.TestFormatFactory.EncodingFormatMock;
 import org.apache.flink.table.factories.utils.FactoryMocks;
 import org.apache.flink.testutils.ClassLoaderUtils;
+import org.apache.flink.util.FlinkUserCodeClassLoaders;
+import org.apache.flink.util.MutableURLClassLoader;
 
 import org.assertj.core.api.AbstractThrowableAssert;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -190,6 +195,11 @@ class FactoryUtilTest {
                         + "key.test-format.readable-metadata\n"
                         + "password\n"
                         + "property-version\n"
+                        + "scan.watermark.alignment.group\n"
+                        + "scan.watermark.alignment.max-drift\n"
+                        + "scan.watermark.alignment.update-interval\n"
+                        + "scan.watermark.emit.strategy\n"
+                        + "scan.watermark.idle-timeout\n"
                         + "target\n"
                         + "value.format\n"
                         + "value.test-format.changelog-mode\n"
@@ -198,6 +208,36 @@ class FactoryUtilTest {
                         + "value.test-format.fail-on-missing\n"
                         + "value.test-format.fallback-fail-on-missing\n"
                         + "value.test-format.readable-metadata");
+    }
+
+    @Test
+    void testWatermarkEmitOptions() {
+        Map<String, String> watermarkOptions = createWatermarkOptions();
+        assertCreateTableSourceWithOptionModifier(
+                options -> {
+                    options.putAll(watermarkOptions);
+                    options.put(FactoryUtil.WATERMARK_EMIT_STRATEGY.key(), "test_strategy");
+                },
+                "Invalid value for option 'scan.watermark.emit.strategy'.");
+    }
+
+    @Test
+    void testWatermarkAlignmentOptions() {
+        Map<String, String> watermarkOptions = createWatermarkOptions();
+        assertCreateTableSourceWithOptionModifier(
+                options -> {
+                    options.putAll(watermarkOptions);
+                    options.remove(FactoryUtil.WATERMARK_ALIGNMENT_GROUP.key());
+                },
+                "Error configuring watermark for 'test-connector', 'scan.watermark.alignment.group' "
+                        + "and 'scan.watermark.alignment.max-drift' must be set when configuring watermark alignment");
+        assertCreateTableSourceWithOptionModifier(
+                options -> {
+                    options.putAll(watermarkOptions);
+                    options.remove(FactoryUtil.WATERMARK_ALIGNMENT_MAX_DRIFT.key());
+                },
+                "Error configuring watermark for 'test-connector', 'scan.watermark.alignment.group' "
+                        + "and 'scan.watermark.alignment.max-drift' must be set when configuring watermark alignment");
     }
 
     @Test
@@ -373,6 +413,21 @@ class FactoryUtilTest {
                         anyCauseMatches(
                                 ValidationException.class,
                                 "Unsupported options found for 'test-catalog'"));
+    }
+
+    @Test
+    void testCreateCatalogStore() {
+        final Map<String, String> options = new HashMap<>();
+        ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
+        final FactoryUtil.DefaultCatalogStoreContext discoveryContext =
+                new FactoryUtil.DefaultCatalogStoreContext(options, null, classLoader);
+        final CatalogStoreFactory factory =
+                FactoryUtil.discoverFactory(
+                        classLoader, CatalogStoreFactory.class, TestCatalogStoreFactory.IDENTIFIER);
+        factory.open(discoveryContext);
+        CatalogStore catalogStore = factory.createCatalogStore();
+
+        assertThat(catalogStore).isInstanceOf(TestCatalogStoreFactory.TestCatalogStore.class);
     }
 
     @Test
@@ -668,6 +723,22 @@ class FactoryUtilTest {
                 .contains(serializationSchemaImplementationName);
     }
 
+    @Test
+    void testDiscoverFactoryFromClosedClassLoader() throws Exception {
+        MutableURLClassLoader classLoader =
+                FlinkUserCodeClassLoaders.create(
+                        new URL[0], FactoryUtilTest.class.getClassLoader(), new Configuration());
+        classLoader.close();
+        assertThatThrownBy(() -> FactoryUtil.discoverFactory(classLoader, Factory.class, "test"))
+                .satisfies(
+                        FlinkAssertions.anyCauseMatches(
+                                IllegalStateException.class,
+                                "Trying to access closed classloader. Please check if you store classloaders directly "
+                                        + "or indirectly in static fields. If the stacktrace suggests that the leak occurs in a third "
+                                        + "party library and cannot be fixed immediately, you can disable this check with the "
+                                        + "configuration 'classloader.check-leaked-classloader'"));
+    }
+
     // --------------------------------------------------------------------------------------------
     // Helper methods
     // --------------------------------------------------------------------------------------------
@@ -699,6 +770,16 @@ class FactoryUtilTest {
         options.put("value.format", "test-format");
         options.put("value.test-format.delimiter", "|");
         options.put("value.test-format.fail-on-missing", "true");
+        return options;
+    }
+
+    private static Map<String, String> createWatermarkOptions() {
+        final Map<String, String> options = new HashMap<>();
+        options.put("scan.watermark.emit.strategy", "on-event");
+        options.put("scan.watermark.alignment.group", "group1");
+        options.put("scan.watermark.alignment.max-drift", "1min");
+        options.put("scan.watermark.alignment.update-interval", "1s");
+        options.put("scan.watermark.idle-timeout", "1min");
         return options;
     }
 

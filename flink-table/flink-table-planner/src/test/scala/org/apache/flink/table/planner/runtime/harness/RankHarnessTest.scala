@@ -28,12 +28,12 @@ import org.apache.flink.table.planner.runtime.utils.JavaUserDefinedTableFunction
 import org.apache.flink.table.planner.runtime.utils.StreamingWithStateTestBase.StateBackendMode
 import org.apache.flink.table.runtime.util.RowDataHarnessAssertor
 import org.apache.flink.table.runtime.util.StreamRecordUtils.binaryRecord
+import org.apache.flink.testutils.junit.extensions.parameterized.ParameterizedTestExtension
 import org.apache.flink.types.Row
 import org.apache.flink.types.RowKind._
 
-import org.junit.{Before, Test}
-import org.junit.runner.RunWith
-import org.junit.runners.Parameterized
+import org.junit.jupiter.api.{BeforeEach, TestTemplate}
+import org.junit.jupiter.api.extension.ExtendWith
 
 import java.lang.{Long => JLong}
 import java.time.Duration
@@ -41,17 +41,17 @@ import java.util.concurrent.ConcurrentLinkedQueue
 
 import scala.collection.mutable
 
-@RunWith(classOf[Parameterized])
+@ExtendWith(Array(classOf[ParameterizedTestExtension]))
 class RankHarnessTest(mode: StateBackendMode) extends HarnessTestBase(mode) {
 
-  @Before
+  @BeforeEach
   override def before(): Unit = {
     super.before()
     val setting = EnvironmentSettings.newInstance().inStreamingMode().build()
     this.tEnv = StreamTableEnvironmentImpl.create(env, setting)
   }
 
-  @Test
+  @TestTemplate
   def testRetractRankWithRowNumber(): Unit = {
     val data = new mutable.MutableList[(String, String, Long)]
     val t = env.fromCollection(data).toTable(tEnv, 'a, 'b, 'c)
@@ -147,7 +147,7 @@ class RankHarnessTest(mode: StateBackendMode) extends HarnessTestBase(mode) {
     testHarness.close()
   }
 
-  @Test
+  @TestTemplate
   def testRetractRankWithoutRowNumber(): Unit = {
     val data = new mutable.MutableList[(String, String, Long)]
     val t = env.fromCollection(data).toTable(tEnv, 'a, 'b, 'c)
@@ -230,7 +230,6 @@ class RankHarnessTest(mode: StateBackendMode) extends HarnessTestBase(mode) {
     val data = new mutable.MutableList[(String, Int, Int)]
     val t = env.fromCollection(data).toTable(tEnv, 'word, 'cnt, 'type)
     tEnv.createTemporaryView("T", t)
-    tEnv.getConfig.setIdleStateRetention(Duration.ofSeconds(1))
 
     val sql =
       """
@@ -258,7 +257,7 @@ class RankHarnessTest(mode: StateBackendMode) extends HarnessTestBase(mode) {
     (testHarness, assertor)
   }
 
-  @Test
+  @TestTemplate
   def testUpdateRankWithRowNumberSortKeyDropsToLast(): Unit = {
     val (testHarness, assertor) = prepareUpdateRankWithRowNumberTester()
     testHarness.open()
@@ -299,7 +298,7 @@ class RankHarnessTest(mode: StateBackendMode) extends HarnessTestBase(mode) {
     testHarness.close()
   }
 
-  @Test
+  @TestTemplate
   def testUpdateRankWithRowNumberSortKeyDropsButRankUnchange(): Unit = {
     val (testHarness, assertor) = prepareUpdateRankWithRowNumberTester()
     testHarness.open()
@@ -330,7 +329,7 @@ class RankHarnessTest(mode: StateBackendMode) extends HarnessTestBase(mode) {
     testHarness.close()
   }
 
-  @Test
+  @TestTemplate
   def testUpdateRankWithRowNumberSortKeyDropsToNotLast(): Unit = {
     val (testHarness, assertor) = prepareUpdateRankWithRowNumberTester()
     testHarness.open()
@@ -369,7 +368,7 @@ class RankHarnessTest(mode: StateBackendMode) extends HarnessTestBase(mode) {
     testHarness.close()
   }
 
-  @Test
+  @TestTemplate
   def testUpdateRankWithRowNumberCandidatesLargerThanRankEnd(): Unit = {
     val (testHarness, assertor) = prepareUpdateRankWithRowNumberTester()
     testHarness.open()
@@ -410,7 +409,7 @@ class RankHarnessTest(mode: StateBackendMode) extends HarnessTestBase(mode) {
     testHarness.close()
   }
 
-  @Test
+  @TestTemplate
   def testUpdateRankWithRowNumberSortKeyDropsOutOfRandEnd(): Unit = {
     // Calc Top6: 8 candidates, old rank 2 drops to rank 7 (but it is still "rank 6")
     val (testHarness, assertor) = prepareUpdateRankWithRowNumberTester()

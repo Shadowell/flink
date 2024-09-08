@@ -152,7 +152,7 @@ public class DefaultSlotStatusSyncer implements SlotStatusSyncer {
                                 LOG.debug(
                                         "The slot {} has been removed before. Ignore the future.",
                                         allocationId);
-                                requestFuture.complete(null);
+                                returnedFuture.complete(null);
                                 return null;
                             }
                             if (acknowledge != null) {
@@ -305,6 +305,18 @@ public class DefaultSlotStatusSyncer implements SlotStatusSyncer {
                     SlotState.ALLOCATED);
             resourceTracker.notifyAcquiredResource(jobId, resourceProfile);
             return false;
+        }
+    }
+
+    @Override
+    public void freeInactiveSlots(JobID jobId) {
+        checkStarted();
+        for (TaskManagerInfo taskManagerInfo :
+                taskManagerTracker.getTaskManagersWithAllocatedSlotsForJob(jobId)) {
+            taskManagerInfo
+                    .getTaskExecutorConnection()
+                    .getTaskExecutorGateway()
+                    .freeInactiveSlots(jobId, taskManagerRequestTimeout);
         }
     }
 

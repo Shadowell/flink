@@ -23,17 +23,15 @@ import org.apache.flink.api.common.InvalidProgramException;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.cache.DistributedCache;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.configuration.StateChangelogOptionsInternal;
+import org.apache.flink.core.execution.JobStatusHook;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.runtime.blob.PermanentBlobKey;
-import org.apache.flink.runtime.executiongraph.JobStatusHook;
 import org.apache.flink.runtime.jobgraph.tasks.JobCheckpointingSettings;
 import org.apache.flink.runtime.jobmanager.scheduler.CoLocationGroup;
 import org.apache.flink.runtime.jobmanager.scheduler.SlotSharingGroup;
 import org.apache.flink.util.InstantiationUtil;
 import org.apache.flink.util.IterableUtils;
 import org.apache.flink.util.SerializedValue;
-import org.apache.flink.util.TernaryBoolean;
 
 import javax.annotation.Nullable;
 
@@ -70,6 +68,8 @@ public class JobGraph implements Serializable {
 
     private static final long serialVersionUID = 1L;
 
+    private static final String INITIAL_CLIENT_HEARTBEAT_TIMEOUT = "initialClientHeartbeatTimeout";
+
     // --- job and configuration ---
 
     /** List of task vertices included in this job graph. */
@@ -77,7 +77,7 @@ public class JobGraph implements Serializable {
             new LinkedHashMap<JobVertexID, JobVertex>();
 
     /** The job configuration attached to this job. */
-    private final Configuration jobConfiguration = new Configuration();
+    private Configuration jobConfiguration = new Configuration();
 
     /** ID of this job. May be set if specific job id is desired (e.g. session management) */
     private JobID jobID;
@@ -86,6 +86,8 @@ public class JobGraph implements Serializable {
     private final String jobName;
 
     private JobType jobType = JobType.BATCH;
+
+    private boolean dynamic;
 
     /**
      * Whether approximate local recovery is enabled. This flag will be removed together with legacy
@@ -196,6 +198,10 @@ public class JobGraph implements Serializable {
         return this.jobName;
     }
 
+    public void setJobConfiguration(Configuration jobConfiguration) {
+        this.jobConfiguration = jobConfiguration;
+    }
+
     /**
      * Returns the configuration object for this job. Job-wide parameters should be set into that
      * configuration object.
@@ -221,6 +227,14 @@ public class JobGraph implements Serializable {
 
     public JobType getJobType() {
         return jobType;
+    }
+
+    public void setDynamic(boolean dynamic) {
+        this.dynamic = dynamic;
+    }
+
+    public boolean isDynamic() {
+        return dynamic;
     }
 
     public void enableApproximateLocalRecovery(boolean enabled) {
@@ -367,9 +381,7 @@ public class JobGraph implements Serializable {
             return false;
         }
 
-        long checkpointInterval =
-                snapshotSettings.getCheckpointCoordinatorConfiguration().getCheckpointInterval();
-        return checkpointInterval > 0 && checkpointInterval < Long.MAX_VALUE;
+        return snapshotSettings.getCheckpointCoordinatorConfiguration().isCheckpointingEnabled();
     }
 
     /**
@@ -634,16 +646,6 @@ public class JobGraph implements Serializable {
         }
     }
 
-    public void setChangelogStateBackendEnabled(TernaryBoolean changelogStateBackendEnabled) {
-        if (changelogStateBackendEnabled == null
-                || TernaryBoolean.UNDEFINED.equals(changelogStateBackendEnabled)) {
-            return;
-        }
-        this.jobConfiguration.setBoolean(
-                StateChangelogOptionsInternal.ENABLE_CHANGE_LOG_FOR_APPLICATION,
-                changelogStateBackendEnabled.getAsBoolean());
-    }
-
     public void setJobStatusHooks(List<JobStatusHook> hooks) {
         checkNotNull(hooks, "Setting the JobStatusHook list to null is not allowed.");
         this.jobStatusHooks = hooks;
@@ -651,5 +653,13 @@ public class JobGraph implements Serializable {
 
     public List<JobStatusHook> getJobStatusHooks() {
         return this.jobStatusHooks;
+    }
+
+    public void setInitialClientHeartbeatTimeout(long initialClientHeartbeatTimeout) {
+        jobConfiguration.setLong(INITIAL_CLIENT_HEARTBEAT_TIMEOUT, initialClientHeartbeatTimeout);
+    }
+
+    public long getInitialClientHeartbeatTimeout() {
+        return jobConfiguration.getLong(INITIAL_CLIENT_HEARTBEAT_TIMEOUT, Long.MIN_VALUE);
     }
 }

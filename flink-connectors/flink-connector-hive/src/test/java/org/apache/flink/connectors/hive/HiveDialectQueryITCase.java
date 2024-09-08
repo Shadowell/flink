@@ -18,9 +18,13 @@
 
 package org.apache.flink.connectors.hive;
 
+import org.apache.flink.configuration.BatchExecutionOptions;
+import org.apache.flink.connector.file.table.FileSystemConnectorOptions;
 import org.apache.flink.table.HiveVersionTestUtil;
 import org.apache.flink.table.api.SqlDialect;
 import org.apache.flink.table.api.TableEnvironment;
+import org.apache.flink.table.catalog.Catalog;
+import org.apache.flink.table.catalog.GenericInMemoryCatalog;
 import org.apache.flink.table.catalog.hive.HiveCatalog;
 import org.apache.flink.table.catalog.hive.HiveTestUtils;
 import org.apache.flink.table.catalog.hive.client.HiveShim;
@@ -41,12 +45,16 @@ import org.apache.hadoop.hive.ql.udf.generic.GenericUDTF;
 import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspectorFactory;
 import org.apache.hadoop.hive.serde2.objectinspector.StructObjectInspector;
+import org.apache.hadoop.hive.serde2.objectinspector.primitive.JavaConstantLongObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.PrimitiveObjectInspectorFactory;
+import org.apache.hadoop.hive.serde2.objectinspector.primitive.PrimitiveObjectInspectorUtils;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.TimestampObjectInspector;
 import org.apache.hadoop.hive.serde2.typeinfo.TypeInfoFactory;
 import org.junit.BeforeClass;
+import org.junit.ClassRule;
 import org.junit.ComparisonFailure;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -54,6 +62,7 @@ import java.io.FileReader;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.sql.Timestamp;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -67,6 +76,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Test hive query compatibility. */
 public class HiveDialectQueryITCase {
+
+    @ClassRule public static TemporaryFolder tempFolder = new TemporaryFolder();
 
     private static final String QTEST_DIR =
             Thread.currentThread().getContextClassLoader().getResource("query-test").getPath();
@@ -83,6 +94,7 @@ public class HiveDialectQueryITCase {
         hiveCatalog.getHiveConf().setVar(HiveConf.ConfVars.HIVE_QUOTEDID_SUPPORT, "none");
         hiveCatalog.open();
         tableEnv = getTableEnvWithHiveCatalog();
+        tableEnv.getConfig().set(BatchExecutionOptions.ADAPTIVE_AUTO_PARALLELISM_ENABLED, false);
         warehouse = hiveCatalog.getHiveConf().getVar(HiveConf.ConfVars.METASTOREWAREHOUSE);
 
         // create tables
@@ -517,7 +529,8 @@ public class HiveDialectQueryITCase {
      */
     private boolean isDataFile(Path path) {
         String successFileName =
-                tableEnv.getConfig().get(HiveOptions.SINK_PARTITION_COMMIT_SUCCESS_FILE_NAME);
+                tableEnv.getConfig()
+                        .get(FileSystemConnectorOptions.SINK_PARTITION_COMMIT_SUCCESS_FILE_NAME);
         return !path.toFile().isHidden() && !path.toFile().getName().equals(successFileName);
     }
 
@@ -715,21 +728,27 @@ public class HiveDialectQueryITCase {
                                     .replace("$filepath", testLoadCsvFilePath));
 
             // test load data into table
-            tableEnv.executeSql("insert into tab1 values (1, 1), (1, 2), (2, 1), (2, 2)").await();
+            tableEnv.executeSql("insert into tab1 values (1, 1), (1, 2)").await();
             tableEnv.executeSql(
                     String.format(
                             "load data local inpath '%s' INTO TABLE tab2", warehouse + "/tab1"));
             List<Row> result =
                     CollectionUtil.iteratorToList(
                             tableEnv.executeSql("select * from tab2").collect());
-            assertThat(result.toString()).isEqualTo("[+I[1, 1], +I[1, 2], +I[2, 1], +I[2, 2]]");
+            assertThat(result.toString()).isEqualTo("[+I[1, 1], +I[1, 2]]");
+            // there should still exist data in tab1
+            result =
+                    CollectionUtil.iteratorToList(
+                            tableEnv.executeSql("select * from tab1").collect());
+            assertThat(result.toString()).isEqualTo("[+I[1, 1], +I[1, 2]]");
 
             // test load data overwrite
-            tableEnv.executeSql("insert into tab1 values (2, 1), (2, 2)").await();
+            tableEnv.executeSql("insert overwrite table tab1 values (2, 1), (2, 2)").await();
             tableEnv.executeSql(
-                    String.format(
-                            "load data local inpath '%s' overwrite into table tab2",
-                            warehouse + "/tab1"));
+                            String.format(
+                                    "load data inpath '%s' overwrite into table tab2",
+                                    warehouse + "/tab1"))
+                    .await();
             result =
                     CollectionUtil.iteratorToList(
                             tableEnv.executeSql("select * from tab2").collect());
@@ -738,9 +757,11 @@ public class HiveDialectQueryITCase {
             // test load data into partition
             tableEnv.executeSql(
                             String.format(
-                                    "load data inpath '%s' into table p_table partition (dateint=2022) ",
+                                    "load data local inpath '%s' into table p_table partition (dateint=2022) ",
                                     testLoadCsvFilePath))
                     .await();
+            // the file should be removed
+            assertThat(new File(testLoadCsvFilePath).exists()).isFalse();
             result =
                     CollectionUtil.iteratorToList(
                             tableEnv.executeSql("select * from p_table where dateint=2022")
@@ -835,6 +856,137 @@ public class HiveDialectQueryITCase {
                     .hasRootCauseMessage("DISTINCT keyword must be specified");
         } finally {
             tableEnv.executeSql("drop table abcd");
+        }
+    }
+
+    @Test
+    public void testLiteral() throws Exception {
+        List<Row> result =
+                CollectionUtil.iteratorToList(
+                        tableEnv.executeSql("SELECT asin(2), binary('1'), struct(2, 9, 7)")
+                                .collect());
+        if (HiveVersionTestUtil.HIVE_310_OR_LATER) {
+            assertThat(result.toString()).isEqualTo("[+I[null, [49], +I[2, 9, 7]]]");
+        } else {
+            assertThat(result.toString()).isEqualTo("[+I[NaN, [49], +I[2, 9, 7]]]");
+        }
+        tableEnv.executeSql("create table test_decimal_literal(d decimal(10, 2))");
+        try {
+            tableEnv.executeSql("insert into test_decimal_literal values (1.2)").await();
+            result =
+                    CollectionUtil.iteratorToList(
+                            tableEnv.executeSql(
+                                            "select d / 3, d / 3L, 6 / d, 6L / d from test_decimal_literal")
+                                    .collect());
+            assertThat(result.toString())
+                    .isEqualTo("[+I[0.400000, 0.400000, 5.00000000000, 5.00000000000]]");
+
+        } finally {
+            tableEnv.executeSql("drop table test_decimal_literal");
+        }
+    }
+
+    @Test
+    public void testCrossCatalogQueryNoHiveTable() throws Exception {
+        // register a new in-memory catalog
+        Catalog inMemoryCatalog = new GenericInMemoryCatalog("m_catalog", "db");
+        tableEnv.registerCatalog("m_catalog", inMemoryCatalog);
+        tableEnv.getConfig().setSqlDialect(SqlDialect.DEFAULT);
+        // create a non-hive table
+        tableEnv.executeSql(
+                String.format(
+                        "create table m_catalog.db.t1(x int, y string) "
+                                + "with ('connector' = 'filesystem', 'path' = '%s', 'format'='csv')",
+                        tempFolder.newFolder().toURI()));
+        // create a non-hive partitioned table
+        tableEnv.executeSql(
+                String.format(
+                        "create table m_catalog.db.t2(x int, p1 int,p2 string) partitioned by (p1, p2) "
+                                + "with ('connector' = 'filesystem', 'path' = '%s', 'format'='csv')",
+                        tempFolder.newFolder().toURI()));
+
+        tableEnv.getConfig().setSqlDialect(SqlDialect.HIVE);
+        // create a hive table
+        tableEnv.executeSql("create table t1(x int, y string)");
+
+        try {
+            // insert data into the non-hive table and hive table
+            tableEnv.executeSql("insert into m_catalog.db.t1 values (1, 'v1'), (2, 'v2')").await();
+            tableEnv.executeSql(
+                            "insert into m_catalog.db.t2 partition (p1=0,p2='static') values (1), (2), (1)")
+                    .await();
+            tableEnv.executeSql("insert into t1 values (1, 'h1'), (4, 'h2')").await();
+            // query a non-hive table
+            List<Row> result =
+                    CollectionUtil.iteratorToList(
+                            tableEnv.executeSql("select * from m_catalog.db.t1 sort by x desc")
+                                    .collect());
+            assertThat(result.toString()).isEqualTo("[+I[2, v2], +I[1, v1]]");
+            // query a non-hive partitioned table
+            result =
+                    CollectionUtil.iteratorToList(
+                            tableEnv.executeSql("select * from m_catalog.db.t2 cluster by x")
+                                    .collect());
+            assertThat(result.toString())
+                    .isEqualTo("[+I[1, 0, static], +I[1, 0, static], +I[2, 0, static]]");
+            // join a table using a hive table and a non-hive table
+            result =
+                    CollectionUtil.iteratorToList(
+                            tableEnv.executeSql(
+                                            "select ht1.x, ht1.y from m_catalog.db.t1 as mt1 join t1 as ht1 using (x)")
+                                    .collect());
+            assertThat(result.toString()).isEqualTo("[+I[1, h1]]");
+        } finally {
+            tableEnv.getConfig().setSqlDialect(SqlDialect.DEFAULT);
+            tableEnv.executeSql("drop table m_catalog.db.t1");
+            tableEnv.executeSql("drop table m_catalog.db.t2");
+            tableEnv.executeSql("drop table t1");
+            tableEnv.getConfig().setSqlDialect(SqlDialect.HIVE);
+        }
+    }
+
+    @Test
+    public void testNullLiteralAsArgument() throws Exception {
+        tableEnv.executeSql("create table test_ts(ts timestamp)");
+        tableEnv.executeSql("create table t_bigint(ts bigint)");
+        tableEnv.executeSql("create table t_array(a_t array<bigint>)");
+        Long testTimestamp = 1671058803926L;
+        // timestamp's behavior is different between hive2 and hive3, so
+        // use HiveShim in this test to hide such difference
+        HiveShim hiveShim = HiveShimLoader.loadHiveShim(HiveShimLoader.getHiveVersion());
+        LocalDateTime expectDateTime =
+                hiveShim.toFlinkTimestamp(
+                        PrimitiveObjectInspectorUtils.getTimestamp(
+                                testTimestamp, new JavaConstantLongObjectInspector(testTimestamp)));
+        try {
+            tableEnv.executeSql(
+                            String.format(
+                                    "insert into table t_bigint values (%s), (null)",
+                                    testTimestamp))
+                    .await();
+            // the return data type for expression if(ts = 0, null ,ts) should be bigint instead of
+            // string. otherwise, the all values in table t_bigint wll be null since
+            // cast("1671058803926" as timestamp) will return null
+            tableEnv.executeSql(
+                            "insert into table test_ts select if(ts = 0, null ,ts) from t_bigint")
+                    .await();
+            List<Row> result =
+                    CollectionUtil.iteratorToList(
+                            tableEnv.executeSql("select * from test_ts").collect());
+            // verify it can cast to timestamp value correctly
+            assertThat(result.toString())
+                    .isEqualTo(String.format("[+I[%s], +I[null]]", expectDateTime));
+
+            // test cast null as bigint
+            tableEnv.executeSql("insert into t_array select array(cast(null as bigint))").await();
+            result =
+                    CollectionUtil.iteratorToList(
+                            tableEnv.executeSql("select * from t_array").collect());
+            assertThat(result.toString()).isEqualTo("[+I[null]]");
+        } finally {
+            tableEnv.executeSql("drop table test_ts");
+            tableEnv.executeSql("drop table t_bigint");
+            tableEnv.executeSql("drop table t_array");
         }
     }
 

@@ -31,12 +31,12 @@ org.apache.flink.table.api.ValidationException: Table with identifier 'default_c
 
 describe non_exist;
 !output
-org.apache.flink.table.api.ValidationException: Tables or views with the identifier 'default_catalog.default_database.non_exist' doesn't exist
+org.apache.flink.table.api.ValidationException: Tables or views with the identifier 'default_catalog.default_database.non_exist' doesn't exist.
 !error
 
 desc non_exist;
 !output
-org.apache.flink.table.api.ValidationException: Tables or views with the identifier 'default_catalog.default_database.non_exist' doesn't exist
+org.apache.flink.table.api.ValidationException: Tables or views with the identifier 'default_catalog.default_database.non_exist' doesn't exist.
 !error
 
 alter table non_exist rename to non_exist2;
@@ -90,8 +90,9 @@ CREATE TABLE `default_catalog`.`default_database`.`orders` (
   `ts` TIMESTAMP(3),
   `ptime` AS PROCTIME(),
   WATERMARK FOR `ts` AS `ts` - INTERVAL '1' SECOND,
-  CONSTRAINT `PK_3599338` PRIMARY KEY (`user`) NOT ENFORCED
-) WITH (
+  CONSTRAINT `PK_user` PRIMARY KEY (`user`) NOT ENFORCED
+)
+WITH (
   'connector' = 'datagen'
 )
 !ok
@@ -340,8 +341,9 @@ CREATE TABLE `default_catalog`.`default_database`.`orders2` (
   `ts` TIMESTAMP(3),
   `ptime` AS PROCTIME(),
   WATERMARK FOR `ts` AS `ts` - INTERVAL '1' SECOND,
-  CONSTRAINT `PK_3599338` PRIMARY KEY (`user`) NOT ENFORCED
-) WITH (
+  CONSTRAINT `PK_user` PRIMARY KEY (`user`) NOT ENFORCED
+)
+WITH (
   'connector' = 'kafka',
   'scan.startup.mode' = 'earliest-offset'
 )
@@ -368,8 +370,9 @@ CREATE TABLE `default_catalog`.`default_database`.`orders2` (
   `ts` TIMESTAMP(3),
   `ptime` AS PROCTIME(),
   WATERMARK FOR `ts` AS `ts` - INTERVAL '1' SECOND,
-  CONSTRAINT `PK_3599338` PRIMARY KEY (`user`) NOT ENFORCED
-) WITH (
+  CONSTRAINT `PK_user` PRIMARY KEY (`user`) NOT ENFORCED
+)
+WITH (
   'connector' = 'datagen',
   'scan.startup.mode' = 'earliest-offset'
 )
@@ -396,15 +399,21 @@ connector
 fields.amount.kind
 fields.amount.max
 fields.amount.min
+fields.amount.null-rate
 fields.product.kind
 fields.product.length
+fields.product.null-rate
+fields.product.var-len
 fields.ts.kind
 fields.ts.max-past
+fields.ts.null-rate
 fields.user.kind
 fields.user.max
 fields.user.min
+fields.user.null-rate
 number-of-rows
 rows-per-second
+scan.parallelism
 !error
 
 # ==========================================================================
@@ -432,8 +441,9 @@ CREATE TABLE `default_catalog`.`default_database`.`orders2` (
   `ts` TIMESTAMP(3),
   `ptime` AS PROCTIME(),
   WATERMARK FOR `ts` AS `ts` - INTERVAL '1' SECOND,
-  CONSTRAINT `PK_3599338` PRIMARY KEY (`user`) NOT ENFORCED
-) WITH (
+  CONSTRAINT `PK_user` PRIMARY KEY (`user`) NOT ENFORCED
+)
+WITH (
   'connector' = 'datagen'
 )
 !ok
@@ -552,7 +562,8 @@ CREATE TEMPORARY TABLE `default_catalog`.`default_database`.`tbl1` (
   `user` BIGINT NOT NULL,
   `product` VARCHAR(32),
   `amount` INT
-) WITH (
+)
+WITH (
   'connector' = 'datagen'
 )
 !ok
@@ -798,9 +809,20 @@ Sink(table=[default_catalog.default_database.orders2], fields=[user, product, am
     } ]
   }, {
     "id" : ,
-    "type" : "Sink: orders2[]",
-    "pact" : "Data Sink",
-    "contents" : "[]:Sink(table=[default_catalog.default_database.orders2], fields=[user, product, amount, ts])",
+    "type" : "StreamRecordTimestampInserter[]",
+    "pact" : "Operator",
+    "contents" : "[]:StreamRecordTimestampInserter(rowtime field: 3)",
+    "parallelism" : 1,
+    "predecessors" : [ {
+      "id" : ,
+      "ship_strategy" : "FORWARD",
+      "side" : "second"
+    } ]
+  }, {
+    "id" : ,
+    "type" : "orders2[]: Writer",
+    "pact" : "Operator",
+    "contents" : "orders2[]: Writer",
     "parallelism" : 1,
     "predecessors" : [ {
       "id" : ,

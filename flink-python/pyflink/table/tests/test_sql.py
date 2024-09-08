@@ -21,7 +21,7 @@ import subprocess
 
 from pyflink.find_flink_home import _find_flink_source_root
 from pyflink.java_gateway import get_gateway
-from pyflink.table import ResultKind
+from pyflink.table import ResultKind, ExplainDetail
 from pyflink.table import expressions as expr
 from pyflink.testing import source_sink_utils
 from pyflink.testing.test_case_utils import PyFlinkStreamTableTestCase, \
@@ -37,7 +37,12 @@ class StreamSqlTests(PyFlinkStreamTableTestCase):
             .alias("a", "b") \
             .select(expr.call("func1", expr.col("a"), expr.col("b")))
         plan = table.explain()
-        self.assertTrue(plan.find("PythonCalc(select=[func1(f0, f1) AS _c0])") >= 0)
+        self.assertGreaterEqual(plan.find("== Optimized Physical Plan =="), 0)
+        self.assertGreaterEqual(plan.find("PythonCalc(select=[func1(f0, f1) AS _c0])"), 0)
+
+        plan = table.explain(ExplainDetail.PLAN_ADVICE)
+        self.assertGreaterEqual(plan.find("== Optimized Physical Plan With Advice =="), 0)
+        self.assertGreaterEqual(plan.find("No available advice..."), 0)
 
     def test_sql_query(self):
         t_env = self.t_env
@@ -126,4 +131,7 @@ class JavaSqlTests(PyFlinkTestCase):
         test_jar_path = self.get_jar_path(test_jar_pattern)
         test_classpath = self.get_classpath() + os.pathsep + test_jar_path
         java_executable = self.get_java_executable()
-        subprocess.check_output([java_executable, "-cp", test_classpath, test_class], shell=False)
+        subprocess.check_output([java_executable,
+                                 "-XX:+IgnoreUnrecognizedVMOptions",
+                                 "--add-opens=java.base/java.lang=ALL-UNNAMED",
+                                 "-cp", test_classpath, test_class], shell=False)

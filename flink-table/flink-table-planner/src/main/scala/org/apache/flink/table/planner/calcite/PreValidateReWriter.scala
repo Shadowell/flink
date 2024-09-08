@@ -23,6 +23,7 @@ import org.apache.flink.sql.parser.dml.RichSqlInsert
 import org.apache.flink.sql.parser.dql.SqlRichExplain
 import org.apache.flink.table.api.ValidationException
 import org.apache.flink.table.planner.calcite.PreValidateReWriter.{appendPartitionAndNullsProjects, notSupported}
+import org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable
 import org.apache.flink.table.planner.plan.schema.{CatalogSourceTable, FlinkPreparingTableBase, LegacyCatalogSourceTable}
 import org.apache.flink.util.Preconditions.checkArgument
 
@@ -129,6 +130,8 @@ object PreValidateReWriter {
       // just skip to let other validation error throw.
       return source
     }
+
+    val rewriterUtils = new SqlRewriterUtils(validator)
     val targetRowType = createTargetRowType(typeFactory, table)
     // validate partition fields first.
     val assignedFields = new util.LinkedHashMap[Integer, SqlNode]
@@ -139,6 +142,7 @@ object PreValidateReWriter {
     for (node <- partitions.getList) {
       val sqlProperty = node.asInstanceOf[SqlProperty]
       val id = sqlProperty.getKey
+      validateUnsupportedCompositeColumn(id)
       val targetField = SqlValidatorUtil.getTargetField(
         targetRowType,
         typeFactory,
@@ -149,7 +153,11 @@ object PreValidateReWriter {
       val value = sqlProperty.getValue.asInstanceOf[SqlLiteral]
       assignedFields.put(
         targetField.getIndex,
-        maybeCast(value, value.createSqlType(typeFactory), targetField.getType, typeFactory))
+        rewriterUtils.maybeCast(
+          value,
+          value.createSqlType(typeFactory),
+          targetField.getType,
+          typeFactory))
     }
 
     // validate partial insert columns.
@@ -163,10 +171,12 @@ object PreValidateReWriter {
         sqlInsert.getTargetColumnList.getList
           .map(
             id => {
+              val identifier = id.asInstanceOf[SqlIdentifier]
+              validateUnsupportedCompositeColumn(identifier)
               val targetField = SqlValidatorUtil.getTargetField(
                 targetRowType,
                 typeFactory,
-                id.asInstanceOf[SqlIdentifier],
+                identifier,
                 calciteCatalogReader,
                 relOptTable)
               validateField(targetFields.add, id.asInstanceOf[SqlIdentifier], targetField)
@@ -195,23 +205,26 @@ object PreValidateReWriter {
             validateField(idx => !assignedFields.contains(idx), id, targetField)
             assignedFields.put(
               targetField.getIndex,
-              maybeCast(
+              rewriterUtils.maybeCast(
                 SqlLiteral.createNull(SqlParserPos.ZERO),
                 typeFactory.createUnknownType(),
                 targetField.getType,
-                typeFactory))
+                typeFactory)
+            )
           } else {
             // handle reorder
             targetPosition.add(targetColumns.indexOf(targetField))
           }
+
         }
       }
     }
 
-    rewriteSqlCall(validator, source, targetRowType, assignedFields, targetPosition)
+    rewriteSqlCall(rewriterUtils, validator, source, targetRowType, assignedFields, targetPosition)
   }
 
   private def rewriteSqlCall(
+      rewriterUtils: SqlRewriterUtils,
       validator: FlinkCalciteSqlValidator,
       call: SqlCall,
       targetRowType: RelDataType,
@@ -221,6 +234,7 @@ object PreValidateReWriter {
     def rewrite(node: SqlNode): SqlCall = {
       checkArgument(node.isInstanceOf[SqlCall], node)
       rewriteSqlCall(
+        rewriterUtils,
         validator,
         node.asInstanceOf[SqlCall],
         targetRowType,
@@ -230,14 +244,21 @@ object PreValidateReWriter {
 
     call.getKind match {
       case SqlKind.SELECT =>
-        rewriteSelect(
-          validator,
-          call.asInstanceOf[SqlSelect],
-          targetRowType,
-          assignedFields,
-          targetPosition)
+        val sqlSelect = call.asInstanceOf[SqlSelect]
+
+        if (targetPosition.nonEmpty && sqlSelect.getSelectList.size() != targetPosition.size()) {
+          throw newValidationError(call, RESOURCE.columnCountMismatch())
+        }
+        rewriterUtils.rewriteSelect(sqlSelect, targetRowType, assignedFields, targetPosition)
       case SqlKind.VALUES =>
-        rewriteValues(call, targetRowType, assignedFields, targetPosition)
+        call.getOperandList.toSeq.foreach {
+          case sqlCall: SqlCall => {
+            if (targetPosition.nonEmpty && sqlCall.getOperandList.size() != targetPosition.size()) {
+              throw newValidationError(call, RESOURCE.columnCountMismatch())
+            }
+          }
+        }
+        rewriterUtils.rewriteValues(call, targetRowType, assignedFields, targetPosition)
       case kind if SqlKind.SET_QUERY.contains(kind) =>
         call.getOperandList.zipWithIndex.foreach {
           case (operand, index) => call.setOperand(index, rewrite(operand))
@@ -256,99 +277,6 @@ object PreValidateReWriter {
       // case SqlKind.EXPLICIT_TABLE =>
       case _ => throw new ValidationException(notSupported(call))
     }
-  }
-
-  private def rewriteSelect(
-      validator: FlinkCalciteSqlValidator,
-      select: SqlSelect,
-      targetRowType: RelDataType,
-      assignedFields: util.LinkedHashMap[Integer, SqlNode],
-      targetPosition: util.List[Int]): SqlCall = {
-    // Expands the select list first in case there is a star(*).
-    // Validates the select first to register the where scope.
-    validator.validate(select)
-    val sourceList = validator.expandStar(select.getSelectList, select, false).getList
-
-    val fixedNodes = new util.ArrayList[SqlNode]
-    val currentNodes =
-      if (targetPosition.isEmpty) {
-        new util.ArrayList[SqlNode](sourceList)
-      } else {
-        reorder(new util.ArrayList[SqlNode](sourceList), targetPosition)
-      }
-    (0 until targetRowType.getFieldList.length).foreach {
-      idx =>
-        if (assignedFields.containsKey(idx)) {
-          fixedNodes.add(assignedFields.get(idx))
-        } else if (currentNodes.size() > 0) {
-          fixedNodes.add(currentNodes.remove(0))
-        }
-    }
-    // Although it is error case, we still append the old remaining
-    // projection nodes to new projection.
-    if (currentNodes.size > 0) {
-      fixedNodes.addAll(currentNodes)
-    }
-    select.setSelectList(new SqlNodeList(fixedNodes, select.getSelectList.getParserPosition))
-    select
-  }
-
-  private def rewriteValues(
-      values: SqlCall,
-      targetRowType: RelDataType,
-      assignedFields: util.LinkedHashMap[Integer, SqlNode],
-      targetPosition: util.List[Int]): SqlCall = {
-    val fixedNodes = new util.ArrayList[SqlNode]
-    (0 until values.getOperandList.size()).foreach {
-      valueIdx =>
-        val value = values.getOperandList.get(valueIdx)
-        val valueAsList = if (value.getKind == SqlKind.ROW) {
-          value.asInstanceOf[SqlCall].getOperandList
-        } else {
-          Collections.singletonList(value)
-        }
-        val currentNodes =
-          if (targetPosition.isEmpty) {
-            new util.ArrayList[SqlNode](valueAsList)
-          } else {
-            reorder(new util.ArrayList[SqlNode](valueAsList), targetPosition)
-          }
-        val fieldNodes = new util.ArrayList[SqlNode]
-        (0 until targetRowType.getFieldList.length).foreach {
-          fieldIdx =>
-            if (assignedFields.containsKey(fieldIdx)) {
-              fieldNodes.add(assignedFields.get(fieldIdx))
-            } else if (currentNodes.size() > 0) {
-              fieldNodes.add(currentNodes.remove(0))
-            }
-        }
-        // Although it is error case, we still append the old remaining
-        // value items to new item list.
-        if (currentNodes.size > 0) {
-          fieldNodes.addAll(currentNodes)
-        }
-        fixedNodes.add(SqlStdOperatorTable.ROW.createCall(value.getParserPosition, fieldNodes))
-    }
-    SqlStdOperatorTable.VALUES.createCall(values.getParserPosition, fixedNodes)
-  }
-
-  /**
-   * Reorder sourceList to targetPosition. For example:
-   *   - sourceList(f0, f1, f2).
-   *   - targetPosition(1, 2, 0).
-   *   - Output(f1, f2, f0).
-   *
-   * @param sourceList
-   *   input fields.
-   * @param targetPosition
-   *   reorder mapping.
-   * @return
-   *   reorder fields.
-   */
-  private def reorder(
-      sourceList: util.ArrayList[SqlNode],
-      targetPosition: util.List[Int]): util.ArrayList[SqlNode] = {
-    new util.ArrayList[SqlNode](targetPosition.map(sourceList.get))
   }
 
   /**
@@ -371,10 +299,10 @@ object PreValidateReWriter {
     table.unwrap(classOf[FlinkPreparingTableBase]) match {
       case t: CatalogSourceTable =>
         val schema = t.getCatalogTable.getSchema
-        typeFactory.asInstanceOf[FlinkTypeFactory].buildPhysicalRelNodeRowType(schema)
+        typeFactory.asInstanceOf[FlinkTypeFactory].buildPersistedRelNodeRowType(schema)
       case t: LegacyCatalogSourceTable[_] =>
         val schema = t.catalogTable.getSchema
-        typeFactory.asInstanceOf[FlinkTypeFactory].buildPhysicalRelNodeRowType(schema)
+        typeFactory.asInstanceOf[FlinkTypeFactory].buildPersistedRelNodeRowType(schema)
       case _ =>
         table.getRowType
     }
@@ -401,35 +329,13 @@ object PreValidateReWriter {
     SqlUtil.newContextException(pos, e)
   }
 
-  // This code snippet is copied from the SqlValidatorImpl.
-  private def maybeCast(
-      node: SqlNode,
-      currentType: RelDataType,
-      desiredType: RelDataType,
-      typeFactory: RelDataTypeFactory): SqlNode = {
-    if (
-      currentType == desiredType
-      || (currentType.isNullable != desiredType.isNullable
-        && typeFactory.createTypeWithNullability(currentType, desiredType.isNullable)
-        == desiredType)
-    ) {
-      node
-    } else {
-      // See FLINK-26460 for more details
-      val sqlDataTypeSpec =
-        if (SqlTypeUtil.isNull(currentType) && SqlTypeUtil.isMap(desiredType)) {
-          val keyType = desiredType.getKeyType
-          val valueType = desiredType.getValueType
-          new SqlDataTypeSpec(
-            new SqlMapTypeNameSpec(
-              SqlTypeUtil.convertTypeToSpec(keyType).withNullable(keyType.isNullable),
-              SqlTypeUtil.convertTypeToSpec(valueType).withNullable(valueType.isNullable),
-              SqlParserPos.ZERO),
-            SqlParserPos.ZERO)
-        } else {
-          SqlTypeUtil.convertTypeToSpec(desiredType)
-        }
-      SqlStdOperatorTable.CAST.createCall(SqlParserPos.ZERO, node, sqlDataTypeSpec)
+  private def validateUnsupportedCompositeColumn(id: SqlIdentifier): Unit = {
+    assert(id != null)
+    if (!id.isSimple) {
+      val pos = id.getParserPosition
+      // TODO no suitable error message from current CalciteResource, just use this one temporarily,
+      // we will remove this after composite column name is supported.
+      throw SqlUtil.newContextException(pos, RESOURCE.unknownTargetColumn(id.toString))
     }
   }
 }

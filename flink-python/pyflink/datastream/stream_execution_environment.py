@@ -17,6 +17,7 @@
 ################################################################################
 import os
 import tempfile
+import warnings
 
 from typing import List, Any, Optional, cast
 
@@ -93,13 +94,13 @@ class StreamExecutionEnvironment(object):
     def set_max_parallelism(self, max_parallelism: int) -> 'StreamExecutionEnvironment':
         """
         Sets the maximum degree of parallelism defined for the program. The upper limit (inclusive)
-        is 32767.
+        is 32768.
 
         The maximum degree of parallelism specifies the upper limit for dynamic scaling. It also
         defines the number of key groups used for partitioned state.
 
         :param max_parallelism: Maximum degree of parallelism to be used for the program,
-                                with 0 < maxParallelism <= 2^15 - 1.
+                                with 0 < maxParallelism <= 2^15.
         :return: This object.
         """
         self._j_stream_execution_environment = \
@@ -213,6 +214,15 @@ class StreamExecutionEnvironment(object):
         """
         return self._j_stream_execution_environment.isChainingEnabled()
 
+    def is_chaining_of_operators_with_different_max_parallelism_enabled(self) -> bool:
+        """
+        Returns whether operators that have a different max parallelism can be chained.
+
+        :return: True if chaining is enabled, false otherwise
+        """
+        return self._j_stream_execution_environment\
+            .isChainingOfOperatorsWithDifferentMaxParallelismEnabled()
+
     def get_checkpoint_config(self) -> CheckpointConfig:
         """
         Gets the checkpoint config, which defines values like checkpoint interval, delay between
@@ -277,7 +287,18 @@ class StreamExecutionEnvironment(object):
 
         :return: The :class:`~pyflink.datastream.CheckpointingMode`.
         """
-        j_checkpointing_mode = self._j_stream_execution_environment.getCheckpointingMode()
+        return self.get_checkpointing_consistency_mode()
+
+    def get_checkpointing_consistency_mode(self) -> CheckpointingMode:
+        """
+        Returns the checkpointing mode (exactly-once vs. at-least-once).
+
+        Shorthand for get_checkpoint_config().get_checkpointing_mode().
+
+        :return: The :class:`~pyflink.datastream.CheckpointingMode`.
+        """
+        j_checkpointing_mode = \
+            self._j_stream_execution_environment.getCheckpointingConsistencyMode()
         return CheckpointingMode._from_j_checkpointing_mode(j_checkpointing_mode)
 
     def get_state_backend(self) -> StateBackend:
@@ -321,7 +342,14 @@ class StreamExecutionEnvironment(object):
 
         :param state_backend: The :class:`StateBackend`.
         :return: This object.
+
+        .. note:: Deprecated since version 1.19: This method is deprecated and will be removed in
+                  future FLINK major version. Use `stream_execution_environment.configure` method
+                  instead to set the state backend.
         """
+        warnings.warn("Deprecated since version 1.19: This method is deprecated and will be removed"
+                      " in future FLINK major version. Use `stream_execution_environment.configure`"
+                      " method instead to set the state backend.", DeprecationWarning)
         self._j_stream_execution_environment = \
             self._j_stream_execution_environment.setStateBackend(state_backend._j_state_backend)
         return self
@@ -415,7 +443,14 @@ class StreamExecutionEnvironment(object):
 
         :param restart_strategy_configuration: Restart strategy configuration to be set.
         :return:
+
+        .. note:: Deprecated since version 1.19: This method is deprecated and will be removed in
+                  future FLINK major version. Use `stream_execution_environment.configure` method
+                  instead to set the restart strategy.
         """
+        warnings.warn("Deprecated since version 1.19: This method is deprecated and will be removed"
+                      " in future FLINK major version. Use `stream_execution_environment.configure`"
+                      " method instead to set the restart strategy.", DeprecationWarning)
         self._j_stream_execution_environment.setRestartStrategy(
             restart_strategy_configuration._j_restart_strategy_configuration)
 
@@ -440,7 +475,16 @@ class StreamExecutionEnvironment(object):
         :param type_class_name: The full-qualified java class name of the types serialized with the
                                 given serializer.
         :param serializer_class_name: The full-qualified java class name of the serializer to use.
+
+        .. note:: Deprecated since version 1.19: Register data types and serializers through hard
+                  codes is deprecated, because you need to modify the codes when upgrading job
+                  version. You should configure this by option `pipeline.serialization-config`.
         """
+        warnings.warn("Deprecated since version 1.19: Register data types and serializers through"
+                      " hard codes is deprecated, because you need to modify the codes when"
+                      " upgrading job version. You should configure this by config option "
+                      " 'pipeline.serialization-config'.", DeprecationWarning)
+
         type_clz = load_java_class(type_class_name)
         j_serializer_clz = load_java_class(serializer_class_name)
         self._j_stream_execution_environment.addDefaultKryoSerializer(type_clz, j_serializer_clz)
@@ -459,7 +503,15 @@ class StreamExecutionEnvironment(object):
         :param type_class_name: The full-qualified java class name of the types serialized with
                                 the given serializer.
         :param serializer_class_name: The full-qualified java class name of the serializer to use.
+
+        .. note:: Deprecated since version 1.19: Register data types and serializers through hard
+                  codes is deprecated, because you need to modify the codes when upgrading job
+                  version. You should configure this by option `pipeline.serialization-config`.
         """
+        warnings.warn("Deprecated since version 1.19: Register data types and serializers through"
+                      " hard codes is deprecated, because you need to modify the codes when"
+                      " upgrading job version. You should configure this by config option "
+                      " 'pipeline.serialization-config'.", DeprecationWarning)
         type_clz = load_java_class(type_class_name)
         j_serializer_clz = load_java_class(serializer_class_name)
         self._j_stream_execution_environment.registerTypeWithKryoSerializer(
@@ -478,7 +530,15 @@ class StreamExecutionEnvironment(object):
             >>> env.register_type("com.aaa.bbb.TypeClass")
 
         :param type_class_name: The full-qualified java class name of the type to register.
+
+        .. note:: Deprecated since version 1.19: Register data types and serializers through hard
+                  codes is deprecated, because you need to modify the codes when upgrading job
+                  version. You should configure this by option `pipeline.serialization-config`.
         """
+        warnings.warn("Deprecated since version 1.19: Register data types and serializers through"
+                      " hard codes is deprecated, because you need to modify the codes when"
+                      " upgrading job version. You should configure this by config option "
+                      " 'pipeline.serialization-config'.", DeprecationWarning)
         type_clz = load_java_class(type_class_name)
         self._j_stream_execution_environment.registerType(type_clz)
 
@@ -683,11 +743,11 @@ class StreamExecutionEnvironment(object):
         .. note::
 
             Please make sure the uploaded python environment matches the platform that the cluster
-            is running on and that the python version must be 3.6 or higher.
+            is running on and that the python version must be 3.7 or higher.
 
         .. note::
 
-            The python udf worker depends on Apache Beam (version == 2.38.0).
+            The python udf worker depends on Apache Beam (version == 2.43.0).
             Please ensure that the specified environment meets the above requirements.
 
         :param python_exec: The path of python interpreter.
@@ -818,7 +878,7 @@ class StreamExecutionEnvironment(object):
         method returns a local execution environment.
 
         When executed from the command line the given configuration is stacked on top of the
-        global configuration which comes from the flink-conf.yaml, potentially overriding
+        global configuration which comes from the config.yaml, potentially overriding
         duplicated options.
 
         :param configuration: The configuration to instantiate the environment with.

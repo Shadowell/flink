@@ -19,10 +19,10 @@
 package org.apache.flink.runtime.fs.hdfs;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.time.Deadline;
 import org.apache.flink.core.fs.RecoverableFsDataOutputStream;
 import org.apache.flink.core.fs.RecoverableWriter.CommitRecoverable;
-import org.apache.flink.core.fs.RecoverableWriter.ResumeRecoverable;
 import org.apache.flink.runtime.util.HadoopUtils;
 import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.FlinkRuntimeException;
@@ -51,19 +51,11 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
  * abstraction.
  */
 @Internal
-class HadoopRecoverableFsDataOutputStream extends RecoverableFsDataOutputStream {
+class HadoopRecoverableFsDataOutputStream extends BaseHadoopFsRecoverableFsDataOutputStream {
 
     private static final long LEASE_TIMEOUT = 100_000L;
 
     private static Method truncateHandle;
-
-    private final FileSystem fs;
-
-    private final Path targetFile;
-
-    private final Path tempFile;
-
-    private final FSDataOutputStream out;
 
     HadoopRecoverableFsDataOutputStream(FileSystem fs, Path targetFile, Path tempFile)
             throws IOException {
@@ -74,6 +66,15 @@ class HadoopRecoverableFsDataOutputStream extends RecoverableFsDataOutputStream 
         this.targetFile = checkNotNull(targetFile);
         this.tempFile = checkNotNull(tempFile);
         this.out = fs.create(tempFile);
+    }
+
+    @VisibleForTesting
+    HadoopRecoverableFsDataOutputStream(
+            FileSystem fs, Path targetFile, Path tempFile, FSDataOutputStream out) {
+        this.fs = checkNotNull(fs);
+        this.targetFile = checkNotNull(targetFile);
+        this.tempFile = checkNotNull(tempFile);
+        this.out = out;
     }
 
     HadoopRecoverableFsDataOutputStream(FileSystem fs, HadoopFsRecoverable recoverable)
@@ -105,47 +106,8 @@ class HadoopRecoverableFsDataOutputStream extends RecoverableFsDataOutputStream 
     }
 
     @Override
-    public void write(int b) throws IOException {
-        out.write(b);
-    }
-
-    @Override
-    public void write(byte[] b, int off, int len) throws IOException {
-        out.write(b, off, len);
-    }
-
-    @Override
-    public void flush() throws IOException {
-        out.hflush();
-    }
-
-    @Override
-    public void sync() throws IOException {
-        out.hflush();
-        out.hsync();
-    }
-
-    @Override
-    public long getPos() throws IOException {
-        return out.getPos();
-    }
-
-    @Override
-    public ResumeRecoverable persist() throws IOException {
-        sync();
-        return new HadoopFsRecoverable(targetFile, tempFile, getPos());
-    }
-
-    @Override
-    public Committer closeForCommit() throws IOException {
-        final long pos = getPos();
-        close();
-        return new HadoopFsCommitter(fs, new HadoopFsRecoverable(targetFile, tempFile, pos));
-    }
-
-    @Override
-    public void close() throws IOException {
-        out.close();
+    protected Committer createCommitterFromResumeRecoverable(HadoopFsRecoverable recoverable) {
+        return new HadoopFsCommitter(fs, recoverable);
     }
 
     // ------------------------------------------------------------------------

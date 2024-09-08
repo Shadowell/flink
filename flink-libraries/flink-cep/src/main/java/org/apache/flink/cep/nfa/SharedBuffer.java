@@ -18,11 +18,8 @@
 
 package org.apache.flink.cep.nfa;
 
-import org.apache.flink.api.common.typeutils.CompositeTypeSerializerConfigSnapshot;
 import org.apache.flink.api.common.typeutils.CompositeTypeSerializerSnapshot;
-import org.apache.flink.api.common.typeutils.CompositeTypeSerializerUtil;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.api.common.typeutils.TypeSerializerSchemaCompatibility;
 import org.apache.flink.api.common.typeutils.TypeSerializerSnapshot;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.cep.nfa.compiler.NFAStateNameHandler;
@@ -156,51 +153,13 @@ public class SharedBuffer<V> {
         }
     }
 
-    /**
-     * @deprecated This snapshot class is no longer in use, and only maintained for backwards
-     *     compatibility purposes. It is fully replaced by {@link SharedBufferSerializerSnapshot}.
-     */
-    @Deprecated
-    public static final class SharedBufferSerializerConfigSnapshot<K, V>
-            extends CompositeTypeSerializerConfigSnapshot<SharedBuffer<V>> {
-
-        private static final int VERSION = 1;
-
-        /** This empty constructor is required for deserializing the configuration. */
-        public SharedBufferSerializerConfigSnapshot() {}
-
-        public SharedBufferSerializerConfigSnapshot(
-                final TypeSerializer<K> keySerializer,
-                final TypeSerializer<V> valueSerializer,
-                final TypeSerializer<DeweyNumber> versionSerializer) {
-
-            super(keySerializer, valueSerializer, versionSerializer);
-        }
-
-        @Override
-        public int getVersion() {
-            return VERSION;
-        }
-
-        @Override
-        public TypeSerializerSchemaCompatibility<SharedBuffer<V>> resolveSchemaCompatibility(
-                TypeSerializer<SharedBuffer<V>> newSerializer) {
-            return CompositeTypeSerializerUtil.delegateCompatibilityCheckToNewSnapshot(
-                    newSerializer,
-                    new SharedBufferSerializerSnapshot<>(),
-                    getNestedSerializerSnapshots());
-        }
-    }
-
     /** A {@link TypeSerializerSnapshot} for the {@link SharedBufferSerializerSnapshot}. */
     public static final class SharedBufferSerializerSnapshot<K, V>
             extends CompositeTypeSerializerSnapshot<SharedBuffer<V>, SharedBufferSerializer<K, V>> {
 
         private static final int VERSION = 2;
 
-        public SharedBufferSerializerSnapshot() {
-            super(SharedBufferSerializer.class);
-        }
+        public SharedBufferSerializerSnapshot() {}
 
         public SharedBufferSerializerSnapshot(SharedBufferSerializer<K, V> sharedBufferSerializer) {
             super(sharedBufferSerializer);

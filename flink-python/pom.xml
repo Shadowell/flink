@@ -25,7 +25,7 @@ under the License.
 	<parent>
 		<groupId>org.apache.flink</groupId>
 		<artifactId>flink-parent</artifactId>
-		<version>1.17-SNAPSHOT</version>
+		<version>2.0-SNAPSHOT</version>
 	</parent>
 
 	<artifactId>flink-python</artifactId>
@@ -34,7 +34,15 @@ under the License.
 	<packaging>jar</packaging>
 
 	<properties>
-		<arrow.version>5.0.0</arrow.version>
+		<arrow.version>13.0.0</arrow.version>
+		<surefire.module.config><!--
+			CommonTestUtils#setEnv
+			-->--add-opens=java.base/java.util=ALL-UNNAMED <!--
+			Kryo AtomicBoolean
+			-->--add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED <!--
+			Arrow MemoryUtil
+			-->--add-opens=java.base/java.nio=ALL-UNNAMED
+		</surefire.module.config>
 	</properties>
 
 	<dependencies>
@@ -95,6 +103,7 @@ under the License.
 		<dependency>
 			<groupId>org.apache.beam</groupId>
 			<artifactId>beam-runners-java-fn-execution</artifactId>
+			<optional>${flink.markBundledAsOptional}</optional>
 			<exclusions>
 				<exclusion>
 					<groupId>org.apache.beam</groupId>
@@ -110,13 +119,15 @@ under the License.
 		<dependency>
 			<groupId>org.apache.beam</groupId>
 			<artifactId>beam-runners-core-java</artifactId>
+			<optional>${flink.markBundledAsOptional}</optional>
 		</dependency>
 
 		<!-- PemJa dependencies -->
 		<dependency>
 			<groupId>com.alibaba</groupId>
 			<artifactId>pemja</artifactId>
-			<version>0.2.4</version>
+			<version>0.4.1</version>
+			<optional>${flink.markBundledAsOptional}</optional>
 		</dependency>
 
 		<!-- Protobuf dependencies -->
@@ -124,6 +135,7 @@ under the License.
 		<dependency>
 			<groupId>com.google.protobuf</groupId>
 			<artifactId>protobuf-java</artifactId>
+			<optional>${flink.markBundledAsOptional}</optional>
 		</dependency>
 
 		<!-- Python API dependencies -->
@@ -131,11 +143,13 @@ under the License.
 		<dependency>
 			<groupId>net.sf.py4j</groupId>
 			<artifactId>py4j</artifactId>
+			<optional>${flink.markBundledAsOptional}</optional>
 		</dependency>
 		<dependency>
 			<groupId>net.razorvine</groupId>
 			<artifactId>pyrolite</artifactId>
 			<version>4.13</version>
+			<optional>${flink.markBundledAsOptional}</optional>
 			<exclusions>
 				<exclusion>
 					<groupId>net.razorvine</groupId>
@@ -150,6 +164,7 @@ under the License.
 			<groupId>org.apache.arrow</groupId>
 			<artifactId>arrow-vector</artifactId>
 			<version>${arrow.version}</version>
+			<optional>${flink.markBundledAsOptional}</optional>
 			<exclusions>
 				<exclusion>
 					<groupId>commons-codec</groupId>
@@ -161,6 +176,7 @@ under the License.
 			<groupId>org.apache.arrow</groupId>
 			<artifactId>arrow-memory-netty</artifactId>
 			<version>${arrow.version}</version>
+			<optional>${flink.markBundledAsOptional}</optional>
 		</dependency>
 
 		<!-- test dependencies -->
@@ -274,7 +290,7 @@ under the License.
 			<!-- Indirectly accessed in pyflink_gateway_server -->
 			<groupId>org.apache.flink</groupId>
 			<artifactId>flink-sql-connector-kafka</artifactId>
-			<version>${project.version}</version>
+			<version>3.0.0-1.17</version>
 			<scope>test</scope>
 		</dependency>
 
@@ -282,8 +298,7 @@ under the License.
 			<!-- Indirectly accessed in pyflink_gateway_server -->
 			<groupId>org.apache.flink</groupId>
 			<artifactId>flink-sql-connector-elasticsearch7</artifactId>
-			<!-- Intentionally use the 1.16-SNAPSHOT version until some release is complete -->
-			<version>1.16-SNAPSHOT</version>
+			<version>3.0.0-1.16</version>
 			<scope>test</scope>
 		</dependency>
 
@@ -291,7 +306,7 @@ under the License.
 			<!-- Indirectly accessed in pyflink_gateway_server -->
 			<groupId>org.apache.flink</groupId>
 			<artifactId>flink-sql-connector-pulsar</artifactId>
-			<version>${project.version}</version>
+			<version>4.0.0-1.17</version>
 			<scope>test</scope>
 		</dependency>
 
@@ -299,7 +314,7 @@ under the License.
 			<!-- Indirectly accessed in pyflink_gateway_server -->
 			<groupId>org.apache.flink</groupId>
 			<artifactId>flink-sql-connector-rabbitmq</artifactId>
-			<version>${project.version}</version>
+			<version>3.0.0-1.16</version>
 			<scope>test</scope>
 		</dependency>
 
@@ -307,7 +322,7 @@ under the License.
 			<!-- Indirectly accessed in pyflink_gateway_server -->
 			<groupId>org.apache.flink</groupId>
 			<artifactId>flink-sql-connector-kinesis</artifactId>
-			<version>${project.version}</version>
+			<version>4.0.0-1.16</version>
 			<scope>test</scope>
 		</dependency>
 
@@ -315,7 +330,7 @@ under the License.
 			<!-- Indirectly accessed in pyflink_gateway_server -->
 			<groupId>org.apache.flink</groupId>
 			<artifactId>flink-sql-connector-aws-kinesis-firehose</artifactId>
-			<version>${project.version}</version>
+			<version>4.0.0-1.16</version>
 			<scope>test</scope>
 		</dependency>
 
@@ -323,7 +338,7 @@ under the License.
 			<!-- Indirectly accessed in pyflink_gateway_server -->
 			<groupId>org.apache.flink</groupId>
 			<artifactId>flink-connector-jdbc</artifactId>
-			<version>${project.version}</version>
+			<version>3.1.1-1.17</version>
 			<scope>test</scope>
 		</dependency>
 
@@ -331,7 +346,7 @@ under the License.
 			<!-- Indirectly accessed in pyflink_gateway_server -->
 			<groupId>org.apache.flink</groupId>
 			<artifactId>flink-connector-cassandra_${scala.binary.version}</artifactId>
-			<version>${project.version}</version>
+			<version>3.0.0-1.16</version>
 			<scope>test</scope>
 		</dependency>
 
@@ -350,6 +365,18 @@ under the License.
 			<version>${project.version}</version>
 			<type>test-jar</type>
 			<scope>test</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>commons-io</groupId>
+			<artifactId>commons-io</artifactId>
+			<version>${commons.io.version}</version>
+			<scope>test</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>org.apache.commons</groupId>
+			<artifactId>commons-lang3</artifactId>
 		</dependency>
 
 	</dependencies>
@@ -623,7 +650,7 @@ under the License.
 									<include>org.apache.beam:*</include>
 									<include>com.fasterxml.jackson.core:*</include>
 									<include>joda-time:*</include>
-									<inculde>com.google.protobuf:*</inculde>
+									<include>com.google.protobuf:*</include>
 									<include>org.apache.arrow:*</include>
 									<include>io.netty:*</include>
 									<include>com.google.flatbuffers:*</include>
@@ -689,6 +716,10 @@ under the License.
 								<relocation>
 									<pattern>com.google.flatbuffers</pattern>
 									<shadedPattern>org.apache.flink.api.python.shaded.com.google.flatbuffers</shadedPattern>
+								</relocation>
+								<relocation>
+									<pattern>com.google.protobuf</pattern>
+									<shadedPattern>org.apache.flink.api.python.shaded.com.google.protobuf</shadedPattern>
 								</relocation>
 							</relocations>
 						</configuration>

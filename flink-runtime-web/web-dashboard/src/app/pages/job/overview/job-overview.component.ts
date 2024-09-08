@@ -16,6 +16,7 @@
  * limitations under the License.
  */
 
+import { NgIf } from '@angular/common';
 import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
@@ -25,13 +26,17 @@ import {
   OnInit,
   ViewChild
 } from '@angular/core';
-import { ActivatedRoute, Router } from '@angular/router';
+import { ActivatedRoute, Router, RouterOutlet } from '@angular/router';
 import { forkJoin, Observable, of, Subject } from 'rxjs';
 import { catchError, filter, map, mergeMap, takeUntil } from 'rxjs/operators';
 
+import { DagreComponent } from '@flink-runtime-web/components/dagre/dagre.component';
+import { ResizeComponent } from '@flink-runtime-web/components/resize/resize.component';
 import { NodesItemCorrect, NodesItemLink } from '@flink-runtime-web/interfaces';
-import { MetricsService } from '@flink-runtime-web/services';
-import { DagreComponent } from '@flink-runtime-web/share/common/dagre/dagre.component';
+import { JobOverviewListComponent } from '@flink-runtime-web/pages/job/overview/list/job-overview-list.component';
+import { JobService, MetricsService } from '@flink-runtime-web/services';
+import { NzAlertModule } from 'ng-zorro-antd/alert';
+import { NzNotificationService } from 'ng-zorro-antd/notification';
 
 import { JobLocalService } from '../job-local.service';
 
@@ -39,7 +44,9 @@ import { JobLocalService } from '../job-local.service';
   selector: 'flink-job-overview',
   templateUrl: './job-overview.component.html',
   styleUrls: ['./job-overview.component.less'],
-  changeDetection: ChangeDetectionStrategy.OnPush
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [NzAlertModule, NgIf, DagreComponent, RouterOutlet, JobOverviewListComponent, ResizeComponent],
+  standalone: true
 })
 export class JobOverviewComponent implements OnInit, OnDestroy {
   public nodes: NodesItemCorrect[] = [];
@@ -59,6 +66,8 @@ export class JobOverviewComponent implements OnInit, OnDestroy {
     public readonly elementRef: ElementRef,
     private readonly metricService: MetricsService,
     private readonly jobLocalService: JobLocalService,
+    private readonly jobService: JobService,
+    private readonly notificationService: NzNotificationService,
     private readonly cdr: ChangeDetectorRef
   ) {}
 
@@ -70,7 +79,7 @@ export class JobOverviewComponent implements OnInit, OnDestroy {
         takeUntil(this.destroy$)
       )
       .subscribe(data => {
-        if (this.jobId !== data.plan.jid) {
+        if (this.jobId !== data.plan.jid || this.nodes.length === 0) {
           this.nodes = data.plan.nodes;
           this.links = data.plan.links;
           this.jobId = data.plan.jid;
@@ -90,7 +99,7 @@ export class JobOverviewComponent implements OnInit, OnDestroy {
         if (data) {
           this.dagreComponent.focusNode(data);
         } else if (this.selectedNode) {
-          this.timeoutId = setTimeout(() => this.dagreComponent.redrawGraph());
+          this.timeoutId = window.setTimeout(() => this.dagreComponent.redrawGraph());
         }
         this.selectedNode = data;
         this.cdr.markForCheck();
@@ -109,6 +118,15 @@ export class JobOverviewComponent implements OnInit, OnDestroy {
     }
   }
 
+  public onRescale(desiredParallelism: Map<string, number>): void {
+    this.jobService.changeDesiredParallelism(this.jobId, desiredParallelism).subscribe(() => {
+      this.notificationService.success(
+        'Rescaling operation.',
+        'Job resources requirements have been updated. Job will now try to rescale.'
+      );
+    });
+  }
+
   public onResizeEnd(): void {
     if (!this.selectedNode) {
       this.dagreComponent.moveToCenter();
@@ -119,7 +137,7 @@ export class JobOverviewComponent implements OnInit, OnDestroy {
   }
 
   public refreshNodesWithMetrics(): void {
-    this.mergeWithBackPressure(this.nodes)
+    this.mergeWithBackPressureAndSkew(this.nodes)
       .pipe(
         mergeMap(nodes => this.mergeWithWatermarks(nodes)),
         takeUntil(this.destroy$)
@@ -132,17 +150,22 @@ export class JobOverviewComponent implements OnInit, OnDestroy {
       });
   }
 
-  private mergeWithBackPressure(nodes: NodesItemCorrect[]): Observable<NodesItemCorrect[]> {
+  private mergeWithBackPressureAndSkew(nodes: NodesItemCorrect[]): Observable<NodesItemCorrect[]> {
     return forkJoin(
       nodes.map(node => {
         return this.metricService
-          .loadAggregatedMetrics(this.jobId, node.id, ['backPressuredTimeMsPerSecond', 'busyTimeMsPerSecond'])
+          .loadMetricsWithAllAggregates(this.jobId, node.id, [
+            'backPressuredTimeMsPerSecond',
+            'busyTimeMsPerSecond',
+            'numRecordsInPerSecond'
+          ])
           .pipe(
             map(result => {
               return {
                 ...node,
-                backPressuredPercentage: Math.min(Math.round(result.backPressuredTimeMsPerSecond / 10), 100),
-                busyPercentage: Math.min(Math.round(result.busyTimeMsPerSecond / 10), 100)
+                backPressuredPercentage: Math.min(Math.round(result.backPressuredTimeMsPerSecond.max / 10), 100),
+                busyPercentage: Math.min(Math.round(result.busyTimeMsPerSecond.max / 10), 100),
+                dataSkewPercentage: result.numRecordsInPerSecond.skew
               };
             })
           );

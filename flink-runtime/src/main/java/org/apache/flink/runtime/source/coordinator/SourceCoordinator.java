@@ -20,12 +20,16 @@ package org.apache.flink.runtime.source.coordinator;
 
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.annotation.VisibleForTesting;
+import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.eventtime.Watermark;
 import org.apache.flink.api.common.eventtime.WatermarkAlignmentParams;
+import org.apache.flink.api.connector.source.DynamicFilteringInfo;
+import org.apache.flink.api.connector.source.DynamicParallelismInference;
 import org.apache.flink.api.connector.source.Source;
 import org.apache.flink.api.connector.source.SourceEvent;
 import org.apache.flink.api.connector.source.SourceSplit;
 import org.apache.flink.api.connector.source.SplitEnumerator;
+import org.apache.flink.api.connector.source.SupportsBatchSnapshot;
 import org.apache.flink.api.connector.source.SupportsHandleExecutionAttemptSourceEvent;
 import org.apache.flink.core.io.SimpleVersionedSerializer;
 import org.apache.flink.core.memory.DataInputViewStreamWrapper;
@@ -33,11 +37,16 @@ import org.apache.flink.core.memory.DataOutputViewStreamWrapper;
 import org.apache.flink.runtime.operators.coordination.CoordinatorStore;
 import org.apache.flink.runtime.operators.coordination.OperatorCoordinator;
 import org.apache.flink.runtime.operators.coordination.OperatorEvent;
+import org.apache.flink.runtime.source.event.IsProcessingBacklogEvent;
 import org.apache.flink.runtime.source.event.ReaderRegistrationEvent;
 import org.apache.flink.runtime.source.event.ReportedWatermarkEvent;
 import org.apache.flink.runtime.source.event.RequestSplitEvent;
 import org.apache.flink.runtime.source.event.SourceEventWrapper;
 import org.apache.flink.runtime.source.event.WatermarkAlignmentEvent;
+import org.apache.flink.runtime.state.PriorityComparable;
+import org.apache.flink.runtime.state.PriorityComparator;
+import org.apache.flink.runtime.state.heap.AbstractHeapPriorityQueueElement;
+import org.apache.flink.runtime.state.heap.HeapPriorityQueue;
 import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.TemporaryClassLoaderContext;
@@ -46,6 +55,7 @@ import org.apache.flink.util.function.ThrowingRunnable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
 import java.io.ByteArrayInputStream;
@@ -53,7 +63,6 @@ import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -61,14 +70,15 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 
-import static java.util.Arrays.asList;
 import static org.apache.flink.runtime.source.coordinator.SourceCoordinatorSerdeUtils.readAndVerifyCoordinatorSerdeVersion;
 import static org.apache.flink.runtime.source.coordinator.SourceCoordinatorSerdeUtils.readBytes;
 import static org.apache.flink.runtime.source.coordinator.SourceCoordinatorSerdeUtils.writeCoordinatorSerdeVersion;
-import static org.apache.flink.util.IOUtils.closeAll;
+import static org.apache.flink.util.IOUtils.closeQuietly;
 import static org.apache.flink.util.Preconditions.checkArgument;
+import static org.apache.flink.util.Preconditions.checkNotNull;
 import static org.apache.flink.util.Preconditions.checkState;
 
 /**
@@ -146,26 +156,23 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
         this.watermarkAlignmentParams = watermarkAlignmentParams;
         this.coordinatorListeningID = coordinatorListeningID;
 
-        if (watermarkAlignmentParams.isEnabled()) {
-            if (context.isConcurrentExecutionAttemptsSupported()) {
-                throw new IllegalArgumentException(
-                        "Watermark alignment is not supported in concurrent execution attempts "
-                                + "scenario (e.g. if speculative execution is enabled)");
-            }
-
-            coordinatorStore.putIfAbsent(
-                    watermarkAlignmentParams.getWatermarkGroup(), new WatermarkAggregator<>());
-            context.getCoordinatorExecutor()
-                    .scheduleAtFixedRate(
-                            this::announceCombinedWatermark,
-                            watermarkAlignmentParams.getUpdateInterval(),
-                            watermarkAlignmentParams.getUpdateInterval(),
-                            TimeUnit.MILLISECONDS);
+        if (watermarkAlignmentParams.isEnabled()
+                && context.isConcurrentExecutionAttemptsSupported()) {
+            throw new IllegalArgumentException(
+                    "Watermark alignment is not supported in concurrent execution attempts "
+                            + "scenario (e.g. if speculative execution is enabled)");
         }
     }
 
     @VisibleForTesting
     void announceCombinedWatermark() {
+        Set<Integer> subTaskIds = combinedWatermark.keySet();
+        if (subTaskIds.isEmpty()) {
+            LOG.debug(
+                    "Skip distributing maxAllowedWatermark of group={} for source {} - no subtasks.",
+                    watermarkAlignmentParams.getWatermarkGroup(),
+                    operatorName);
+        }
         checkState(
                 watermarkAlignmentParams != WatermarkAlignmentParams.WATERMARK_ALIGNMENT_DISABLED);
 
@@ -178,17 +185,35 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
                                     aggregator.getAggregatedWatermark().getTimestamp());
                         });
 
-        long maxAllowedWatermark =
-                globalCombinedWatermark.getTimestamp()
-                        + watermarkAlignmentParams.getMaxAllowedWatermarkDrift();
-        Set<Integer> subTaskIds = combinedWatermark.keySet();
+        long maxAllowedWatermark;
+        try {
+            maxAllowedWatermark =
+                    Math.addExact(
+                            globalCombinedWatermark.getTimestamp(),
+                            watermarkAlignmentParams.getMaxAllowedWatermarkDrift());
+        } catch (ArithmeticException e) {
+            // when the source is idle, globalCombinedWatermark.getTimestamp() is Long.MAX_VALUE,
+            // and maxAllowedWatermark arithmetic overflow
+            maxAllowedWatermark = Watermark.MAX_WATERMARK.getTimestamp();
+        }
+
         LOG.info(
-                "Distributing maxAllowedWatermark={} to subTaskIds={}",
+                "Distributing maxAllowedWatermark={} of group={} to subTaskIds={} for source {}.",
                 maxAllowedWatermark,
-                subTaskIds);
+                watermarkAlignmentParams.getWatermarkGroup(),
+                subTaskIds,
+                operatorName);
+
         for (Integer subtaskId : subTaskIds) {
-            context.sendEventToSourceOperator(
-                    subtaskId, new WatermarkAlignmentEvent(maxAllowedWatermark));
+            // when subtask have been finished, do not send event.
+            if (!context.hasNoMoreSplits(subtaskId)) {
+                // Subtask maybe during deploying or restarting, so we only send
+                // WatermarkAlignmentEvent to ready task to avoid period task fail
+                // (Java-ThreadPoolExecutor will not schedule the period task if it throws an
+                // exception).
+                context.sendEventToSourceOperatorIfTaskReady(
+                        subtaskId, new WatermarkAlignmentEvent(maxAllowedWatermark));
+            }
         }
     }
 
@@ -225,13 +250,47 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
         runInEventLoop(() -> enumerator.start(), "starting the SplitEnumerator.");
 
         if (coordinatorListeningID != null) {
-            if (coordinatorStore.containsKey(coordinatorListeningID)) {
-                // The coordinator will be recreated after global failover. It should be registered
-                // again replacing the previous one.
-                coordinatorStore.computeIfPresent(coordinatorListeningID, (id, origin) -> this);
-            } else {
-                coordinatorStore.putIfAbsent(coordinatorListeningID, this);
-            }
+            coordinatorStore.compute(
+                    coordinatorListeningID,
+                    (key, oldValue) -> {
+                        // The value for a listener ID can be a source coordinator listening to an
+                        // event, or an event waiting to be retrieved
+                        if (oldValue == null || oldValue instanceof OperatorCoordinator) {
+                            // The coordinator has not registered or needs to be recreated after
+                            // global failover.
+                            return this;
+                        } else {
+                            checkState(
+                                    oldValue instanceof OperatorEvent,
+                                    "The existing value for "
+                                            + coordinatorStore
+                                            + "is expected to be an operator event, but it is in fact "
+                                            + oldValue);
+                            LOG.info(
+                                    "Handling event {} received before the source coordinator with ID {} is registered",
+                                    oldValue,
+                                    coordinatorListeningID);
+                            handleEventFromOperator(0, 0, (OperatorEvent) oldValue);
+
+                            // Since for non-global failover the coordinator will not be recreated
+                            // and for global failover both the sender and receiver need to restart,
+                            // the coordinator will receive the event only once.
+                            // As the event has been processed, it can be removed safely and there's
+                            // no need to register the coordinator for further events as well.
+                            return null;
+                        }
+                    });
+        }
+
+        if (watermarkAlignmentParams.isEnabled()) {
+            LOG.info("Starting schedule the period announceCombinedWatermark task");
+            coordinatorStore.putIfAbsent(
+                    watermarkAlignmentParams.getWatermarkGroup(), new WatermarkAggregator<>());
+            context.schedulePeriodTask(
+                    this::announceCombinedWatermark,
+                    watermarkAlignmentParams.getUpdateInterval(),
+                    watermarkAlignmentParams.getUpdateInterval(),
+                    TimeUnit.MILLISECONDS);
         }
     }
 
@@ -239,8 +298,9 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
     public void close() throws Exception {
         LOG.info("Closing SourceCoordinator for source {}.", operatorName);
         if (started) {
-            closeAll(asList(context, enumerator), Throwable.class);
+            closeQuietly(enumerator);
         }
+        closeQuietly(context);
         LOG.info("Source coordinator for source {} closed.", operatorName);
     }
 
@@ -328,6 +388,16 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
                 attemptNumber);
     }
 
+    /**
+     * Whether the enumerator supports batch snapshot. Note the enumerator is created either during
+     * resetting the coordinator to a checkpoint, or when the coordinator is started.
+     */
+    @Override
+    public boolean supportsBatchSnapshot() {
+        checkNotNull(enumerator);
+        return enumerator instanceof SupportsBatchSnapshot;
+    }
+
     @Override
     public void checkpointCoordinator(long checkpointId, CompletableFuture<byte[]> result) {
         runInEventLoop(
@@ -337,8 +407,28 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
                             operatorName,
                             checkpointId);
                     try {
-                        context.onCheckpoint(checkpointId);
-                        result.complete(toBytes(checkpointId));
+                        if (checkpointId == BATCH_CHECKPOINT_ID) {
+                            checkState(supportsBatchSnapshot());
+                            try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                                    DataOutputStream out = new DataOutputViewStreamWrapper(baos)) {
+                                // assignments
+                                byte[] assignmentData =
+                                        context.getAssignmentTracker()
+                                                .snapshotState(source.getSplitSerializer());
+                                out.writeInt(assignmentData.length);
+                                out.write(assignmentData);
+
+                                // enumerator
+                                byte[] enumeratorData = toBytes(checkpointId);
+                                out.writeInt(enumeratorData.length);
+                                out.write(enumeratorData);
+                                out.flush();
+                                result.complete(baos.toByteArray());
+                            }
+                        } else {
+                            context.onCheckpoint(checkpointId);
+                            result.complete(toBytes(checkpointId));
+                        }
                     } catch (Throwable e) {
                         ExceptionUtils.rethrowIfFatalErrorOrOOM(e);
                         result.completeExceptionally(
@@ -399,10 +489,33 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
 
         final ClassLoader userCodeClassLoader =
                 context.getCoordinatorContext().getUserCodeClassloader();
-        try (TemporaryClassLoaderContext ignored =
-                TemporaryClassLoaderContext.of(userCodeClassLoader)) {
-            final EnumChkT enumeratorCheckpoint = deserializeCheckpoint(checkpointData);
-            enumerator = source.restoreEnumerator(context, enumeratorCheckpoint);
+
+        if (checkpointId == BATCH_CHECKPOINT_ID) {
+            try (TemporaryClassLoaderContext ignored =
+                    TemporaryClassLoaderContext.of(userCodeClassLoader)) {
+                try (ByteArrayInputStream bais = new ByteArrayInputStream(checkpointData);
+                        DataInputStream in = new DataInputViewStreamWrapper(bais)) {
+                    int assignmentDataLength = in.readInt();
+                    byte[] assignmentData =
+                            SourceCoordinatorSerdeUtils.readBytes(in, assignmentDataLength);
+
+                    int enumeratorDataLength = in.readInt();
+                    byte[] enumeratorData =
+                            SourceCoordinatorSerdeUtils.readBytes(in, enumeratorDataLength);
+
+                    final EnumChkT enumeratorCheckpoint = deserializeCheckpoint(enumeratorData);
+                    enumerator = source.restoreEnumerator(context, enumeratorCheckpoint);
+
+                    context.getAssignmentTracker()
+                            .restoreState(source.getSplitSerializer(), assignmentData);
+                }
+            }
+        } else {
+            try (TemporaryClassLoaderContext ignored =
+                    TemporaryClassLoaderContext.of(userCodeClassLoader)) {
+                final EnumChkT enumeratorCheckpoint = deserializeCheckpoint(checkpointData);
+                enumerator = source.restoreEnumerator(context, enumeratorCheckpoint);
+            }
         }
     }
 
@@ -444,13 +557,18 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
 
     // ---------------------------------------------------
     @VisibleForTesting
-    SplitEnumerator<SplitT, EnumChkT> getEnumerator() {
+    public SplitEnumerator<SplitT, EnumChkT> getEnumerator() {
         return enumerator;
     }
 
     @VisibleForTesting
     SourceCoordinatorContext<SplitT> getContext() {
         return context;
+    }
+
+    @VisibleForTesting
+    public ExecutorService getCoordinatorExecutor() {
+        return context.getCoordinatorExecutor();
     }
 
     // --------------------- Serde -----------------------
@@ -564,6 +682,12 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
         context.registerSourceReader(subtask, attemptNumber, event.location());
         if (!subtaskReaderExisted) {
             enumerator.addReader(event.subtaskId());
+
+            final Boolean isBacklog = context.isBacklog().getAsBoolean();
+            if (isBacklog != null) {
+                context.sendEventToSourceOperatorIfTaskReady(
+                        subtask, new IsProcessingBacklogEvent(isBacklog));
+            }
         }
     }
 
@@ -574,7 +698,11 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
                             + "scenario (e.g. if speculative execution is enabled)");
         }
 
-        LOG.debug("New reported watermark={} from subTaskId={}", watermark, subtask);
+        LOG.debug(
+                "New reported watermark={} from subTaskId={} of source {}.",
+                watermark,
+                subtask,
+                operatorName);
 
         checkState(watermarkAlignmentParams.isEnabled());
 
@@ -599,9 +727,101 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
         }
     }
 
-    private static class WatermarkAggregator<T> {
-        private final Map<T, Watermark> watermarks = new HashMap<>();
-        private Watermark aggregatedWatermark = new Watermark(Long.MIN_VALUE);
+    private Optional<DynamicFilteringInfo> getSourceDynamicFilteringInfo() {
+        if (coordinatorListeningID != null
+                && coordinatorStore.containsKey(coordinatorListeningID)) {
+            Object event = coordinatorStore.get(coordinatorListeningID);
+            if (event instanceof SourceEventWrapper) {
+                SourceEvent sourceEvent = ((SourceEventWrapper) event).getSourceEvent();
+                if (sourceEvent instanceof DynamicFilteringInfo) {
+                    return Optional.of((DynamicFilteringInfo) sourceEvent);
+                }
+            }
+        }
+
+        return Optional.empty();
+    }
+
+    public CompletableFuture<Integer> inferSourceParallelismAsync(
+            int parallelismInferenceUpperBound, long dataVolumePerTask) {
+        return context.supplyAsync(
+                        () -> {
+                            if (!(source instanceof DynamicParallelismInference)) {
+                                return ExecutionConfig.PARALLELISM_DEFAULT;
+                            }
+
+                            DynamicParallelismInference parallelismInference =
+                                    (DynamicParallelismInference) source;
+                            try {
+                                return parallelismInference.inferParallelism(
+                                        new DynamicParallelismInference.Context() {
+                                            @Override
+                                            public Optional<DynamicFilteringInfo>
+                                                    getDynamicFilteringInfo() {
+                                                return getSourceDynamicFilteringInfo();
+                                            }
+
+                                            @Override
+                                            public int getParallelismInferenceUpperBound() {
+                                                return parallelismInferenceUpperBound;
+                                            }
+
+                                            @Override
+                                            public long getDataVolumePerTask() {
+                                                return dataVolumePerTask;
+                                            }
+                                        });
+                            } catch (Throwable e) {
+                                LOG.error(
+                                        "Unexpected error occurred when dynamically inferring source parallelism.",
+                                        e);
+                                return ExecutionConfig.PARALLELISM_DEFAULT;
+                            }
+                        })
+                .thenApply(future -> (Integer) future);
+    }
+
+    /** The watermark element for {@link HeapPriorityQueue}. */
+    public static class WatermarkElement extends AbstractHeapPriorityQueueElement
+            implements PriorityComparable<WatermarkElement> {
+
+        private final Watermark watermark;
+
+        public WatermarkElement(Watermark watermark) {
+            this.watermark = watermark;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (o instanceof WatermarkElement) {
+                return watermark.equals(((WatermarkElement) o).watermark);
+            }
+            return false;
+        }
+
+        @Override
+        public int hashCode() {
+            return watermark.hashCode();
+        }
+
+        @Override
+        public int comparePriorityTo(@Nonnull WatermarkElement other) {
+            return Long.compare(watermark.getTimestamp(), other.watermark.getTimestamp());
+        }
+    }
+
+    /** The aggregated watermark is the smallest watermark of all keys. */
+    static class WatermarkAggregator<T> {
+
+        private final Map<T, WatermarkElement> watermarks = new HashMap<>();
+
+        private final HeapPriorityQueue<WatermarkElement> orderedWatermarks =
+                new HeapPriorityQueue<>(PriorityComparator.forPriorityComparableObjects(), 10);
+
+        private static final Watermark DEFAULT_WATERMARK = new Watermark(Long.MIN_VALUE);
 
         /**
          * Update the {@link Watermark} for the given {@code key)}.
@@ -610,17 +830,20 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
          *     Optional.empty()} otherwise.
          */
         public Optional<Watermark> aggregate(T key, Watermark watermark) {
-            watermarks.put(key, watermark);
-            Watermark newMinimum =
-                    watermarks.values().stream()
-                            .min(Comparator.comparingLong(Watermark::getTimestamp))
-                            .orElseThrow(IllegalStateException::new);
-            if (newMinimum.equals(aggregatedWatermark)) {
-                return Optional.empty();
-            } else {
-                aggregatedWatermark = newMinimum;
-                return Optional.of(aggregatedWatermark);
+            Watermark oldAggregatedWatermark = getAggregatedWatermark();
+
+            WatermarkElement watermarkElement = new WatermarkElement(watermark);
+            WatermarkElement oldWatermarkElement = watermarks.put(key, watermarkElement);
+            if (oldWatermarkElement != null) {
+                orderedWatermarks.remove(oldWatermarkElement);
             }
+            orderedWatermarks.add(watermarkElement);
+
+            Watermark newAggregatedWatermark = getAggregatedWatermark();
+            if (newAggregatedWatermark.equals(oldAggregatedWatermark)) {
+                return Optional.empty();
+            }
+            return Optional.of(newAggregatedWatermark);
         }
 
         public Set<T> keySet() {
@@ -628,7 +851,10 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
         }
 
         public Watermark getAggregatedWatermark() {
-            return aggregatedWatermark;
+            WatermarkElement aggregatedWatermarkElement = orderedWatermarks.peek();
+            return aggregatedWatermarkElement == null
+                    ? DEFAULT_WATERMARK
+                    : aggregatedWatermarkElement.watermark;
         }
     }
 }

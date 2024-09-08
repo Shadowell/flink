@@ -29,7 +29,7 @@ under the License.
 Flink allows reporting metrics to external systems.
 For more information about Flink's metric system go to the [metric system documentation]({{< ref "docs/ops/metrics" >}}).
 
-Metrics can be exposed to an external system by configuring one or several reporters in `conf/flink-conf.yaml`. These
+Metrics can be exposed to an external system by configuring one or several reporters in [Flink configuration file]({{< ref "docs/deployment/config#flink-configuration-file" >}}). These
 reporters will be instantiated on each job and task manager when they are started.
 
 Below is a list of parameters that are generally applicable to all reporters. All properties are configured by setting `metrics.reporter.<reporter_name>.<property>` in the configuration. Reporters may additionally offer implementation-specific parameters, which are documented in the respective reporter's section. 
@@ -59,7 +59,8 @@ metrics.reporter.my_other_reporter.port: 10000
  All reporters documented on this page are available by default.
 
 You can write your own `Reporter` by implementing the `org.apache.flink.metrics.reporter.MetricReporter` interface.
-If the Reporter should send out reports regularly you have to implement the `Scheduled` interface as well.
+If the Reporter should send out reports regularly you have to implement the `Scheduled` interface as well. 
+Be careful that `report()` method must not block for a significant amount of time, and any reporter needing more time should instead run the operation asynchronously.
 By additionally implementing a `MetricReporterFactory` your reporter can also be loaded as a plugin.
 
 ## Identifiers vs. tags
