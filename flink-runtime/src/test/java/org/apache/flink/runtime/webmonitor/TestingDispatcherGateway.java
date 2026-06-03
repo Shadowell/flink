@@ -18,12 +18,14 @@
 
 package org.apache.flink.runtime.webmonitor;
 
+import org.apache.flink.api.common.ApplicationID;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
-import org.apache.flink.api.common.time.Time;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.core.execution.CheckpointType;
 import org.apache.flink.core.execution.SavepointFormatType;
+import org.apache.flink.runtime.application.AbstractApplication;
+import org.apache.flink.runtime.application.ArchivedApplication;
 import org.apache.flink.runtime.checkpoint.CheckpointStatsSnapshot;
 import org.apache.flink.runtime.clusterframework.ApplicationStatus;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
@@ -31,11 +33,10 @@ import org.apache.flink.runtime.dispatcher.DispatcherGateway;
 import org.apache.flink.runtime.dispatcher.DispatcherId;
 import org.apache.flink.runtime.dispatcher.TriggerSavepointMode;
 import org.apache.flink.runtime.executiongraph.ArchivedExecutionGraph;
-import org.apache.flink.runtime.jobgraph.JobGraph;
-import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.jobmaster.JobResult;
 import org.apache.flink.runtime.messages.Acknowledge;
 import org.apache.flink.runtime.messages.webmonitor.ClusterOverview;
+import org.apache.flink.runtime.messages.webmonitor.MultipleApplicationsDetails;
 import org.apache.flink.runtime.messages.webmonitor.MultipleJobsDetails;
 import org.apache.flink.runtime.operators.coordination.CoordinationRequest;
 import org.apache.flink.runtime.operators.coordination.CoordinationResponse;
@@ -44,10 +45,13 @@ import org.apache.flink.runtime.rest.handler.job.AsynchronousJobOperationKey;
 import org.apache.flink.runtime.rest.messages.ThreadDumpInfo;
 import org.apache.flink.runtime.rpc.RpcTimeout;
 import org.apache.flink.runtime.scheduler.ExecutionGraphInfo;
+import org.apache.flink.streaming.api.graph.ExecutionPlan;
 import org.apache.flink.util.SerializedValue;
 import org.apache.flink.util.concurrent.FutureUtils;
 import org.apache.flink.util.function.TriFunction;
 
+import java.net.InetAddress;
+import java.time.Duration;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.concurrent.CompletableFuture;
@@ -59,8 +63,13 @@ import java.util.function.Supplier;
 public final class TestingDispatcherGateway extends TestingRestfulGateway
         implements DispatcherGateway {
 
-    static final Function<JobGraph, CompletableFuture<Acknowledge>> DEFAULT_SUBMIT_FUNCTION =
+    static final Function<ExecutionPlan, CompletableFuture<Acknowledge>> DEFAULT_SUBMIT_FUNCTION =
             jobGraph -> CompletableFuture.completedFuture(Acknowledge.get());
+    static final Function<JobID, CompletableFuture<Acknowledge>> DEFAULT_RECOVER_JOB_FUNCTION =
+            jobId -> CompletableFuture.completedFuture(Acknowledge.get());
+    static final Function<AbstractApplication, CompletableFuture<Acknowledge>>
+            DEFAULT_SUBMIT_APPLICATION_FUNCTION =
+                    application -> CompletableFuture.completedFuture(Acknowledge.get());
     static final TriFunction<JobID, String, Throwable, CompletableFuture<Acknowledge>>
             DEFAULT_SUBMIT_FAILED_FUNCTION =
                     (jobId, jobName, Throwable) ->
@@ -89,11 +98,15 @@ public final class TestingDispatcherGateway extends TestingRestfulGateway
                     (JobID jobId, CheckpointType checkpointType) ->
                             FutureUtils.completedExceptionally(new UnsupportedOperationException());
 
-    private final Function<JobGraph, CompletableFuture<Acknowledge>> submitFunction;
+    private final Function<ExecutionPlan, CompletableFuture<Acknowledge>> submitFunction;
+    private final Function<JobID, CompletableFuture<Acknowledge>> recoverJobFunction;
+    private final Function<AbstractApplication, CompletableFuture<Acknowledge>>
+            submitApplicationFunction;
     private final TriFunction<JobID, String, Throwable, CompletableFuture<Acknowledge>>
             submitFailedFunction;
     private final Supplier<CompletableFuture<Collection<JobID>>> listFunction;
     private final int blobServerPort;
+    private InetAddress blobServerAddress;
     private final DispatcherId fencingToken;
     private final Function<JobID, CompletableFuture<ArchivedExecutionGraph>>
             requestArchivedJobFunction;
@@ -110,6 +123,8 @@ public final class TestingDispatcherGateway extends TestingRestfulGateway
     public TestingDispatcherGateway() {
         super();
         submitFunction = DEFAULT_SUBMIT_FUNCTION;
+        recoverJobFunction = DEFAULT_RECOVER_JOB_FUNCTION;
+        submitApplicationFunction = DEFAULT_SUBMIT_APPLICATION_FUNCTION;
         submitFailedFunction = DEFAULT_SUBMIT_FAILED_FUNCTION;
         listFunction = DEFAULT_LIST_FUNCTION;
         blobServerPort = DEFAULT_BLOB_SERVER_PORT;
@@ -128,7 +143,10 @@ public final class TestingDispatcherGateway extends TestingRestfulGateway
             String address,
             String hostname,
             Function<JobID, CompletableFuture<Acknowledge>> cancelJobFunction,
+            Function<ApplicationID, CompletableFuture<Acknowledge>> cancelApplicationFunction,
             Function<JobID, CompletableFuture<ArchivedExecutionGraph>> requestJobFunction,
+            Function<ApplicationID, CompletableFuture<ArchivedApplication>>
+                    requestApplicationFunction,
             Function<JobID, CompletableFuture<ExecutionGraphInfo>>
                     requestExecutionGraphInfoFunction,
             Function<JobID, CompletableFuture<CheckpointStatsSnapshot>>
@@ -136,6 +154,8 @@ public final class TestingDispatcherGateway extends TestingRestfulGateway
             Function<JobID, CompletableFuture<JobResult>> requestJobResultFunction,
             Function<JobID, CompletableFuture<JobStatus>> requestJobStatusFunction,
             Supplier<CompletableFuture<MultipleJobsDetails>> requestMultipleJobDetailsSupplier,
+            Supplier<CompletableFuture<MultipleApplicationsDetails>>
+                    requestMultipleApplicationDetailsSupplier,
             Supplier<CompletableFuture<ClusterOverview>> requestClusterOverviewSupplier,
             Supplier<CompletableFuture<Collection<String>>>
                     requestMetricQueryServiceAddressesSupplier,
@@ -166,7 +186,9 @@ public final class TestingDispatcherGateway extends TestingRestfulGateway
                     getSavepointStatusFunction,
             BiFunction<JobID, CheckpointType, CompletableFuture<Long>>
                     triggerCheckpointAndGetCheckpointIdFunction,
-            Function<JobGraph, CompletableFuture<Acknowledge>> submitFunction,
+            Function<ExecutionPlan, CompletableFuture<Acknowledge>> submitFunction,
+            Function<JobID, CompletableFuture<Acknowledge>> recoverJobFunction,
+            Function<AbstractApplication, CompletableFuture<Acknowledge>> submitApplicationFunction,
             TriFunction<JobID, String, Throwable, CompletableFuture<Acknowledge>>
                     submitFailedFunction,
             Supplier<CompletableFuture<Collection<JobID>>> listFunction,
@@ -178,7 +200,7 @@ public final class TestingDispatcherGateway extends TestingRestfulGateway
                     clusterShutdownWithStatusFunction,
             TriFunction<
                             JobID,
-                            OperatorID,
+                            String,
                             SerializedValue<CoordinationRequest>,
                             CompletableFuture<CoordinationResponse>>
                     deliverCoordinationRequestToCoordinatorFunction) {
@@ -186,12 +208,15 @@ public final class TestingDispatcherGateway extends TestingRestfulGateway
                 address,
                 hostname,
                 cancelJobFunction,
+                cancelApplicationFunction,
                 requestJobFunction,
+                requestApplicationFunction,
                 requestExecutionGraphInfoFunction,
                 requestCheckpointStatsSnapshotFunction,
                 requestJobResultFunction,
                 requestJobStatusFunction,
                 requestMultipleJobDetailsSupplier,
+                requestMultipleApplicationDetailsSupplier,
                 requestClusterOverviewSupplier,
                 requestMetricQueryServiceAddressesSupplier,
                 requestTaskManagerMetricQueryServiceGatewaysSupplier,
@@ -204,9 +229,16 @@ public final class TestingDispatcherGateway extends TestingRestfulGateway
                 clusterShutdownSupplier,
                 deliverCoordinationRequestToCoordinatorFunction);
         this.submitFunction = submitFunction;
+        this.recoverJobFunction = recoverJobFunction;
+        this.submitApplicationFunction = submitApplicationFunction;
         this.submitFailedFunction = submitFailedFunction;
         this.listFunction = listFunction;
         this.blobServerPort = blobServerPort;
+        try {
+            this.blobServerAddress = InetAddress.getByName(hostname);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to resolve hostname: " + hostname, e);
+        }
         this.fencingToken = fencingToken;
         this.requestArchivedJobFunction = requestArchivedJobFunction;
         this.clusterShutdownWithStatusFunction = clusterShutdownWithStatusFunction;
@@ -217,8 +249,19 @@ public final class TestingDispatcherGateway extends TestingRestfulGateway
     }
 
     @Override
-    public CompletableFuture<Acknowledge> submitJob(JobGraph jobGraph, Time timeout) {
-        return submitFunction.apply(jobGraph);
+    public CompletableFuture<Acknowledge> submitJob(ExecutionPlan executionPlan, Duration timeout) {
+        return submitFunction.apply(executionPlan);
+    }
+
+    @Override
+    public CompletableFuture<Acknowledge> recoverJob(JobID jobId, Duration timeout) {
+        return recoverJobFunction.apply(jobId);
+    }
+
+    @Override
+    public CompletableFuture<Acknowledge> submitApplication(
+            AbstractApplication application, Duration timeout) {
+        return submitApplicationFunction.apply(application);
     }
 
     @Override
@@ -228,13 +271,18 @@ public final class TestingDispatcherGateway extends TestingRestfulGateway
     }
 
     @Override
-    public CompletableFuture<Collection<JobID>> listJobs(Time timeout) {
+    public CompletableFuture<Collection<JobID>> listJobs(Duration timeout) {
         return listFunction.get();
     }
 
     @Override
-    public CompletableFuture<Integer> getBlobServerPort(Time timeout) {
+    public CompletableFuture<Integer> getBlobServerPort(Duration timeout) {
         return CompletableFuture.completedFuture(blobServerPort);
+    }
+
+    @Override
+    public CompletableFuture<InetAddress> getBlobServerAddress(Duration timeout) {
+        return CompletableFuture.completedFuture(blobServerAddress);
     }
 
     @Override
@@ -243,7 +291,7 @@ public final class TestingDispatcherGateway extends TestingRestfulGateway
     }
 
     public CompletableFuture<ArchivedExecutionGraph> requestJob(
-            JobID jobId, @RpcTimeout Time timeout) {
+            JobID jobId, @RpcTimeout Duration timeout) {
         return requestArchivedJobFunction.apply(jobId);
     }
 
@@ -258,7 +306,7 @@ public final class TestingDispatcherGateway extends TestingRestfulGateway
             String targetDirectory,
             SavepointFormatType formatType,
             TriggerSavepointMode savepointMode,
-            Time timeout) {
+            Duration timeout) {
         return triggerSavepointAndGetLocationFunction.apply(jobId, targetDirectory, formatType);
     }
 
@@ -268,13 +316,13 @@ public final class TestingDispatcherGateway extends TestingRestfulGateway
             String targetDirectory,
             SavepointFormatType formatType,
             TriggerSavepointMode savepointMode,
-            Time timeout) {
+            Duration timeout) {
         return stopWithSavepointAndGetLocationFunction.apply(jobId, targetDirectory, formatType);
     }
 
     @Override
     public CompletableFuture<Long> triggerCheckpointAndGetCheckpointID(
-            final JobID jobId, final CheckpointType checkpointType, final Time timeout) {
+            final JobID jobId, final CheckpointType checkpointType, final Duration timeout) {
         return triggerCheckpointAndGetCheckpointIdFunction.apply(jobId, checkpointType);
     }
 
@@ -285,7 +333,10 @@ public final class TestingDispatcherGateway extends TestingRestfulGateway
     /** Builder for the {@link TestingDispatcherGateway}. */
     public static final class Builder extends TestingRestfulGateway.AbstractBuilder<Builder> {
 
-        private Function<JobGraph, CompletableFuture<Acknowledge>> submitFunction;
+        private Function<ExecutionPlan, CompletableFuture<Acknowledge>> submitFunction;
+        private Function<JobID, CompletableFuture<Acknowledge>> recoverJobFunction;
+        private Function<AbstractApplication, CompletableFuture<Acknowledge>>
+                submitApplicationFunction;
         private TriFunction<JobID, String, Throwable, CompletableFuture<Acknowledge>>
                 submitFailedFunction;
         private Supplier<CompletableFuture<Collection<JobID>>> listFunction;
@@ -308,8 +359,21 @@ public final class TestingDispatcherGateway extends TestingRestfulGateway
         }
 
         public Builder setSubmitFunction(
-                Function<JobGraph, CompletableFuture<Acknowledge>> submitFunction) {
+                Function<ExecutionPlan, CompletableFuture<Acknowledge>> submitFunction) {
             this.submitFunction = submitFunction;
+            return this;
+        }
+
+        public Builder setRecoverJobFunction(
+                Function<JobID, CompletableFuture<Acknowledge>> recoverJobFunction) {
+            this.recoverJobFunction = recoverJobFunction;
+            return this;
+        }
+
+        public Builder setSubmitApplicationFunction(
+                Function<AbstractApplication, CompletableFuture<Acknowledge>>
+                        submitApplicationFunction) {
+            this.submitApplicationFunction = submitApplicationFunction;
             return this;
         }
 
@@ -388,12 +452,15 @@ public final class TestingDispatcherGateway extends TestingRestfulGateway
                     address,
                     hostname,
                     cancelJobFunction,
+                    cancelApplicationFunction,
                     requestJobFunction,
+                    requestApplicationFunction,
                     requestExecutionGraphInfoFunction,
                     requestCheckpointStatsSnapshotFunction,
                     requestJobResultFunction,
                     requestJobStatusFunction,
                     requestMultipleJobDetailsSupplier,
+                    requestMultipleApplicationDetailsSupplier,
                     requestClusterOverviewSupplier,
                     requestMetricQueryServiceGatewaysSupplier,
                     requestTaskManagerMetricQueryServiceGatewaysSupplier,
@@ -407,6 +474,8 @@ public final class TestingDispatcherGateway extends TestingRestfulGateway
                     getSavepointStatusFunction,
                     triggerCheckpointAndGetCheckpointIdFunction,
                     submitFunction,
+                    recoverJobFunction,
+                    submitApplicationFunction,
                     submitFailedFunction,
                     listFunction,
                     blobServerPort,

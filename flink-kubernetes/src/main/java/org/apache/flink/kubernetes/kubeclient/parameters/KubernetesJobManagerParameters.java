@@ -118,9 +118,21 @@ public class KubernetesJobManagerParameters extends AbstractKubernetesParameters
                 .orElse(Collections.emptyMap());
     }
 
+    public Map<String, String> getRestServiceLabels() {
+        return flinkConfig
+                .getOptional(KubernetesConfigOptions.REST_SERVICE_LABELS)
+                .orElse(Collections.emptyMap());
+    }
+
     public Map<String, String> getInternalServiceAnnotations() {
         return flinkConfig
                 .getOptional(KubernetesConfigOptions.INTERNAL_SERVICE_ANNOTATIONS)
+                .orElse(Collections.emptyMap());
+    }
+
+    public Map<String, String> getInternalServiceLabels() {
+        return flinkConfig
+                .getOptional(KubernetesConfigOptions.INTERNAL_SERVICE_LABELS)
                 .orElse(Collections.emptyMap());
     }
 
@@ -213,6 +225,6 @@ public class KubernetesJobManagerParameters extends AbstractKubernetesParameters
     }
 
     public String getUserArtifactsBaseDir() {
-        return flinkConfig.getString(ArtifactFetchOptions.BASE_DIR);
+        return flinkConfig.get(ArtifactFetchOptions.BASE_DIR);
     }
 }

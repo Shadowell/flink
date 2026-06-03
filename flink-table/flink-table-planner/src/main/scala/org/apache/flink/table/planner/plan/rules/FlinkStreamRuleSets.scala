@@ -18,8 +18,9 @@
 package org.apache.flink.table.planner.plan.rules
 
 import org.apache.flink.table.planner.plan.nodes.logical._
-import org.apache.flink.table.planner.plan.rules.logical._
+import org.apache.flink.table.planner.plan.rules.logical.{JoinToMultiJoinRule, _}
 import org.apache.flink.table.planner.plan.rules.physical.FlinkExpandConversionRule
+import org.apache.flink.table.planner.plan.rules.physical.common.{PhysicalMLPredictTableFunctionRule, PhysicalVectorSearchTableFunctionRule}
 import org.apache.flink.table.planner.plan.rules.physical.stream._
 
 import org.apache.calcite.rel.core.RelFactories
@@ -36,7 +37,7 @@ object FlinkStreamRuleSets {
     FlinkRewriteSubQueryRule.FILTER,
     FlinkSubQueryRemoveRule.FILTER,
     JoinConditionTypeCoerceRule.INSTANCE,
-    FlinkJoinPushExpressionsRule.INSTANCE
+    CoreRules.JOIN_PUSH_EXPRESSIONS
   )
 
   /** Convert sub-queries before query decorrelation. */
@@ -78,12 +79,9 @@ object FlinkStreamRuleSets {
     CoreRules.JOIN_REDUCE_EXPRESSIONS
   )
 
-  /** RuleSet to simplify coalesce invocations */
   private val SIMPLIFY_COALESCE_RULES: RuleSet = RuleSets.ofList(
-    RemoveUnreachableCoalesceArgumentsRule.PROJECT_INSTANCE,
-    RemoveUnreachableCoalesceArgumentsRule.FILTER_INSTANCE,
-    RemoveUnreachableCoalesceArgumentsRule.JOIN_INSTANCE,
-    RemoveUnreachableCoalesceArgumentsRule.CALC_INSTANCE
+    SimplifyCoalesceWithEquiJoinConditionRule.PROJECT_INSTANCE,
+    SimplifyCoalesceWithEquiJoinConditionRule.CALC_INSTANCE
   )
 
   /** RuleSet to simplify predicate expressions in filters and joins */
@@ -114,23 +112,36 @@ object FlinkStreamRuleSets {
           WindowPropertiesRules.WINDOW_PROPERTIES_RULE,
           WindowPropertiesRules.WINDOW_PROPERTIES_HAVING_RULE,
           // ensure union set operator have the same row type
-          new CoerceInputsRule(classOf[LogicalUnion], false),
+          CoerceInputsRule.Config.DEFAULT
+            .withCoerceNames(false)
+            .withConsumerRelClass(classOf[LogicalUnion])
+            .toRule,
           // ensure intersect set operator have the same row type
-          new CoerceInputsRule(classOf[LogicalIntersect], false),
+          CoerceInputsRule.Config.DEFAULT
+            .withCoerceNames(false)
+            .withConsumerRelClass(classOf[LogicalIntersect])
+            .toRule,
           // ensure except set operator have the same row type
-          new CoerceInputsRule(classOf[LogicalMinus], false),
+          CoerceInputsRule.Config.DEFAULT
+            .withCoerceNames(false)
+            .withConsumerRelClass(classOf[LogicalMinus])
+            .toRule,
           ConvertToNotInOrInRule.INSTANCE,
           // optimize limit 0
-          FlinkLimit0RemoveRule.INSTANCE,
+          PruneEmptyRules.SORT_FETCH_ZERO_INSTANCE,
           // fix: FLINK-28986 nested filter pattern causes unnest rule mismatch
           CoreRules.FILTER_MERGE,
           // unnest rule
           LogicalUnnestRule.INSTANCE,
           UncollectToTableFunctionScanRule.INSTANCE,
+          // vector search rule.
+          ConstantVectorSearchCallToCorrelateRule.INSTANCE,
           // rewrite constant table function scan to correlate
           JoinTableFunctionScanToCorrelateRule.INSTANCE,
           // Wrap arguments for JSON aggregate functions
-          WrapJsonAggFunctionArgumentsRule.INSTANCE
+          WrapJsonAggFunctionArgumentsRule.INSTANCE,
+          // prune COUNT(*) input to project a constant before aggregation
+          PruneCountStarInputRule.INSTANCE
         )
     ).asJava)
 
@@ -180,13 +191,19 @@ object FlinkStreamRuleSets {
 
   /** RuleSet to prune empty results rules */
   val PRUNE_EMPTY_RULES: RuleSet = RuleSets.ofList(
-    PruneEmptyRules.AGGREGATE_INSTANCE,
-    PruneEmptyRules.FILTER_INSTANCE,
-    PruneEmptyRules.JOIN_LEFT_INSTANCE,
-    FlinkPruneEmptyRules.JOIN_RIGHT_INSTANCE,
+    FlinkPruneEmptyRules.UNION_INSTANCE,
+    PruneEmptyRules.INTERSECT_INSTANCE,
+    FlinkPruneEmptyRules.MINUS_INSTANCE,
     PruneEmptyRules.PROJECT_INSTANCE,
+    PruneEmptyRules.FILTER_INSTANCE,
     PruneEmptyRules.SORT_INSTANCE,
-    PruneEmptyRules.UNION_INSTANCE
+    PruneEmptyRules.AGGREGATE_INSTANCE,
+    PruneEmptyRules.JOIN_LEFT_INSTANCE,
+    PruneEmptyRules.JOIN_RIGHT_INSTANCE,
+    // Replaces global Aggregate over empty Values with default literal values
+    // (e.g. COUNT(*)=0). Handles the plan-time case where the planner can
+    // statically determine the input is empty.
+    CoreRules.AGGREGATE_VALUES
   )
 
   /** RuleSet about project */
@@ -198,6 +215,8 @@ object FlinkStreamRuleSets {
     new FlinkProjectJoinTransposeRule(
       PushProjector.ExprCondition.FALSE,
       RelFactories.LOGICAL_BUILDER),
+    // push a projection to the children of a multi join
+    ProjectMultiJoinTransposeRule.INSTANCE,
     // push a projection to the children of a semi/anti Join
     ProjectSemiAntiJoinTransposeRule.INSTANCE,
     // merge projections
@@ -218,7 +237,7 @@ object FlinkStreamRuleSets {
     // merge filter to MultiJoin
     CoreRules.FILTER_MULTI_JOIN_MERGE,
     // merge join to MultiJoin
-    FlinkJoinToMultiJoinRule.INSTANCE
+    JoinToMultiJoinForReorderRule.INSTANCE
   )
 
   val JOIN_REORDER_RULES: RuleSet = RuleSets.ofList(
@@ -226,6 +245,11 @@ object FlinkStreamRuleSets {
     RewriteMultiJoinConditionRule.INSTANCE,
     // join reorder
     FlinkJoinReorderRule.INSTANCE
+  )
+
+  val MULTI_JOIN_RULES: RuleSet = RuleSets.ofList(
+    // merge join to MultiJoin
+    JoinToMultiJoinRule.INSTANCE
   )
 
   /** RuleSet to do logical optimize. This RuleSet is a sub-set of [[LOGICAL_OPT_RULES]]. */
@@ -249,7 +273,7 @@ object FlinkStreamRuleSets {
     CoreRules.SORT_REMOVE,
 
     // join rules
-    FlinkJoinPushExpressionsRule.INSTANCE,
+    CoreRules.JOIN_PUSH_EXPRESSIONS,
     SimplifyJoinConditionRule.INSTANCE,
 
     // remove union with only a single child
@@ -268,6 +292,10 @@ object FlinkStreamRuleSets {
     // using variants of aggregate union rule
     CoreRules.AGGREGATE_UNION_AGGREGATE_FIRST,
     CoreRules.AGGREGATE_UNION_AGGREGATE_SECOND,
+    CoreRules.PROJECT_JOIN_JOIN_REMOVE,
+    CoreRules.PROJECT_JOIN_REMOVE,
+    CoreRules.AGGREGATE_JOIN_JOIN_REMOVE,
+    CoreRules.AGGREGATE_JOIN_REMOVE,
 
     // reduce aggregate functions like AVG, STDDEV_POP etc.
     CoreRules.AGGREGATE_REDUCE_FUNCTIONS,
@@ -308,6 +336,7 @@ object FlinkStreamRuleSets {
     FlinkLogicalCalc.CONVERTER,
     FlinkLogicalCorrelate.CONVERTER,
     FlinkLogicalJoin.CONVERTER,
+    FlinkLogicalMultiJoin.CONVERTER,
     FlinkLogicalSort.STREAM_CONVERTER,
     FlinkLogicalUnion.CONVERTER,
     FlinkLogicalValues.CONVERTER,
@@ -397,6 +426,10 @@ object FlinkStreamRuleSets {
     PythonMapMergeRule.INSTANCE,
     // Similar to the python rules above, the goal is to limit complexity of calcs which
     // have async calls so that the implementation can be simplified to handle a single async call.
+    // Split async scalar calls from other types of calls in correlates
+    AsyncCorrelateSplitRule.CORRELATE_SPLIT_ASYNC_SCALAR,
+    // Split async table calls from other types of calls in correlates
+    AsyncCorrelateSplitRule.CORRELATE_SPLIT_ASYNC_TABLE,
     // Avoids accessing a field from an asynchronous result (condition).
     AsyncCalcSplitRule.SPLIT_CONDITION_REX_FIELD,
     // Avoids accessing a field from an asynchronous result (projection).
@@ -434,6 +467,7 @@ object FlinkStreamRuleSets {
     // calc
     StreamPhysicalCalcRule.INSTANCE,
     StreamPhysicalPythonCalcRule.INSTANCE,
+    StreamPhysicalPythonAsyncCalcRule.INSTANCE,
     StreamPhysicalAsyncCalcRule.INSTANCE,
     // union
     StreamPhysicalUnionRule.INSTANCE,
@@ -444,7 +478,6 @@ object FlinkStreamRuleSets {
     StreamPhysicalTemporalSortRule.INSTANCE,
     // rank
     StreamPhysicalRankRule.INSTANCE,
-    StreamPhysicalDeduplicateRule.INSTANCE,
     // expand
     StreamPhysicalExpandRule.INSTANCE,
     // group agg
@@ -466,8 +499,14 @@ object FlinkStreamRuleSets {
     ExpandWindowTableFunctionTransposeRule.INSTANCE,
     StreamPhysicalWindowRankRule.INSTANCE,
     StreamPhysicalWindowDeduplicateRule.INSTANCE,
+    // process table function
+    StreamPhysicalProcessTableFunctionRule.INSTANCE,
+    // model TVFs
+    PhysicalMLPredictTableFunctionRule.STREAM_INSTANCE,
+    PhysicalVectorSearchTableFunctionRule.STREAM_INSTANCE,
     // join
     StreamPhysicalJoinRule.INSTANCE,
+    StreamPhysicalMultiJoinRule.INSTANCE,
     StreamPhysicalIntervalJoinRule.INSTANCE,
     StreamPhysicalTemporalJoinRule.INSTANCE,
     StreamPhysicalLookupJoinRule.SNAPSHOT_ON_TABLESCAN,
@@ -479,21 +518,33 @@ object FlinkStreamRuleSets {
     StreamPhysicalConstantTableFunctionScanRule.INSTANCE,
     StreamPhysicalCorrelateRule.INSTANCE,
     StreamPhysicalPythonCorrelateRule.INSTANCE,
+    StreamPhysicalAsyncCorrelateRule.INSTANCE,
     // sink
     StreamPhysicalSinkRule.INSTANCE,
     StreamPhysicalLegacySinkRule.INSTANCE
   )
 
-  /** RuleSet related to transpose watermark to be close to source */
-  val WATERMARK_TRANSPOSE_RULES: RuleSet = RuleSets.ofList(
+  /**
+   * RuleSet related to optimizing ChangelogNormalize:
+   *   1. transpose watermark to be close to source 2. transpose projections 3. push filter either
+   *      inside of a changelog normalize or past it
+   */
+  val CHANGELOG_NORMALIZE_TRANSPOSE_RULES: RuleSet = RuleSets.ofList(
     WatermarkAssignerChangelogNormalizeTransposeRule.WITH_CALC,
-    WatermarkAssignerChangelogNormalizeTransposeRule.WITHOUT_CALC
+    WatermarkAssignerChangelogNormalizeTransposeRule.WITHOUT_CALC,
+    // reduce state size in ChangelogNormalize
+    PushCalcPastChangelogNormalizeRule.INSTANCE
   )
 
   /** RuleSet related to mini-batch. */
   val MINI_BATCH_RULES: RuleSet = RuleSets.ofList(
     // mini-batch interval infer rule
     MiniBatchIntervalInferRule.INSTANCE
+  )
+
+  val DUPLICATE_CHANGES_RULES: RuleSet = RuleSets.ofList(
+    // duplicate changes infer rule
+    DuplicateChangesInferRule.INSTANCE
   )
 
   /** RuleSet to optimize plans after stream exec execution. */
@@ -504,8 +555,8 @@ object FlinkStreamRuleSets {
     IncrementalAggregateRule.INSTANCE,
     // optimize window agg rule
     TwoStageOptimizedWindowAggregateRule.INSTANCE,
-    // optimize ChangelogNormalize
-    PushCalcPastChangelogNormalizeRule.INSTANCE
+    // delta join rule
+    DeltaJoinRewriteRule.INSTANCE
   )
 
 }

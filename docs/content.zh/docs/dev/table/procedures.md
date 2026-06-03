@@ -124,7 +124,7 @@ class GenerateSequenceProcedure extends Procedure {
 {{< /tabs >}}
 
 ### 类型推导
-Table（类似于 SQL 标准）是一种强类型的 API。 因此，存储过程的参数和返回类型都必须映射到 [data type]({{< ref "docs/dev/table/types" >}})。
+Table（类似于 SQL 标准）是一种强类型的 API。 因此，存储过程的参数和返回类型都必须映射到 [data type]({{< ref "docs/sql/reference/data-types" >}})。
 
 从逻辑角度看，Planner 需要知道数据类型、精度和小数位数；从 JVM 角度来看，Planner 在调用存储过程时需要知道如何将内部数据结构表示为 JVM 对象。
 
@@ -138,7 +138,7 @@ Flink 存储过程实现了自动的类型推导提取，通过反射从存储�
 
 自动类型推导会检查存储过程的类和 `call` 方法，推导出存储过程参数和结果的数据类型， `@DataTypeHint` 和 `@ProcedurenHint` 注解支持自动类型推导。
 
-有关可以隐式映射到数据类型的类的完整列表, 请参阅[data type extraction section]({{< ref "docs/dev/table/types" >}}#data-type-extraction)。
+有关可以隐式映射到数据类型的类的完整列表, 请参阅[data type extraction section]({{< ref "docs/sql/reference/data-types" >}}#data-type-extraction)。
 
 **`@DataTypeHint`**
 
@@ -397,13 +397,15 @@ import org.apache.flink.types.Row;
 
 public static class NamedParameterProcedure extends Procedure {
     
-      @ProcedureHint(
-              argument = {@ArgumentHint(name = "param1", type = @DataTypeHint("INTEGER"), isOptional = false),
-                            @ArgumentHint(name = "param2", type = @DataTypeHint("INTEGER"), isOptional = true)}
-      )
-      public @DataTypeHint("INT") Integer[] call(ProcedureContext context, Integer a, Integer b) {
-        return new Integer[] {a + (b == null ? 0 : b)};
-      }
+  @ProcedureHint(
+    arguments = {
+      @ArgumentHint(name = "param1", type = @DataTypeHint("INTEGER"), isOptional = false),
+      @ArgumentHint(name = "param2", type = @DataTypeHint("INTEGER"), isOptional = true)
+    }
+  )
+  public @DataTypeHint("INT") Integer[] call(ProcedureContext context, Integer a, Integer b) {
+    return new Integer[] {a + (b == null ? 0 : b)};
+  }
 }
 ```
 {{< /tab >}}
@@ -418,15 +420,16 @@ import org.apache.flink.types.Row
 import scala.annotation.varargs
 
 class NamedParameterProcedure extends Procedure {
+
   @ProcedureHint(
-    argument = Array(
+    arguments = Array(
       new ArgumentHint(name = "param1", `type` = new DataTypeHint("INTEGER"), isOptional = false),
       new ArgumentHint(name = "param2", `type` = new DataTypeHint("INTEGER"), isOptional = true)
     )
   )
-    def call(context: ProcedureContext, a: Integer, b: Integer): Array[Integer] = {
-        Array(a + (if (b == null) 0 else b))
-    }
+  def call(context: ProcedureContext, a: Integer, b: Integer): Array[Integer] = {
+    Array(a + (if (b == null) 0 else b))
+  }
 }
 ```
 {{< /tab >}}
@@ -444,8 +447,10 @@ import org.apache.flink.table.procedures.Procedure;
 import org.apache.flink.types.Row;
 
 @ProcedureHint(
-        argument = {@ArgumentHint(name = "param1", type = @DataTypeHint("INTEGER"), isOptional = false),
-                      @ArgumentHint(name = "param2", type = @DataTypeHint("INTEGER"), isOptional = true)}
+  arguments = {
+    @ArgumentHint(name = "param1", type = @DataTypeHint("INTEGER"), isOptional = false),
+    @ArgumentHint(name = "param2", type = @DataTypeHint("INTEGER"), isOptional = true)
+  }
 )
 public static class NamedParameterProcedure extends Procedure {
 
@@ -466,7 +471,7 @@ import org.apache.flink.types.Row
 import scala.annotation.varargs
 
 @ProcedureHint(
-  argument = Array(
+  arguments = Array(
     new ArgumentHint(name = "param1", `type` = new DataTypeHint("INTEGER"), isOptional = false),
     new ArgumentHint(name = "param2", `type` = new DataTypeHint("INTEGER"), isOptional = true)
   )

@@ -164,6 +164,10 @@ public class StreamTaskMailboxTestHarness<OUT> implements AutoCloseable {
 
     public void finishProcessing() throws Exception {
         streamTask.afterInvoke();
+        cleanUp();
+    }
+
+    public void cleanUp() throws Exception {
         streamTask.cleanUp(null);
     }
 
@@ -194,5 +198,9 @@ public class StreamTaskMailboxTestHarness<OUT> implements AutoCloseable {
 
     public TestCheckpointResponder getCheckpointResponder() {
         return (TestCheckpointResponder) taskStateManager.getCheckpointResponder();
+    }
+
+    public StreamMockEnvironment getStreamMockEnvironment() {
+        return streamMockEnvironment;
     }
 }

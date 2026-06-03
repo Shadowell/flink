@@ -24,9 +24,9 @@ import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.CoreOptions;
-import org.apache.flink.configuration.GlobalConfiguration;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.ReadableConfig;
+import org.apache.flink.core.execution.SavepointFormatType;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
@@ -36,37 +36,40 @@ import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.operators.testutils.MockEnvironment;
 import org.apache.flink.runtime.query.KvStateRegistry;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
+import org.apache.flink.runtime.state.CheckpointStorageAccess;
 import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.state.KeyedStateBackendParametersImpl;
+import org.apache.flink.runtime.state.filesystem.FsCheckpointStorageAccess;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.runtime.util.TestingTaskManagerRuntimeInfo;
-import org.apache.flink.testutils.junit.FailsInGHAContainerWithRootUser;
 import org.apache.flink.util.FileUtils;
 
 import org.apache.commons.lang3.RandomUtils;
+import org.forstdb.BlockBasedTableConfig;
+import org.forstdb.BloomFilter;
+import org.forstdb.ColumnFamilyOptions;
+import org.forstdb.CompactionStyle;
+import org.forstdb.CompressionType;
+import org.forstdb.DBOptions;
+import org.forstdb.FlushOptions;
+import org.forstdb.InfoLogLevel;
+import org.forstdb.util.SizeUnit;
 import org.junit.Assume;
 import org.junit.Rule;
 import org.junit.Test;
-import org.junit.experimental.categories.Category;
 import org.junit.jupiter.api.Timeout;
 import org.junit.rules.TemporaryFolder;
-import org.rocksdb.BlockBasedTableConfig;
-import org.rocksdb.BloomFilter;
-import org.rocksdb.ColumnFamilyOptions;
-import org.rocksdb.CompactionStyle;
-import org.rocksdb.CompressionType;
-import org.rocksdb.DBOptions;
-import org.rocksdb.FlushOptions;
-import org.rocksdb.InfoLogLevel;
-import org.rocksdb.util.SizeUnit;
 
 import java.io.File;
+import java.io.IOException;
 import java.nio.file.Files;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 
+import static org.apache.flink.state.forst.ForStStateBackend.LOCAL_DIR_AS_PRIMARY_SHORTCUT;
 import static org.apache.flink.state.forst.ForStTestUtils.createKeyedStateBackend;
 import static org.hamcrest.CoreMatchers.anyOf;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -94,7 +97,8 @@ public class ForStStateBackendConfigTest {
         final File logFile = File.createTempFile(getClass().getSimpleName() + "-", ".log");
         // set the environment variable 'log.file' with the Flink log file location
         System.setProperty("log.file", logFile.getPath());
-        try (ForStResourceContainer container = backend.createOptionsAndResourceContainer(null)) {
+        try (ForStResourceContainer container =
+                backend.createOptionsAndResourceContainer(new Path(tempFolder.toString()))) {
             assertEquals(
                     ForStConfigurableOptions.LOG_LEVEL.defaultValue(),
                     container.getDbOptions().infoLogLevel());
@@ -110,7 +114,7 @@ public class ForStStateBackendConfigTest {
         }
         try (ForStResourceContainer container =
                 backend.createOptionsAndResourceContainer(
-                        new File(longInstanceBasePath.toString()))) {
+                        new Path(longInstanceBasePath.toString()))) {
             assertTrue(container.getDbOptions().dbLogDir().isEmpty());
         } finally {
             logFile.delete();
@@ -146,10 +150,9 @@ public class ForStStateBackendConfigTest {
                 createKeyedStateBackend(forStStateBackend, env, IntSerializer.INSTANCE);
 
         try {
-            File instanceBasePath = keyedBackend.getLocalBasePath();
+            Path instanceBasePath = keyedBackend.getLocalBasePath();
             assertThat(
-                    instanceBasePath.getAbsolutePath(),
-                    anyOf(startsWith(testDir1), startsWith(testDir2)));
+                    instanceBasePath.getPath(), anyOf(startsWith(testDir1), startsWith(testDir2)));
 
             //noinspection NullArgumentToVariableArgMethod
             forStStateBackend.setLocalDbStoragePaths(null);
@@ -163,7 +166,6 @@ public class ForStStateBackendConfigTest {
 
     @Test
     public void testConfigureForStCompressionPerLevel() throws Exception {
-        GlobalConfiguration.setStandardYaml(false);
         final MockEnvironment env = getMockEnvironment(tempFolder.newFolder());
         ForStStateBackend forStStateBackend = new ForStStateBackend();
         CompressionType[] compressionTypes = {
@@ -178,13 +180,13 @@ public class ForStStateBackendConfigTest {
                 forStStateBackend.configure(conf, Thread.currentThread().getContextClassLoader());
 
         ForStResourceContainer resourceContainer =
-                forStStateBackend.createOptionsAndResourceContainer(tempFolder.newFile());
+                forStStateBackend.createOptionsAndResourceContainer(
+                        new Path(tempFolder.newFile().getAbsolutePath()));
         ColumnFamilyOptions columnFamilyOptions = resourceContainer.getColumnOptions();
         assertArrayEquals(compressionTypes, columnFamilyOptions.compressionPerLevel().toArray());
 
         resourceContainer.close();
         env.close();
-        GlobalConfiguration.setStandardYaml(true);
     }
 
     @Test
@@ -236,9 +238,8 @@ public class ForStStateBackendConfigTest {
                 createKeyedStateBackend(forStBackend, env, IntSerializer.INSTANCE);
 
         try {
-            File instanceBasePath = keyedBackend.getLocalBasePath();
-            assertThat(
-                    instanceBasePath.getAbsolutePath(), startsWith(expectedPath.getAbsolutePath()));
+            Path instanceBasePath = keyedBackend.getLocalBasePath();
+            assertThat(instanceBasePath.getPath(), startsWith(expectedPath.getAbsolutePath()));
 
             //noinspection NullArgumentToVariableArgMethod
             forStBackend.setLocalDbStoragePaths(null);
@@ -283,6 +284,7 @@ public class ForStStateBackendConfigTest {
         conf.set(ForStConfigurableOptions.LOG_LEVEL, InfoLogLevel.DEBUG_LEVEL);
         conf.set(ForStConfigurableOptions.LOG_FILE_NUM, 4);
         conf.set(ForStConfigurableOptions.LOG_MAX_FILE_SIZE, MemorySize.parse("1kb"));
+        conf.set(ForStOptions.PRIMARY_DIRECTORY, LOCAL_DIR_AS_PRIMARY_SHORTCUT);
         final ForStStateBackend forStBackend =
                 new ForStStateBackend().configure(conf, getClass().getClassLoader());
         final String dbStoragePath = new Path(folder.toURI().toString()).toString();
@@ -292,11 +294,11 @@ public class ForStStateBackendConfigTest {
         ForStKeyedStateBackend<Integer> keyedBackend =
                 createKeyedStateBackend(forStBackend, env, IntSerializer.INSTANCE);
 
-        File localBasePath = keyedBackend.getLocalBasePath();
-        File localForStPath = new File(localBasePath, "db");
+        Path localBasePath = keyedBackend.getLocalBasePath();
+        Path localForStPath = new Path(localBasePath, "db");
 
         // avoid tests without relocate.
-        Assume.assumeTrue(localForStPath.getAbsolutePath().length() <= 255 - "_LOG".length());
+        Assume.assumeTrue(localForStPath.getPath().length() <= 255 - "_LOG".length());
 
         java.nio.file.Path[] relocatedDbLogs;
         try {
@@ -357,8 +359,8 @@ public class ForStStateBackendConfigTest {
                                 cancelStreamRegistry));
 
         try {
-            File instanceBasePath = keyedBackend.getLocalBasePath();
-            assertThat(instanceBasePath.getAbsolutePath(), startsWith(dir1.getAbsolutePath()));
+            Path instanceBasePath = keyedBackend.getLocalBasePath();
+            assertThat(instanceBasePath.getPath(), startsWith(dir1.getAbsolutePath()));
         } finally {
             keyedBackend.dispose();
             keyedBackend.close();
@@ -371,7 +373,6 @@ public class ForStStateBackendConfigTest {
     // ------------------------------------------------------------------------
 
     @Test
-    @Category(FailsInGHAContainerWithRootUser.class)
     public void testFailWhenNoLocalStorageDir() throws Exception {
         final File targetDir = tempFolder.newFolder();
         Assume.assumeTrue(
@@ -493,6 +494,10 @@ public class ForStStateBackendConfigTest {
             verifyIllegalArgument(ForStConfigurableOptions.COMPRESSION_PER_LEVEL, "SNAP");
             verifyIllegalArgument(ForStConfigurableOptions.USE_BLOOM_FILTER, "NO");
             verifyIllegalArgument(ForStConfigurableOptions.BLOOM_FILTER_BLOCK_BASED_MODE, "YES");
+            verifyIllegalArgument(
+                    ForStConfigurableOptions.COMPACT_FILTER_PERIODIC_COMPACTION_TIME, "-1s");
+            verifyIllegalArgument(
+                    ForStConfigurableOptions.COMPACT_FILTER_QUERY_TIME_AFTER_NUM_ENTRIES, "1.1");
         }
 
         // verify legal configuration
@@ -517,9 +522,19 @@ public class ForStStateBackendConfigTest {
             configuration.setString(ForStConfigurableOptions.METADATA_BLOCK_SIZE.key(), "8 kb");
             configuration.setString(ForStConfigurableOptions.BLOCK_CACHE_SIZE.key(), "512 mb");
             configuration.setString(ForStConfigurableOptions.USE_BLOOM_FILTER.key(), "TRUE");
+            configuration.setString(
+                    ForStConfigurableOptions.COMPACT_FILTER_PERIODIC_COMPACTION_TIME.key(), "1h");
 
             try (ForStResourceContainer optionsContainer =
-                    new ForStResourceContainer(configuration, null, null, null, null, false)) {
+                    new ForStResourceContainer(
+                            configuration,
+                            null,
+                            null,
+                            ForStPathContainer.empty(),
+                            null,
+                            null,
+                            null,
+                            false)) {
 
                 DBOptions dbOptions = optionsContainer.getDbOptions();
                 assertEquals(-1, dbOptions.maxOpenFiles());
@@ -542,6 +557,7 @@ public class ForStStateBackendConfigTest {
                                 CompressionType.SNAPPY_COMPRESSION,
                                 CompressionType.LZ4_COMPRESSION),
                         columnOptions.compressionPerLevel());
+                assertEquals(3600, columnOptions.periodicCompactionSeconds());
 
                 BlockBasedTableConfig tableConfig =
                         (BlockBasedTableConfig) columnOptions.tableFormatConfig();
@@ -602,7 +618,15 @@ public class ForStStateBackendConfigTest {
         Configuration configuration = new Configuration();
         configuration.set(ForStConfigurableOptions.COMPACTION_STYLE, CompactionStyle.UNIVERSAL);
         try (final ForStResourceContainer optionsContainer =
-                new ForStResourceContainer(configuration, null, null, null, null, false)) {
+                new ForStResourceContainer(
+                        configuration,
+                        null,
+                        null,
+                        ForStPathContainer.empty(),
+                        null,
+                        null,
+                        null,
+                        false)) {
 
             final ColumnFamilyOptions columnFamilyOptions = optionsContainer.getColumnOptions();
             assertNotNull(columnFamilyOptions);
@@ -610,7 +634,15 @@ public class ForStStateBackendConfigTest {
         }
 
         try (final ForStResourceContainer optionsContainer =
-                new ForStResourceContainer(new Configuration(), null, null, null, null, false)) {
+                new ForStResourceContainer(
+                        new Configuration(),
+                        null,
+                        null,
+                        ForStPathContainer.empty(),
+                        null,
+                        null,
+                        null,
+                        false)) {
 
             final ColumnFamilyOptions columnFamilyOptions = optionsContainer.getColumnOptions();
             assertNotNull(columnFamilyOptions);
@@ -739,10 +771,11 @@ public class ForStStateBackendConfigTest {
     }
 
     @Test
-    public void testRemoteDirectory() throws Exception {
+    public void testPrimaryDirectory() throws Exception {
         FileSystem.initialize(new Configuration(), null);
         Configuration configuration = new Configuration();
-        configuration.set(ForStOptions.REMOTE_DIRECTORY, tempFolder.newFolder().toURI().toString());
+        configuration.set(
+                ForStOptions.PRIMARY_DIRECTORY, tempFolder.newFolder().toURI().toString());
         ForStStateBackend forStStateBackend =
                 new ForStStateBackend().configure(configuration, null);
         ForStKeyedStateBackend<Integer> keyedBackend = null;
@@ -756,12 +789,45 @@ public class ForStStateBackendConfigTest {
                     keyedBackend
                             .getRemoteBasePath()
                             .toString()
-                            .startsWith(configuration.get(ForStOptions.REMOTE_DIRECTORY)));
+                            .startsWith(configuration.get(ForStOptions.PRIMARY_DIRECTORY)));
         } finally {
             if (keyedBackend != null) {
                 keyedBackend.dispose();
                 keyedBackend.close();
             }
+        }
+    }
+
+    @Test
+    public void testSupportSavepoint() {
+        ForStStateBackend forStStateBackend = new ForStStateBackend();
+        assertFalse(forStStateBackend.supportsSavepointFormat(SavepointFormatType.CANONICAL));
+        assertTrue(forStStateBackend.supportsSavepointFormat(SavepointFormatType.NATIVE));
+    }
+
+    @Test
+    public void testConfigurePeriodicCompactionTime() throws Exception {
+        ForStStateBackend forStStateBackend = new ForStStateBackend();
+        Configuration configuration = new Configuration();
+        configuration.setString(
+                ForStConfigurableOptions.COMPACT_FILTER_PERIODIC_COMPACTION_TIME.key(), "1d");
+        forStStateBackend = forStStateBackend.configure(configuration, getClass().getClassLoader());
+        try (ForStResourceContainer resourceContainer =
+                forStStateBackend.createOptionsAndResourceContainer(null)) {
+            assertEquals(Duration.ofDays(1), resourceContainer.getPeriodicCompactionTime());
+        }
+    }
+
+    @Test
+    public void testConfigureQueryTimeAfterNumEntries() throws Exception {
+        ForStStateBackend forStStateBackend = new ForStStateBackend();
+        Configuration configuration = new Configuration();
+        configuration.setString(
+                ForStConfigurableOptions.COMPACT_FILTER_QUERY_TIME_AFTER_NUM_ENTRIES.key(), "100");
+        forStStateBackend = forStStateBackend.configure(configuration, getClass().getClassLoader());
+        try (ForStResourceContainer resourceContainer =
+                forStStateBackend.createOptionsAndResourceContainer(null)) {
+            assertEquals(100L, resourceContainer.getQueryTimeAfterNumEntries().longValue());
         }
     }
 
@@ -778,12 +844,22 @@ public class ForStStateBackendConfigTest {
     //  Utilities
     // ------------------------------------------------------------------------
 
-    static MockEnvironment getMockEnvironment(File tempDir) {
-        return MockEnvironment.builder()
-                .setUserCodeClassLoader(ForStStateBackendConfigTest.class.getClassLoader())
-                .setTaskManagerRuntimeInfo(
-                        new TestingTaskManagerRuntimeInfo(new Configuration(), tempDir))
-                .build();
+    static MockEnvironment getMockEnvironment(File tempDir) throws IOException {
+        MockEnvironment env =
+                MockEnvironment.builder()
+                        .setUserCodeClassLoader(ForStStateBackendConfigTest.class.getClassLoader())
+                        .setTaskManagerRuntimeInfo(
+                                new TestingTaskManagerRuntimeInfo(new Configuration(), tempDir))
+                        .build();
+        CheckpointStorageAccess checkpointStorageAccess =
+                new FsCheckpointStorageAccess(
+                        new Path(tempDir.getPath(), "checkpoint"),
+                        null,
+                        env.getJobID(),
+                        1024,
+                        4096);
+        env.setCheckpointStorageAccess(checkpointStorageAccess);
+        return env;
     }
 
     private void verifyIllegalArgument(ConfigOption<?> configOption, String configValue) {

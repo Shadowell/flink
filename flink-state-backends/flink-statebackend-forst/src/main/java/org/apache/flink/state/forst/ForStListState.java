@@ -19,38 +19,44 @@
 package org.apache.flink.state.forst;
 
 import org.apache.flink.api.common.state.v2.ListState;
+import org.apache.flink.api.common.state.v2.StateFuture;
 import org.apache.flink.api.common.state.v2.StateIterator;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.core.asyncprocessing.InternalAsyncFuture;
 import org.apache.flink.core.memory.DataInputDeserializer;
 import org.apache.flink.core.memory.DataOutputSerializer;
-import org.apache.flink.core.state.InternalStateFuture;
+import org.apache.flink.core.state.StateFutureUtils;
 import org.apache.flink.runtime.asyncprocessing.RecordContext;
 import org.apache.flink.runtime.asyncprocessing.StateRequest;
 import org.apache.flink.runtime.asyncprocessing.StateRequestHandler;
 import org.apache.flink.runtime.asyncprocessing.StateRequestType;
 import org.apache.flink.runtime.state.SerializedCompositeKeyBuilder;
-import org.apache.flink.runtime.state.v2.InternalListState;
-import org.apache.flink.runtime.state.v2.ListStateDescriptor;
-import org.apache.flink.util.Preconditions;
+import org.apache.flink.runtime.state.VoidNamespace;
+import org.apache.flink.runtime.state.VoidNamespaceSerializer;
+import org.apache.flink.runtime.state.v2.AbstractListState;
 
-import org.rocksdb.ColumnFamilyHandle;
+import org.forstdb.ColumnFamilyHandle;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
 import java.util.function.Supplier;
 
 /**
- * The {@link InternalListState} implement for ForStDB.
+ * The {@link AbstractListState} implement for ForStDB.
  *
- * <p>{@link ForStStateBackend} must ensure that we set the {@link org.rocksdb.StringAppendOperator}
+ * <p>{@link ForStStateBackend} must ensure that we set the {@link org.forstdb.StringAppendOperator}
  * on the column family that we use for our state since we use the {@code merge()} call.
  *
  * @param <K> The type of the key.
  * @param <N> The type of the namespace.
  * @param <V> The type of the value.
  */
-public class ForStListState<K, N, V> extends InternalListState<K, N, V>
+public class ForStListState<K, N, V> extends AbstractListState<K, N, V>
         implements ListState<V>, ForStInnerTable<K, N, List<V>> {
 
     /** The column family which this internal value state belongs to. */
@@ -70,22 +76,30 @@ public class ForStListState<K, N, V> extends InternalListState<K, N, V>
     /** The data inputStream used for value deserializer, which should be thread-safe. */
     private final ThreadLocal<DataInputDeserializer> valueDeserializerView;
 
+    /** Whether to enable the reuse of serialized key(and namespace). */
+    private final boolean enableKeyReuse;
+
     public ForStListState(
             StateRequestHandler stateRequestHandler,
             ColumnFamilyHandle columnFamily,
-            ListStateDescriptor<V> listStateDescriptor,
+            TypeSerializer<V> valueSerializer,
             Supplier<SerializedCompositeKeyBuilder<K>> serializedKeyBuilderInitializer,
             N defaultNamespace,
             Supplier<TypeSerializer<N>> namespaceSerializerInitializer,
             Supplier<DataOutputSerializer> valueSerializerViewInitializer,
             Supplier<DataInputDeserializer> valueDeserializerViewInitializer) {
-        super(stateRequestHandler, listStateDescriptor);
+        super(stateRequestHandler, valueSerializer);
         this.columnFamilyHandle = columnFamily;
         this.serializedKeyBuilder = ThreadLocal.withInitial(serializedKeyBuilderInitializer);
         this.defaultNamespace = defaultNamespace;
         this.namespaceSerializer = ThreadLocal.withInitial(namespaceSerializerInitializer);
         this.valueSerializerView = ThreadLocal.withInitial(valueSerializerViewInitializer);
         this.valueDeserializerView = ThreadLocal.withInitial(valueDeserializerViewInitializer);
+        // We only enable key reuse for the most common namespace across all states.
+        this.enableKeyReuse =
+                (defaultNamespace instanceof VoidNamespace)
+                        && (namespaceSerializerInitializer.get()
+                                instanceof VoidNamespaceSerializer);
     }
 
     @Override
@@ -95,15 +109,12 @@ public class ForStListState<K, N, V> extends InternalListState<K, N, V>
 
     @Override
     public byte[] serializeKey(ContextKey<K, N> contextKey) throws IOException {
-        return contextKey.getOrCreateSerializedKey(
-                ctxKey -> {
-                    SerializedCompositeKeyBuilder<K> builder = serializedKeyBuilder.get();
-                    builder.setKeyAndKeyGroup(ctxKey.getRawKey(), ctxKey.getKeyGroup());
-                    N namespace = contextKey.getNamespace(this);
-                    return builder.buildCompositeKeyNamespace(
-                            namespace == null ? defaultNamespace : namespace,
-                            namespaceSerializer.get());
-                });
+        return ForStSerializerUtils.serializeKeyAndNamespace(
+                contextKey,
+                serializedKeyBuilder.get(),
+                defaultNamespace,
+                namespaceSerializer.get(),
+                enableKeyReuse);
     }
 
     @Override
@@ -122,20 +133,35 @@ public class ForStListState<K, N, V> extends InternalListState<K, N, V>
 
     @SuppressWarnings("unchecked")
     @Override
-    public ForStDBGetRequest<K, N, List<V>, StateIterator<V>> buildDBGetRequest(
-            StateRequest<?, ?, ?> stateRequest) {
-        Preconditions.checkArgument(stateRequest.getRequestType() == StateRequestType.LIST_GET);
+    public ForStDBGetRequest<K, N, List<V>, ?> buildDBGetRequest(
+            StateRequest<?, ?, ?, ?> stateRequest) {
         ContextKey<K, N> contextKey =
-                new ContextKey<>((RecordContext<K>) stateRequest.getRecordContext());
-        return new ForStDBListGetRequest<>(
-                contextKey, this, (InternalStateFuture<StateIterator<V>>) stateRequest.getFuture());
+                new ContextKey<>(
+                        (RecordContext<K>) stateRequest.getRecordContext(),
+                        (N) stateRequest.getNamespace());
+        switch (stateRequest.getRequestType()) {
+            case LIST_GET:
+                return new ForStDBListGetRequest<>(
+                        contextKey,
+                        this,
+                        (InternalAsyncFuture<StateIterator<V>>) stateRequest.getFuture());
+            case CUSTOMIZED:
+                // must be LIST_GET_RAW
+                return new ForStDBRawGetRequest<>(
+                        contextKey, this, (InternalAsyncFuture<byte[]>) stateRequest.getFuture());
+            default:
+                throw new UnsupportedOperationException();
+        }
     }
 
     @SuppressWarnings("unchecked")
     @Override
-    public ForStDBPutRequest<K, N, List<V>> buildDBPutRequest(StateRequest<?, ?, ?> stateRequest) {
+    public ForStDBPutRequest<K, N, List<V>> buildDBPutRequest(
+            StateRequest<?, ?, ?, ?> stateRequest) {
         ContextKey<K, N> contextKey =
-                new ContextKey<>((RecordContext<K>) stateRequest.getRecordContext());
+                new ContextKey<>(
+                        (RecordContext<K>) stateRequest.getRecordContext(),
+                        (N) stateRequest.getNamespace());
         List<V> value;
         boolean merge = false;
         switch (stateRequest.getRequestType()) {
@@ -154,15 +180,105 @@ public class ForStListState<K, N, V> extends InternalListState<K, N, V>
                 value = (List<V>) stateRequest.getPayload();
                 merge = true;
                 break;
+            case CUSTOMIZED:
+                // must be LIST_ADD_ALL_RAW
+                return new ForStDBMultiRawMergePutRequest<>(
+                        contextKey,
+                        ((Tuple2<ForStStateRequestType, List<byte[]>>) stateRequest.getPayload())
+                                .f1,
+                        this,
+                        (InternalAsyncFuture<Void>) stateRequest.getFuture());
             default:
                 throw new IllegalArgumentException();
         }
         if (merge) {
             return ForStDBPutRequest.ofMerge(
-                    contextKey, value, this, (InternalStateFuture<Void>) stateRequest.getFuture());
+                    contextKey, value, this, (InternalAsyncFuture<Void>) stateRequest.getFuture());
         } else {
             return ForStDBPutRequest.of(
-                    contextKey, value, this, (InternalStateFuture<Void>) stateRequest.getFuture());
+                    contextKey, value, this, (InternalAsyncFuture<Void>) stateRequest.getFuture());
+        }
+    }
+
+    @Override
+    public StateFuture<Void> asyncMergeNamespaces(N target, Collection<N> sources) {
+        if (sources == null || sources.isEmpty()) {
+            return StateFutureUtils.completedVoidFuture();
+        }
+        // phase 1: read from the sources and target
+        List<StateFuture<byte[]>> futures = new ArrayList<>(sources.size());
+        for (N source : sources) {
+            if (source != null) {
+                setCurrentNamespace(source);
+                futures.add(
+                        handleRequest(
+                                StateRequestType.CUSTOMIZED,
+                                Tuple2.of(ForStStateRequestType.LIST_GET_RAW, null)));
+            }
+        }
+        // phase 2: merge the sources to the target
+        return StateFutureUtils.combineAll(futures)
+                .thenCompose(
+                        values -> {
+                            List<StateFuture<Void>> updateFutures =
+                                    new ArrayList<>(sources.size() + 1);
+                            List<byte[]> validValues = new ArrayList<>(sources.size());
+                            Iterator<byte[]> valueIterator = values.iterator();
+                            for (N source : sources) {
+                                byte[] value = valueIterator.next();
+                                if (value != null) {
+                                    validValues.add(value);
+                                    setCurrentNamespace(source);
+                                    updateFutures.add(asyncClear());
+                                }
+                            }
+                            if (!validValues.isEmpty()) {
+                                setCurrentNamespace(target);
+                                updateFutures.add(
+                                        handleRequest(
+                                                StateRequestType.CUSTOMIZED,
+                                                Tuple2.of(
+                                                        ForStStateRequestType.MERGE_ALL_RAW,
+                                                        validValues)));
+                            }
+                            return StateFutureUtils.combineAll(updateFutures);
+                        })
+                .thenAccept(ignores -> {});
+    }
+
+    @Override
+    public void mergeNamespaces(N target, Collection<N> sources) {
+        if (sources == null || sources.isEmpty()) {
+            return;
+        }
+        try {
+            // merge the sources to the target
+            List<byte[]> validValues = new ArrayList<>(sources.size());
+            for (N source : sources) {
+                if (source != null) {
+                    setCurrentNamespace(source);
+                    byte[] oldValue =
+                            handleRequestSync(
+                                    StateRequestType.CUSTOMIZED,
+                                    Tuple2.of(ForStStateRequestType.LIST_GET_RAW, null));
+
+                    if (oldValue != null) {
+                        setCurrentNamespace(source);
+                        clear();
+                        validValues.add(oldValue);
+                    }
+                }
+            }
+
+            // if something came out of merging the sources, merge it or write it to the target
+            if (!validValues.isEmpty()) {
+                setCurrentNamespace(target);
+                handleRequestSync(
+                        StateRequestType.CUSTOMIZED,
+                        Tuple2.of(ForStStateRequestType.MERGE_ALL_RAW, validValues));
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("merge namespace fail.", e);
         }
     }
 }

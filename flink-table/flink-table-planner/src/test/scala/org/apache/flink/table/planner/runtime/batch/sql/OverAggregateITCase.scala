@@ -533,6 +533,48 @@ class OverAggregateITCase extends BatchTestBase {
   }
 
   @Test
+  def testWindowAggregationSumWithQualify(): Unit = {
+    checkResult(
+      "SELECT d, e FROM Table5 QUALIFY sum(e) OVER (PARTITION BY d ORDER BY e) > 20",
+      Seq(
+        row(4, 9),
+        row(4, 10),
+        row(5, 12),
+        row(5, 13),
+        row(5, 14),
+        row(5, 15)
+      )
+    )
+  }
+
+  @Test
+  def testWindowAggregationRowNumberWithQualify(): Unit = {
+    checkResult(
+      "SELECT d, e, row_number() OVER (PARTITION BY d ORDER BY e) AS rownum FROM Table5 " +
+        "QUALIFY rownum = 1",
+      Seq(
+        row(1, 1, 1),
+        row(2, 2, 1),
+        row(3, 4, 1),
+        row(4, 7, 1),
+        row(5, 11, 1)
+      )
+    )
+  }
+
+  @Test
+  def testWindowAggregationCountWithQualify(): Unit = {
+    checkResult(
+      "SELECT d, e FROM Table5 QUALIFY count(*) OVER (PARTITION BY d ORDER BY e) = 3",
+      Seq(
+        row(3, 6),
+        row(4, 9),
+        row(5, 13)
+      )
+    )
+  }
+
+  @Test
   def testWindowAggregationCountWithOrderBy(): Unit = {
 
     checkResult(
@@ -1180,7 +1222,7 @@ class OverAggregateITCase extends BatchTestBase {
           3.14,
           "EFG",
           localDate("2017-05-20"),
-          localTime("09:46:18"),
+          localTime("09:45:58"),
           localDateTime("2015-11-19 10:00:01"),
           3,
           2,
@@ -2902,6 +2944,96 @@ class OverAggregateITCase extends BatchTestBase {
       )
     )
   }
+
+  @Test
+  def testPercentile(): Unit = {
+    checkResult(
+      "SELECT " +
+        "e, " +
+        "PERCENTILE(e, 0.5) over (order by e), " +
+        "PERCENTILE(e, 0.5, d) over (order by e), " +
+        "PERCENTILE(e, ARRAY[0.25, 0.75]) over (order by e), " +
+        "PERCENTILE(e, ARRAY[0.25, 0.75], d) over (order by e) " +
+        "FROM Table5",
+      Seq(
+        row(1, 1.0, 1.0, Array(1.0, 1.0), Array(1.0, 1.0)),
+        row(2, 1.5, 2.0, Array(1.25, 1.75), Array(1.5, 2.0)),
+        row(3, 2.0, 2.0, Array(1.5, 2.5), Array(2.0, 3.0)),
+        row(4, 2.5, 3.0, Array(1.75, 3.25), Array(2.0, 4.0)),
+        row(5, 3.0, 4.0, Array(2.0, 4.0), Array(2.5, 4.5)),
+        row(6, 3.5, 4.0, Array(2.25, 4.75), Array(3.0, 5.0)),
+        row(7, 4.0, 5.0, Array(2.5, 5.5), Array(3.25, 6.0)),
+        row(8, 4.5, 5.5, Array(2.75, 6.25), Array(4.0, 7.0)),
+        row(9, 5.0, 6.0, Array(3.0, 7.0), Array(4.0, 8.0)),
+        row(10, 5.5, 7.0, Array(3.25, 7.75), Array(4.25, 8.75)),
+        row(11, 6.0, 7.0, Array(3.5, 8.5), Array(5.0, 9.5)),
+        row(12, 6.5, 8.0, Array(3.75, 9.25), Array(5.0, 10.25)),
+        row(13, 7.0, 9.0, Array(4.0, 10.0), Array(6.0, 11.0)),
+        row(14, 7.5, 9.0, Array(4.25, 10.75), Array(6.0, 12.0)),
+        row(15, 8.0, 10.0, Array(4.5, 11.5), Array(6.5, 13.0))
+      )
+    )
+  }
+
+  @Test
+  def testBitmapBuildAgg(): Unit = {
+    checkResult(
+      "SELECT " +
+        "d, e, " +
+        "BITMAP_BUILD_AGG(d) OVER (ORDER BY e ROWS BETWEEN 4 PRECEDING AND CURRENT ROW), " +
+        "BITMAP_BUILD_AGG(CAST(e AS INT)) OVER (ORDER BY e ROWS BETWEEN 4 PRECEDING AND CURRENT ROW) " +
+        "FROM NullTable5",
+      Seq(
+        row(1, 1L, "{1}", "{1}"),
+        row(2, 2L, "{1,2}", "{1,2}"),
+        row(2, 3L, "{1,2}", "{1,2,3}"),
+        row(3, 4L, "{1,2,3}", "{1,2,3,4}"),
+        row(3, 5L, "{1,2,3}", "{1,2,3,4,5}"),
+        row(3, 6L, "{2,3}", "{2,3,4,5,6}"),
+        row(4, 7L, "{2,3,4}", "{3,4,5,6,7}"),
+        row(4, 8L, "{3,4}", "{4,5,6,7,8}"),
+        row(4, 9L, "{3,4}", "{5,6,7,8,9}"),
+        row(4, 10L, "{3,4}", "{6,7,8,9,10}"),
+        row(5, 11L, "{4,5}", "{7,8,9,10,11}"),
+        row(5, 12L, "{4,5}", "{8,9,10,11,12}"),
+        row(5, 13L, "{4,5}", "{9,10,11,12,13}"),
+        row(5, 14L, "{4,5}", "{10,11,12,13,14}"),
+        row(5, 15L, "{5}", "{11,12,13,14,15}"),
+        row(null, 999L, "{5}", "{12,13,14,15,999}"),
+        row(null, 999L, "{5}", "{13,14,15,999}")
+      )
+    )
+  }
+
+  @Test
+  def testBitmapLogicalOpsAgg(): Unit = {
+    checkResult(
+      "SELECT " +
+        "d, f, " +
+        "BITMAP_AND_AGG(BITMAP_BUILD(ARRAY[d,f])) OVER (ORDER BY e ROWS BETWEEN 2 PRECEDING AND CURRENT ROW), " +
+        "BITMAP_OR_AGG(BITMAP_BUILD(ARRAY[d,f])) OVER (ORDER BY e ROWS BETWEEN 2 PRECEDING AND CURRENT ROW), " +
+        "BITMAP_XOR_AGG(BITMAP_BUILD(ARRAY[d,f])) OVER (ORDER BY e ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) " +
+        "FROM Table5",
+      Seq(
+        row(1, 0, "{0,1}", "{0,1}", "{0,1}"),
+        row(2, 1, "{1}", "{0,1,2}", "{0,2}"),
+        row(2, 2, "{}", "{0,1,2}", "{0}"),
+        row(3, 3, "{}", "{1,2,3}", "{1,3}"),
+        row(3, 4, "{}", "{2,3,4}", "{2,4}"),
+        row(3, 5, "{3}", "{3,4,5}", "{3,4,5}"),
+        row(4, 6, "{}", "{3,4,5,6}", "{5,6}"),
+        row(4, 7, "{}", "{3,4,5,6,7}", "{3,5,6,7}"),
+        row(4, 8, "{4}", "{4,6,7,8}", "{4,6,7,8}"),
+        row(4, 9, "{4}", "{4,7,8,9}", "{4,7,8,9}"),
+        row(5, 10, "{}", "{4,5,8,9,10}", "{5,8,9,10}"),
+        row(5, 11, "{}", "{4,5,9,10,11}", "{4,9,10,11}"),
+        row(5, 12, "{5}", "{5,10,11,12}", "{5,10,11,12}"),
+        row(5, 13, "{5}", "{5,11,12,13}", "{5,11,12,13}"),
+        row(5, 14, "{5}", "{5,12,13,14}", "{5,12,13,14}")
+      )
+    )
+  }
+
 }
 
 /** The initial accumulator for count aggregate function */

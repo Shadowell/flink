@@ -75,7 +75,7 @@ import org.apache.flink.runtime.shuffle.UnknownShuffleDescriptor;
 import org.apache.flink.runtime.util.NettyShuffleDescriptorBuilder;
 import org.apache.flink.util.CompressedSerializedValue;
 
-import org.apache.flink.shaded.guava32.com.google.common.io.Closer;
+import org.apache.flink.shaded.guava33.com.google.common.io.Closer;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -140,6 +140,36 @@ class SingleInputGateTest extends InputGateTestBase {
                                                 1L,
                                                 alignedNoTimeout(CHECKPOINT, getDefault()))))
                 .isInstanceOf(CheckpointException.class);
+    }
+
+    @Test
+    void testBufferFilteringCompleteFutureAggregation() throws Exception {
+        final NettyShuffleEnvironment environment = createNettyShuffleEnvironment();
+        final SingleInputGate inputGate = createInputGate(environment);
+        try (Closer closer = Closer.create()) {
+            closer.register(environment::close);
+            closer.register(inputGate::close);
+
+            // Enable unaligned during recovery for this test so that
+            // bufferFilteringCompleteFuture is completed by finishReadRecoveredState()
+            inputGate.setCheckpointingDuringRecoveryEnabled(true);
+            inputGate.setup();
+
+            // Initially, the aggregated future should not be completed
+            assertThat(inputGate.getBufferFilteringCompleteFuture()).isNotDone();
+
+            // After finishing read recovered state, bufferFilteringCompleteFuture should be
+            // completed (only when config is enabled)
+            inputGate.finishReadRecoveredState();
+            assertThat(inputGate.getBufferFilteringCompleteFuture()).isDone();
+
+            // stateConsumedFuture should not be completed until data is consumed
+            assertThat(inputGate.getStateConsumedFuture()).isNotDone();
+
+            // Consuming the EndOfInputChannelStateEvent should complete stateConsumedFuture
+            inputGate.pollNext();
+            assertThat(inputGate.getStateConsumedFuture()).isDone();
+        }
     }
 
     /**
@@ -947,7 +977,8 @@ class SingleInputGateTest extends InputGateTestBase {
                         netEnv,
                         localLocation,
                         new TestingConnectionManager(),
-                        new TestingResultPartitionManager(new NoOpResultSubpartitionView()));
+                        new TestingResultPartitionManager(new NoOpResultSubpartitionView()),
+                        partitionIds.length);
 
         for (InputChannel channel : gate.inputChannels()) {
             if (channel instanceof ChannelStateHolder) {
@@ -960,8 +991,7 @@ class SingleInputGateTest extends InputGateTestBase {
                             getInputChannelsInPartition(gate, partitionIds[i]).stream()
                                     .map(InputChannel::getConsumedSubpartitionIndexSet)
                                     .collect(Collectors.toList()))
-                    .containsExactlyInAnyOrder(
-                            new ResultSubpartitionIndexSet(0), new ResultSubpartitionIndexSet(1));
+                    .containsExactly(new ResultSubpartitionIndexSet(new IndexRange(0, 1)));
         }
 
         assertChannelsType(gate, LocalRecoveredInputChannel.class, partitionIds[0]);
@@ -1263,7 +1293,8 @@ class SingleInputGateTest extends InputGateTestBase {
                         netEnv,
                         ResourceID.generate(),
                         new TestingConnectionManager(),
-                        new TestingResultPartitionManager(new NoOpResultSubpartitionView()));
+                        new TestingResultPartitionManager(new NoOpResultSubpartitionView()),
+                        partitionIds.length * subpartitionRandSize);
         gate.setup();
 
         for (InputChannel inputChannel : gate.inputChannels()) {
@@ -1323,7 +1354,8 @@ class SingleInputGateTest extends InputGateTestBase {
                 netEnv,
                 ResourceID.generate(),
                 null,
-                null);
+                null,
+                partitionIds.length);
     }
 
     static SingleInputGate createSingleInputGate(
@@ -1333,25 +1365,29 @@ class SingleInputGateTest extends InputGateTestBase {
             NettyShuffleEnvironment netEnv,
             ResourceID localLocation,
             ConnectionManager connectionManager,
-            ResultPartitionManager resultPartitionManager)
+            ResultPartitionManager resultPartitionManager,
+            int numOfChannels)
             throws IOException {
 
-        ShuffleDescriptorAndIndex[] channelDescs =
-                new ShuffleDescriptorAndIndex[] {
-                    // Local
-                    new ShuffleDescriptorAndIndex(
-                            createRemoteWithIdAndLocation(partitionIds[0], localLocation), 0),
-                    // Remote
-                    new ShuffleDescriptorAndIndex(
-                            createRemoteWithIdAndLocation(partitionIds[1], ResourceID.generate()),
-                            1),
-                    // Unknown
+        ShuffleDescriptorAndIndex[] channelDescs = new ShuffleDescriptorAndIndex[numOfChannels];
+
+        // Local
+        channelDescs[0] =
+                new ShuffleDescriptorAndIndex(
+                        createRemoteWithIdAndLocation(partitionIds[0], localLocation), 0);
+        // Remote
+        channelDescs[1] =
+                new ShuffleDescriptorAndIndex(
+                        createRemoteWithIdAndLocation(partitionIds[1], ResourceID.generate()), 1);
+        // Unknown
+        for (int i = 2; i < numOfChannels; i++) {
+            channelDescs[i] =
                     new ShuffleDescriptorAndIndex(
                             new UnknownShuffleDescriptor(
                                     new ResultPartitionID(
                                             partitionIds[2], createExecutionAttemptId())),
-                            2)
-                };
+                            i);
+        }
 
         InputGateDeploymentDescriptor gateDesc =
                 new InputGateDeploymentDescriptor(

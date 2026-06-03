@@ -18,12 +18,12 @@
 
 package org.apache.flink.runtime.jobmaster.slotpool;
 
+import org.apache.flink.api.common.ApplicationID;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.executiongraph.utils.SimpleAckingTaskManagerGateway;
 import org.apache.flink.runtime.jobmaster.JobMasterId;
-import org.apache.flink.runtime.jobmaster.SlotRequestId;
 import org.apache.flink.runtime.taskexecutor.slot.SlotOffer;
 import org.apache.flink.runtime.taskmanager.LocalTaskManagerLocation;
 import org.apache.flink.testutils.TestingUtils;
@@ -47,20 +47,22 @@ import static org.assertj.core.api.Assertions.assertThat;
 class DeclarativeSlotPoolBridgePreferredAllocationsTest {
 
     @ValueSource(booleans = {true, false})
-    @ParameterizedTest(name = "slotBatchAllocatable: {0}")
-    void testDeclarativeSlotPoolTakesPreferredAllocationsIntoAccount(boolean slotBatchAllocatable)
+    @ParameterizedTest(name = "deferSlotAllocation: {0}")
+    void testDeclarativeSlotPoolTakesPreferredAllocationsIntoAccount(boolean deferSlotAllocation)
             throws Exception {
         final DeclarativeSlotPoolBridge declarativeSlotPoolBridge =
                 new DeclarativeSlotPoolBridge(
                         new JobID(),
+                        new ApplicationID(),
                         new DefaultDeclarativeSlotPoolFactory(),
                         SystemClock.getInstance(),
                         TestingUtils.infiniteDuration(),
                         TestingUtils.infiniteDuration(),
                         TestingUtils.infiniteDuration(),
-                        PreferredAllocationRequestSlotMatchingStrategy.INSTANCE,
+                        PreferredAllocationRequestSlotMatchingStrategy.create(
+                                SimpleRequestSlotMatchingStrategy.INSTANCE),
                         Duration.ZERO,
-                        slotBatchAllocatable,
+                        deferSlotAllocation,
                         forMainThread());
 
         declarativeSlotPoolBridge.start(JobMasterId.generate(), "localhost");
@@ -100,6 +102,6 @@ class DeclarativeSlotPoolBridgePreferredAllocationsTest {
             DeclarativeSlotPoolBridge declarativeSlotPoolBridge,
             Set<AllocationID> preferredAllocations) {
         return declarativeSlotPoolBridge.requestNewAllocatedSlot(
-                new SlotRequestId(), ResourceProfile.UNKNOWN, preferredAllocations, null);
+                PhysicalSlotRequestUtils.normalRequest(preferredAllocations), null);
     }
 }

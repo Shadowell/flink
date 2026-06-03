@@ -52,6 +52,7 @@ import java.util.concurrent.Executors;
 
 import static org.apache.flink.kubernetes.utils.Constants.ENV_FLINK_POD_IP_ADDRESS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatNoException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Tests for the {@link KubernetesClusterDescriptor}. */
@@ -158,6 +159,21 @@ class KubernetesClusterDescriptorTest extends KubernetesClientTestBase {
     }
 
     @Test
+    void testDeployApplicationClusterWithoutJar() {
+        flinkConfig.set(DeploymentOptions.TARGET, KubernetesDeploymentTarget.APPLICATION.getName());
+        try {
+            descriptor.deployApplicationCluster(clusterSpecification, appConfig);
+        } catch (Exception ignored) {
+        }
+
+        mockExpectedServiceFromServerSide(loadBalancerSvc);
+        final ClusterClient<String> clusterClient =
+                descriptor.retrieve(CLUSTER_ID).getClusterClient();
+        checkClusterClient(clusterClient);
+        checkUpdatedConfigAndResourceSetting();
+    }
+
+    @Test
     void testDeployApplicationClusterWithClusterAlreadyExists() {
         flinkConfig.set(
                 PipelineOptions.JARS, Collections.singletonList("local:///path/of/user.jar"));
@@ -202,7 +218,15 @@ class KubernetesClusterDescriptorTest extends KubernetesClientTestBase {
                         cause ->
                                 assertThat(cause)
                                         .isInstanceOf(IllegalArgumentException.class)
-                                        .hasMessageContaining("Should only have one jar"));
+                                        .hasMessageContaining("Should only have at most one jar"));
+    }
+
+    @Test
+    void testDeployApplicationClusterWithNoJar() {
+        flinkConfig.set(DeploymentOptions.TARGET, KubernetesDeploymentTarget.APPLICATION.getName());
+        assertThatNoException()
+                .isThrownBy(
+                        () -> descriptor.deployApplicationCluster(clusterSpecification, appConfig));
     }
 
     @Test

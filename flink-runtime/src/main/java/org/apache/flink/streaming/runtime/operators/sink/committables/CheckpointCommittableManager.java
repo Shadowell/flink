@@ -19,18 +19,71 @@
 package org.apache.flink.streaming.runtime.operators.sink.committables;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.api.connector.sink2.Committer;
+
+import java.io.IOException;
+import java.util.Collection;
 
 /**
- * This interface adds checkpoint meta information to the committable.
+ * A {@code CheckpointCommittableManager} collects committables for one checkpoint across
+ * potentially multiple upstream subtasks.
+ *
+ * <p>While it collects committables from multiple upstream subtasks, it belongs to exactly one
+ * committer subtask.
+ *
+ * <p>Each upstream subtask of this particular checkpoint is represented by a {@link
+ * SubtaskCommittableManager}.
  *
  * @param <CommT> type of the committable
  */
 @Internal
-public interface CheckpointCommittableManager<CommT> extends CommittableManager<CommT> {
+public interface CheckpointCommittableManager<CommT> {
     /**
-     * Returns the checkpoint id in which the committable was created.
+     * Returns the checkpoint id in which the committables were created.
      *
      * @return checkpoint id
      */
     long getCheckpointId();
+
+    /** Returns the number of upstream subtasks belonging to the checkpoint. */
+    int getNumberOfSubtasks();
+
+    boolean isFinished();
+
+    /**
+     * Returns true if all committables of all upstream subtasks arrived, which is only guaranteed
+     * to happen if the DOP of the caller is 1.
+     */
+    boolean hasGloballyReceivedAll();
+
+    /**
+     * Commits all due committables if all respective committables of the specific subtask and
+     * checkpoint have been received.
+     *
+     * @param committer used to commit to the external system
+     * @param maxRetries
+     */
+    void commit(Committer<CommT> committer, int maxRetries)
+            throws IOException, InterruptedException;
+
+    /**
+     * Returns the number of committables that have been successfully committed; that is, the
+     * corresponding {@link org.apache.flink.api.connector.sink2.Committer.CommitRequest} was not
+     * used to signal an error of any kind (retryable or not).
+     *
+     * @return number of successful committables
+     */
+    Collection<CommT> getSuccessfulCommittables();
+
+    /**
+     * Returns the number of committables that have failed with a known error. By the current
+     * semantics of {@link
+     * org.apache.flink.api.connector.sink2.Committer.CommitRequest#signalFailedWithKnownReason(Throwable)}
+     * discards the committable but proceeds processing. The returned number should be emitted
+     * downstream in a {@link org.apache.flink.streaming.api.connector.sink2.CommittableSummary},
+     * such that downstream can assess if all committables have been processed.
+     *
+     * @return number of failed committables
+     */
+    int getNumFailed();
 }

@@ -24,8 +24,7 @@ import org.apache.flink.api.common.typeinfo.SqlTimeTypeInfo.{DATE, TIME, TIMESTA
 import org.apache.flink.api.common.typeinfo.Types
 import org.apache.flink.api.common.typeinfo.Types.INSTANT
 import org.apache.flink.api.java.typeutils._
-import org.apache.flink.api.scala._
-import org.apache.flink.table.api.{DataTypes, TableSchema, ValidationException}
+import org.apache.flink.table.api.{createTypeInformation, DataTypes, ValidationException}
 import org.apache.flink.table.api.config.ExecutionConfigOptions
 import org.apache.flink.table.api.config.ExecutionConfigOptions.LegacyCastBehaviour
 import org.apache.flink.table.catalog.CatalogDatabaseImpl
@@ -33,13 +32,12 @@ import org.apache.flink.table.data.{DecimalDataUtils, TimestampData}
 import org.apache.flink.table.data.util.DataFormatConverters.LocalDateConverter
 import org.apache.flink.table.planner.expressions.utils.{RichFunc1, RichFunc2, RichFunc3, SplitUDF}
 import org.apache.flink.table.planner.factories.TestValuesTableFactory
-import org.apache.flink.table.planner.plan.rules.physical.batch.BatchPhysicalSortRule
 import org.apache.flink.table.planner.runtime.utils.{BatchTableEnvUtil, BatchTestBase, TestData, UserDefinedFunctionTestUtils}
 import org.apache.flink.table.planner.runtime.utils.BatchTableEnvUtil.parseFieldNames
 import org.apache.flink.table.planner.runtime.utils.BatchTestBase.row
 import org.apache.flink.table.planner.runtime.utils.TestData._
 import org.apache.flink.table.planner.runtime.utils.UserDefinedFunctionTestUtils._
-import org.apache.flink.table.planner.utils.{DateTimeTestUtil, TestLegacyFilterableTableSource}
+import org.apache.flink.table.planner.utils.DateTimeTestUtil
 import org.apache.flink.table.planner.utils.DateTimeTestUtil._
 import org.apache.flink.table.utils.DateTimeUtils.toLocalDateTime
 import org.apache.flink.types.Row
@@ -1579,22 +1577,19 @@ class CalcITCase extends BatchTestBase {
       nullablesOfNullData3
     )
     tableConfig.set(ExecutionConfigOptions.TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM, Int.box(1))
-    tableConfig.set(BatchPhysicalSortRule.TABLE_EXEC_RANGE_SORT_ENABLED, Boolean.box(true))
 
-    assertThatThrownBy(
-      () =>
-        checkResult(
-          "select * from BinaryT order by c",
-          nullData3
-            .sortBy((x: Row) => x.getField(2).asInstanceOf[String])
-            .map(
-              r =>
-                row(
-                  r.getField(0),
-                  r.getField(1),
-                  r.getField(2).toString.getBytes(StandardCharsets.UTF_8))),
-          isSorted = true
-        )).isInstanceOf(classOf[UnsupportedOperationException])
+    checkResult(
+      "select * from BinaryT order by c",
+      nullData3
+        .sortBy((x: Row) => x.getField(2).asInstanceOf[String])
+        .map(
+          r =>
+            row(
+              r.getField(0),
+              r.getField(1),
+              r.getField(2).toString.getBytes(StandardCharsets.UTF_8))),
+      isSorted = true
+    )
   }
 
   @Test
@@ -1800,12 +1795,6 @@ class CalcITCase extends BatchTestBase {
 
   @Test
   def testFilterPushDownWithInterval(): Unit = {
-    val schema = TableSchema
-      .builder()
-      .field("a", DataTypes.TIMESTAMP)
-      .field("b", DataTypes.TIMESTAMP)
-      .build()
-
     val data = List(
       row(localDateTime("2021-03-30 10:00:00"), localDateTime("2021-03-30 14:59:59")),
       row(localDateTime("2021-03-30 10:00:00"), localDateTime("2021-03-30 15:00:00")),
@@ -1815,13 +1804,18 @@ class CalcITCase extends BatchTestBase {
       row(localDateTime("2021-03-30 10:00:00"), localDateTime("2023-03-30 10:00:01"))
     )
 
-    TestLegacyFilterableTableSource.createTemporaryTable(
-      tEnv,
-      schema,
-      "myTable",
-      isBounded = true,
-      data,
-      Set("a", "b"))
+    val dataId = TestValuesTableFactory.registerData(data)
+    tEnv.executeSql(s"""
+                       |create table myTable(
+                       |  a TIMESTAMP(3),
+                       |  b TIMESTAMP(3)
+                       |) with (
+                       |  'connector' = 'values',
+                       |  'data-id' = '$dataId',
+                       |  'bounded' = 'true',
+                       |  'filterable-fields' = 'a,b'
+                       |)
+                       |""".stripMargin)
 
     checkResult(
       "SELECT * FROM myTable WHERE TIMESTAMPADD(HOUR, 5, a) >= b",
@@ -2338,5 +2332,55 @@ class CalcITCase extends BatchTestBase {
   def testIfNull(): Unit = {
     // reported in FLINK-35832
     checkResult("SELECT IFNULL(JSON_VALUE('{\"a\":16}','$.a'),'0')", Seq(row("16")));
+  }
+
+  @Test
+  def testRawHash(): Unit = {
+    // reported in FLINK-38135
+    tEnv.createTemporarySystemFunction("RawOutUDF", RawOutUDF)
+    checkResult(
+      s"""
+         |SELECT str, COUNT(1) FROM (
+         |  SELECT RawOutUDF(id) AS str FROM (VALUES (0), (1), (2), (2), (1), (2)) AS t(id)
+         |)
+         |GROUP BY str
+         |""".stripMargin,
+      Seq(row(0, 1), row(1, 2), row(2, 3))
+    );
+  }
+
+  @Test
+  def testDateColumnInListWithStringLiterals(): Unit = {
+    val data = Seq(
+      row(localDate("2000-06-30"), "a"),
+      row(localDate("2000-09-27"), "b"),
+      row(localDate("2000-11-17"), "c"),
+      row(localDate("2001-01-01"), "d"))
+    registerCollection(
+      "DateTable",
+      data,
+      new RowTypeInfo(LOCAL_DATE, STRING_TYPE_INFO),
+      "d_date, val")
+
+    checkResult(
+      "SELECT val FROM DateTable WHERE d_date IN ('2000-06-30', '2000-09-27', '2000-11-17')",
+      Seq(row("a"), row("b"), row("c")))
+  }
+
+  @Test
+  def testTimestampColumnInListWithStringLiterals(): Unit = {
+    val data = Seq(
+      row(localDateTime("2000-06-30 12:00:00"), "a"),
+      row(localDateTime("2000-09-27 12:00:00"), "b"),
+      row(localDateTime("2001-01-01 12:00:00"), "c"))
+    registerCollection(
+      "TimestampTable",
+      data,
+      new RowTypeInfo(LOCAL_DATE_TIME, STRING_TYPE_INFO),
+      "ts, val")
+
+    checkResult(
+      "SELECT val FROM TimestampTable WHERE ts IN ('2000-06-30 12:00:00', '2000-09-27 12:00:00')",
+      Seq(row("a"), row("b")))
   }
 }

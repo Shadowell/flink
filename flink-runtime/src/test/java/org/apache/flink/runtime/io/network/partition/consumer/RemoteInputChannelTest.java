@@ -21,6 +21,7 @@ package org.apache.flink.runtime.io.network.partition.consumer;
 import org.apache.flink.core.memory.MemorySegment;
 import org.apache.flink.core.memory.MemorySegmentFactory;
 import org.apache.flink.core.testutils.OneShotLatch;
+import org.apache.flink.metrics.SimpleCounter;
 import org.apache.flink.runtime.checkpoint.CheckpointException;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.checkpoint.CheckpointType;
@@ -63,7 +64,7 @@ import org.apache.flink.testutils.executor.TestExecutorExtension;
 import org.apache.flink.util.CloseableIterator;
 import org.apache.flink.util.ExceptionUtils;
 
-import org.apache.flink.shaded.guava32.com.google.common.collect.Lists;
+import org.apache.flink.shaded.guava33.com.google.common.collect.Lists;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
@@ -101,7 +102,7 @@ import static org.apache.flink.runtime.state.CheckpointStorageLocationReference.
 import static org.apache.flink.util.Preconditions.checkNotNull;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Matchers.any;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
@@ -2071,6 +2072,51 @@ class RemoteInputChannelTest {
                     .isEqualTo(subpartitionIndexSet);
             assertThat(delayMs).isEqualTo(expectedDelayMs);
         }
+    }
+
+    @Test
+    void testGetNextBufferWithMigratedRecoveredBuffers() throws Exception {
+        // given: RemoteInputChannel with recovered buffers migrated from RecoveredInputChannel
+        SingleInputGate inputGate = createSingleInputGate(1);
+
+        ArrayDeque<Buffer> recoveredBuffers = new ArrayDeque<>();
+        recoveredBuffers.add(TestBufferFactory.createBuffer(10));
+        recoveredBuffers.add(TestBufferFactory.createBuffer(20));
+
+        ConnectionID connectionId =
+                new ConnectionID(
+                        org.apache.flink.runtime.clusterframework.types.ResourceID.generate(),
+                        new java.net.InetSocketAddress("localhost", 0),
+                        0);
+        RemoteInputChannel channel =
+                new RemoteInputChannel(
+                        inputGate,
+                        0,
+                        new ResultPartitionID(),
+                        new ResultSubpartitionIndexSet(0),
+                        connectionId,
+                        InputChannelTestUtils.mockConnectionManagerWithPartitionRequestClient(
+                                mock(PartitionRequestClient.class)),
+                        0,
+                        0,
+                        0,
+                        2,
+                        new SimpleCounter(),
+                        new SimpleCounter(),
+                        ChannelStateWriter.NO_OP,
+                        recoveredBuffers);
+
+        inputGate.setInputChannels(channel);
+
+        // then: Can read recovered buffers even before requestSubpartitions()
+        Optional<BufferAndAvailability> first = channel.getNextBuffer();
+        assertThat(first).isPresent();
+        assertThat(first.get().buffer().getSize()).isEqualTo(10);
+        assertThat(first.get().moreAvailable()).isTrue();
+
+        Optional<BufferAndAvailability> second = channel.getNextBuffer();
+        assertThat(second).isPresent();
+        assertThat(second.get().buffer().getSize()).isEqualTo(20);
     }
 
     private static final class TestBufferPool extends NoOpBufferPool {

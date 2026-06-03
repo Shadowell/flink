@@ -17,7 +17,7 @@
  */
 package org.apache.flink.table.planner.runtime.stream.table
 
-import org.apache.flink.api.scala._
+import org.apache.flink.api.common.eventtime._
 import org.apache.flink.core.testutils.EachCallbackWrapper
 import org.apache.flink.table.api._
 import org.apache.flink.table.api.bridge.scala._
@@ -25,8 +25,8 @@ import org.apache.flink.table.api.config.ExecutionConfigOptions
 import org.apache.flink.table.api.config.ExecutionConfigOptions.RowtimeInserter
 import org.apache.flink.table.planner.factories.TestValuesTableFactory
 import org.apache.flink.table.planner.factories.TestValuesTableFactory.changelogRow
+import org.apache.flink.table.planner.runtime.utils.{StreamingEnvUtil, StreamingTestBase}
 import org.apache.flink.table.planner.runtime.utils.BatchTestBase.row
-import org.apache.flink.table.planner.runtime.utils.StreamingTestBase
 import org.apache.flink.table.planner.runtime.utils.TestData._
 import org.apache.flink.table.utils.LegacyRowExtension
 
@@ -47,9 +47,20 @@ class TableSinkITCase extends StreamingTestBase {
 
   @Test
   def testAppendSinkOnAppendTable(): Unit = {
-    val t = env
-      .fromCollection(tupleData3)
-      .assignAscendingTimestamps(_._1.toLong)
+    val t = StreamingEnvUtil
+      .fromCollection(env, tupleData3)
+      .assignTimestampsAndWatermarks(new WatermarkStrategy[(Int, Long, String)]() {
+
+        override def createWatermarkGenerator(context: WatermarkGeneratorSupplier.Context)
+            : WatermarkGenerator[(Int, Long, String)] = {
+          new AscendingTimestampsWatermarks[(Int, Long, String)]
+        }
+
+        override def createTimestampAssigner(
+            context: TimestampAssignerSupplier.Context): TimestampAssigner[(Int, Long, String)] = {
+          (e: (Int, Long, String), _: Long) => e._1.toLong
+        }
+      })
       .toTable(tEnv, 'id, 'num, 'text, 'rowtime.rowtime)
 
     tEnv.executeSql(s"""
@@ -82,8 +93,8 @@ class TableSinkITCase extends StreamingTestBase {
 
   @Test
   def testInsertWithTargetColumnsAndSqlHint(): Unit = {
-    val t = env
-      .fromCollection(smallTupleData3)
+    val t = StreamingEnvUtil
+      .fromCollection(env, smallTupleData3)
       .toTable(tEnv, 'id, 'num, 'text)
     tEnv.createTemporaryView("src", t)
 
@@ -109,8 +120,8 @@ class TableSinkITCase extends StreamingTestBase {
 
   @Test
   def testAppendSinkWithNestedRow(): Unit = {
-    val t = env
-      .fromCollection(smallTupleData3)
+    val t = StreamingEnvUtil
+      .fromCollection(env, smallTupleData3)
       .toTable(tEnv, 'id, 'num, 'text)
     tEnv.createTemporaryView("src", t)
 
@@ -132,8 +143,8 @@ class TableSinkITCase extends StreamingTestBase {
 
   @Test
   def testAppendSinkOnAppendTableForInnerJoin(): Unit = {
-    val ds1 = env.fromCollection(smallTupleData3).toTable(tEnv, 'a, 'b, 'c)
-    val ds2 = env.fromCollection(tupleData5).toTable(tEnv, 'd, 'e, 'f, 'g, 'h)
+    val ds1 = StreamingEnvUtil.fromCollection(env, smallTupleData3).toTable(tEnv, 'a, 'b, 'c)
+    val ds2 = StreamingEnvUtil.fromCollection(env, tupleData5).toTable(tEnv, 'd, 'e, 'f, 'g, 'h)
 
     tEnv.executeSql(s"""
                        |CREATE TABLE appendSink (
@@ -158,9 +169,20 @@ class TableSinkITCase extends StreamingTestBase {
 
   @Test
   def testRetractSinkOnUpdatingTable(): Unit = {
-    val t = env
-      .fromCollection(tupleData3)
-      .assignAscendingTimestamps(_._1.toLong)
+    val t = StreamingEnvUtil
+      .fromCollection(env, tupleData3)
+      .assignTimestampsAndWatermarks(new WatermarkStrategy[(Int, Long, String)]() {
+
+        override def createWatermarkGenerator(context: WatermarkGeneratorSupplier.Context)
+            : WatermarkGenerator[(Int, Long, String)] = {
+          new AscendingTimestampsWatermarks[(Int, Long, String)]
+        }
+
+        override def createTimestampAssigner(
+            context: TimestampAssignerSupplier.Context): TimestampAssigner[(Int, Long, String)] = {
+          (e: (Int, Long, String), _: Long) => e._1.toLong
+        }
+      })
       .toTable(tEnv, 'id, 'num, 'text)
 
     tEnv.executeSql(s"""
@@ -187,9 +209,20 @@ class TableSinkITCase extends StreamingTestBase {
 
   @Test
   def testRetractSinkOnAppendTable(): Unit = {
-    val t = env
-      .fromCollection(tupleData3)
-      .assignAscendingTimestamps(_._1.toLong)
+    val t = StreamingEnvUtil
+      .fromCollection(env, tupleData3)
+      .assignTimestampsAndWatermarks(new WatermarkStrategy[(Int, Long, String)]() {
+
+        override def createWatermarkGenerator(context: WatermarkGeneratorSupplier.Context)
+            : WatermarkGenerator[(Int, Long, String)] = {
+          new AscendingTimestampsWatermarks[(Int, Long, String)]
+        }
+
+        override def createTimestampAssigner(
+            context: TimestampAssignerSupplier.Context): TimestampAssigner[(Int, Long, String)] = {
+          (e: (Int, Long, String), _: Long) => e._1.toLong
+        }
+      })
       .toTable(tEnv, 'id, 'num, 'text, 'rowtime.rowtime)
 
     tEnv.executeSql(s"""
@@ -225,9 +258,20 @@ class TableSinkITCase extends StreamingTestBase {
 
   @Test
   def testUpsertSinkOnNestedAggregation(): Unit = {
-    val t = env
-      .fromCollection(tupleData3)
-      .assignAscendingTimestamps(_._1.toLong)
+    val t = StreamingEnvUtil
+      .fromCollection(env, tupleData3)
+      .assignTimestampsAndWatermarks(new WatermarkStrategy[(Int, Long, String)]() {
+
+        override def createWatermarkGenerator(context: WatermarkGeneratorSupplier.Context)
+            : WatermarkGenerator[(Int, Long, String)] = {
+          new AscendingTimestampsWatermarks[(Int, Long, String)]
+        }
+
+        override def createTimestampAssigner(
+            context: TimestampAssignerSupplier.Context): TimestampAssigner[(Int, Long, String)] = {
+          (e: (Int, Long, String), _: Long) => e._1.toLong
+        }
+      })
       .toTable(tEnv, 'id, 'num, 'text)
 
     tEnv.executeSql(s"""
@@ -249,7 +293,7 @@ class TableSinkITCase extends StreamingTestBase {
       .select('len, 'id.count.as('count), 'cTrue)
       .groupBy('count, 'cTrue)
       .select('count, 'len.count.as('lencnt), 'cTrue)
-    table.executeInsert("upsertSink").await()
+    table.executeInsert("upsertSink", InsertConflictStrategy.deduplicate()).await()
 
     val rawResult = TestValuesTableFactory.getRawResultsAsStrings("upsertSink")
     assertThat(rawResult.exists(_.startsWith("-D("))).isTrue
@@ -261,9 +305,20 @@ class TableSinkITCase extends StreamingTestBase {
 
   @Test
   def testUpsertSinkOnAppendingTable(): Unit = {
-    val t = env
-      .fromCollection(tupleData3)
-      .assignAscendingTimestamps(_._1.toLong)
+    val t = StreamingEnvUtil
+      .fromCollection(env, tupleData3)
+      .assignTimestampsAndWatermarks(new WatermarkStrategy[(Int, Long, String)]() {
+
+        override def createWatermarkGenerator(context: WatermarkGeneratorSupplier.Context)
+            : WatermarkGenerator[(Int, Long, String)] = {
+          new AscendingTimestampsWatermarks[(Int, Long, String)]
+        }
+
+        override def createTimestampAssigner(
+            context: TimestampAssignerSupplier.Context): TimestampAssigner[(Int, Long, String)] = {
+          (e: (Int, Long, String), _: Long) => e._1.toLong
+        }
+      })
       .toTable(tEnv, 'id, 'num, 'text, 'rowtime.rowtime)
 
     tEnv.executeSql(s"""
@@ -283,7 +338,7 @@ class TableSinkITCase extends StreamingTestBase {
       .groupBy('w, 'num)
       // test query field name is different with registered sink field name
       .select('num, 'w.end.as('window_end), 'id.count.as('icnt))
-    table.executeInsert("upsertSink").await()
+    table.executeInsert("upsertSink", InsertConflictStrategy.deduplicate()).await()
 
     val rawResult = TestValuesTableFactory.getRawResultsAsStrings("upsertSink")
     assertThat(rawResult.exists(_.startsWith("-"))).isFalse // maybe -D or -U
@@ -306,9 +361,20 @@ class TableSinkITCase extends StreamingTestBase {
 
   @Test
   def testUpsertSinkOnAppendingTableWithoutFullKey1(): Unit = {
-    val t = env
-      .fromCollection(tupleData3)
-      .assignAscendingTimestamps(_._1.toLong)
+    val t = StreamingEnvUtil
+      .fromCollection(env, tupleData3)
+      .assignTimestampsAndWatermarks(new WatermarkStrategy[(Int, Long, String)]() {
+
+        override def createWatermarkGenerator(context: WatermarkGeneratorSupplier.Context)
+            : WatermarkGenerator[(Int, Long, String)] = {
+          new AscendingTimestampsWatermarks[(Int, Long, String)]
+        }
+
+        override def createTimestampAssigner(
+            context: TimestampAssignerSupplier.Context): TimestampAssigner[(Int, Long, String)] = {
+          (e: (Int, Long, String), _: Long) => e._1.toLong
+        }
+      })
       .toTable(tEnv, 'id, 'num, 'text, 'rowtime.rowtime)
 
     tEnv.executeSql(s"""
@@ -326,7 +392,7 @@ class TableSinkITCase extends StreamingTestBase {
       .window(Tumble.over(5.millis).on('rowtime).as('w))
       .groupBy('w, 'num)
       .select('w.end.as('wend), 'id.count.as('cnt))
-    table.executeInsert("upsertSink").await()
+    table.executeInsert("upsertSink", InsertConflictStrategy.deduplicate()).await()
 
     val rawResult = TestValuesTableFactory.getRawResultsAsStrings("upsertSink")
     assertThat(rawResult.exists(_.startsWith("-"))).isFalse // maybe -D or -U
@@ -348,9 +414,20 @@ class TableSinkITCase extends StreamingTestBase {
 
   @Test
   def testUpsertSinkOnAppendingTableWithoutFullKey2(): Unit = {
-    val t = env
-      .fromCollection(tupleData3)
-      .assignAscendingTimestamps(_._1.toLong)
+    val t = StreamingEnvUtil
+      .fromCollection(env, tupleData3)
+      .assignTimestampsAndWatermarks(new WatermarkStrategy[(Int, Long, String)]() {
+
+        override def createWatermarkGenerator(context: WatermarkGeneratorSupplier.Context)
+            : WatermarkGenerator[(Int, Long, String)] = {
+          new AscendingTimestampsWatermarks[(Int, Long, String)]
+        }
+
+        override def createTimestampAssigner(
+            context: TimestampAssignerSupplier.Context): TimestampAssigner[(Int, Long, String)] = {
+          (e: (Int, Long, String), _: Long) => e._1.toLong
+        }
+      })
       .toTable(tEnv, 'id, 'num, 'text, 'rowtime.rowtime)
 
     tEnv.executeSql(s"""
@@ -368,7 +445,7 @@ class TableSinkITCase extends StreamingTestBase {
       .window(Tumble.over(5.millis).on('rowtime).as('w))
       .groupBy('w, 'num)
       .select('num, 'id.count.as('cnt))
-    table.executeInsert("upsertSink").await()
+    table.executeInsert("upsertSink", InsertConflictStrategy.deduplicate()).await()
 
     val rawResult = TestValuesTableFactory.getRawResultsAsStrings("upsertSink")
     assertThat(rawResult.exists(_.startsWith("-"))).isFalse // maybe -D or -U
@@ -389,9 +466,20 @@ class TableSinkITCase extends StreamingTestBase {
 
   @Test
   def testUpsertSinkWithFilter(): Unit = {
-    val t = env
-      .fromCollection(tupleData3)
-      .assignAscendingTimestamps(_._1.toLong)
+    val t = StreamingEnvUtil
+      .fromCollection(env, tupleData3)
+      .assignTimestampsAndWatermarks(new WatermarkStrategy[(Int, Long, String)]() {
+
+        override def createWatermarkGenerator(context: WatermarkGeneratorSupplier.Context)
+            : WatermarkGenerator[(Int, Long, String)] = {
+          new AscendingTimestampsWatermarks[(Int, Long, String)]
+        }
+
+        override def createTimestampAssigner(
+            context: TimestampAssignerSupplier.Context): TimestampAssigner[(Int, Long, String)] = {
+          (e: (Int, Long, String), _: Long) => e._1.toLong
+        }
+      })
       .toTable(tEnv, 'id, 'num, 'text)
 
     tEnv.executeSql(s"""
@@ -417,7 +505,7 @@ class TableSinkITCase extends StreamingTestBase {
       .groupBy('num)
       .select('num, 'id.count.as('cnt))
       .where('cnt <= 3)
-    table.executeInsert("upsertSink").await()
+    table.executeInsert("upsertSink", InsertConflictStrategy.deduplicate()).await()
 
     val result = TestValuesTableFactory.getResultsAsStrings("upsertSink")
     val expected = List("1,1", "2,2", "3,3")
@@ -426,9 +514,20 @@ class TableSinkITCase extends StreamingTestBase {
 
   @Test
   def testMultiRowtimeWithRowtimeInserter(): Unit = {
-    val t = env
-      .fromCollection(tupleData3)
-      .assignAscendingTimestamps(_._1.toLong)
+    val t = StreamingEnvUtil
+      .fromCollection(env, tupleData3)
+      .assignTimestampsAndWatermarks(new WatermarkStrategy[(Int, Long, String)]() {
+
+        override def createWatermarkGenerator(context: WatermarkGeneratorSupplier.Context)
+            : WatermarkGenerator[(Int, Long, String)] = {
+          new AscendingTimestampsWatermarks[(Int, Long, String)]
+        }
+
+        override def createTimestampAssigner(
+            context: TimestampAssignerSupplier.Context): TimestampAssigner[(Int, Long, String)] = {
+          (e: (Int, Long, String), _: Long) => e._1.toLong
+        }
+      })
       .toTable(tEnv, 'id, 'num, 'text, 'rowtime.rowtime)
 
     tEnv.executeSql(s"""
@@ -456,9 +555,20 @@ class TableSinkITCase extends StreamingTestBase {
 
   @Test
   def testMultiRowtimeWithoutTimestampInserter(): Unit = {
-    val t = env
-      .fromCollection(tupleData3)
-      .assignAscendingTimestamps(_._1.toLong)
+    val t = StreamingEnvUtil
+      .fromCollection(env, tupleData3)
+      .assignTimestampsAndWatermarks(new WatermarkStrategy[(Int, Long, String)]() {
+
+        override def createWatermarkGenerator(context: WatermarkGeneratorSupplier.Context)
+            : WatermarkGenerator[(Int, Long, String)] = {
+          new AscendingTimestampsWatermarks[(Int, Long, String)]
+        }
+
+        override def createTimestampAssigner(
+            context: TimestampAssignerSupplier.Context): TimestampAssigner[(Int, Long, String)] = {
+          (e: (Int, Long, String), _: Long) => e._1.toLong
+        }
+      })
       .toTable(tEnv, 'id, 'num, 'text, 'rowtime.rowtime)
 
     // disable inserter
@@ -506,8 +616,8 @@ class TableSinkITCase extends StreamingTestBase {
                        |)
                        |""".stripMargin)
 
-    val table = env
-      .fromCollection(tupleData3)
+    val table = StreamingEnvUtil
+      .fromCollection(env, tupleData3)
       .toTable(tEnv, 'a, 'b, 'c)
       .where('a > 20)
       .select("12345", 55.cast(DataTypes.DECIMAL(10, 0)), "12345".cast(DataTypes.CHAR(5)))
@@ -532,8 +642,8 @@ class TableSinkITCase extends StreamingTestBase {
                        |)
                        |""".stripMargin)
 
-    val table = env
-      .fromCollection(tupleData3)
+    val table = StreamingEnvUtil
+      .fromCollection(env, tupleData3)
       .toTable(tEnv, 'a, 'b, 'c)
       .where('a > 20)
       .select("12345", 55.cast(DataTypes.DECIMAL(10, 0)), "12345".cast(DataTypes.CHAR(5)))
@@ -753,7 +863,8 @@ class TableSinkITCase extends StreamingTestBase {
                        |""".stripMargin)
 
     tEnv
-      .executeSql(s"INSERT INTO $sinkTableWithPkName SELECT * FROM $sourceTableName")
+      .executeSql(
+        s"INSERT INTO $sinkTableWithPkName SELECT * FROM $sourceTableName ON CONFLICT DO DEDUPLICATE")
       .await()
   }
 
@@ -770,7 +881,7 @@ class TableSinkITCase extends StreamingTestBase {
                        |)
                        |""".stripMargin)
 
-    val t = env.fromCollection(tupleData2).toTable(tEnv, 'x, 'y)
+    val t = StreamingEnvUtil.fromCollection(env, tupleData2).toTable(tEnv, 'x, 'y)
     tEnv.createTemporaryView("MyTable", t)
 
     tEnv
@@ -801,7 +912,7 @@ class TableSinkITCase extends StreamingTestBase {
                        |)
                        |""".stripMargin)
 
-    val t = env.fromCollection(tupleData2).toTable(tEnv, 'x, 'y)
+    val t = StreamingEnvUtil.fromCollection(env, tupleData2).toTable(tEnv, 'x, 'y)
     tEnv.createTemporaryView("MyTable", t)
 
     tEnv
@@ -837,7 +948,7 @@ class TableSinkITCase extends StreamingTestBase {
                        |)
                        |""".stripMargin)
 
-    val t = env.fromCollection(tupleData2).toTable(tEnv, 'x, 'y)
+    val t = StreamingEnvUtil.fromCollection(env, tupleData2).toTable(tEnv, 'x, 'y)
     tEnv.createTemporaryView("MyTable", t)
 
     tEnv
@@ -869,7 +980,7 @@ class TableSinkITCase extends StreamingTestBase {
                        |)
                        |""".stripMargin)
 
-    val t = env.fromCollection(tupleData2).toTable(tEnv, 'x, 'y)
+    val t = StreamingEnvUtil.fromCollection(env, tupleData2).toTable(tEnv, 'x, 'y)
     tEnv.createTemporaryView("MyTable", t)
 
     tEnv
@@ -908,7 +1019,7 @@ class TableSinkITCase extends StreamingTestBase {
                        |)
                        |""".stripMargin)
 
-    val t = env.fromCollection(tupleData2).toTable(tEnv, 'x, 'y)
+    val t = StreamingEnvUtil.fromCollection(env, tupleData2).toTable(tEnv, 'x, 'y)
     tEnv.createTemporaryView("MyTable", t)
 
     tEnv
@@ -945,7 +1056,7 @@ class TableSinkITCase extends StreamingTestBase {
                        |)
                        |""".stripMargin)
 
-    val t = env.fromCollection(tupleData2).toTable(tEnv, 'x, 'y)
+    val t = StreamingEnvUtil.fromCollection(env, tupleData2).toTable(tEnv, 'x, 'y)
     tEnv.createTemporaryView("MyTable", t)
 
     tEnv
@@ -981,7 +1092,7 @@ class TableSinkITCase extends StreamingTestBase {
                        |)
                        |""".stripMargin)
 
-    val t = env.fromCollection(tupleData2).toTable(tEnv, 'x, 'y)
+    val t = StreamingEnvUtil.fromCollection(env, tupleData2).toTable(tEnv, 'x, 'y)
     tEnv.createTemporaryView("MyTable", t)
 
     tEnv
@@ -1017,7 +1128,7 @@ class TableSinkITCase extends StreamingTestBase {
                        |)
                        |""".stripMargin)
 
-    val t = env.fromCollection(tupleData2).toTable(tEnv, 'x, 'y)
+    val t = StreamingEnvUtil.fromCollection(env, tupleData2).toTable(tEnv, 'x, 'y)
     tEnv.createTemporaryView("MyTable", t)
 
     tEnv
@@ -1054,7 +1165,7 @@ class TableSinkITCase extends StreamingTestBase {
                        |)
                        |""".stripMargin)
 
-    val t = env.fromCollection(tupleData2).toTable(tEnv, 'x, 'y)
+    val t = StreamingEnvUtil.fromCollection(env, tupleData2).toTable(tEnv, 'x, 'y)
     tEnv.createTemporaryView("MyTable", t)
 
     tEnv
@@ -1090,7 +1201,7 @@ class TableSinkITCase extends StreamingTestBase {
                        |)
                        |""".stripMargin)
 
-    val t = env.fromCollection(tupleData2).toTable(tEnv, 'x, 'y)
+    val t = StreamingEnvUtil.fromCollection(env, tupleData2).toTable(tEnv, 'x, 'y)
     tEnv.createTemporaryView("MyTable", t)
 
     tEnv
@@ -1126,7 +1237,7 @@ class TableSinkITCase extends StreamingTestBase {
                        |)
                        |""".stripMargin)
 
-    val t = env.fromCollection(tupleData2).toTable(tEnv, 'x, 'y)
+    val t = StreamingEnvUtil.fromCollection(env, tupleData2).toTable(tEnv, 'x, 'y)
     tEnv.createTemporaryView("MyTable", t)
 
     assertThatThrownBy(
@@ -1315,9 +1426,20 @@ class TableSinkITCase extends StreamingTestBase {
 
   @Test
   def testAppendStreamToSinkWithoutPkForceKeyBy(): Unit = {
-    val t = env
-      .fromCollection(tupleData3)
-      .assignAscendingTimestamps(_._1.toLong)
+    val t = StreamingEnvUtil
+      .fromCollection(env, tupleData3)
+      .assignTimestampsAndWatermarks(new WatermarkStrategy[(Int, Long, String)]() {
+
+        override def createWatermarkGenerator(context: WatermarkGeneratorSupplier.Context)
+            : WatermarkGenerator[(Int, Long, String)] = {
+          new AscendingTimestampsWatermarks[(Int, Long, String)]
+        }
+
+        override def createTimestampAssigner(
+            context: TimestampAssignerSupplier.Context): TimestampAssigner[(Int, Long, String)] = {
+          (e: (Int, Long, String), _: Long) => e._1.toLong
+        }
+      })
       .toTable(tEnv, 'id, 'num, 'text, 'rowtime.rowtime)
     tEnv.getConfig.set(
       ExecutionConfigOptions.TABLE_EXEC_SINK_KEYED_SHUFFLE,

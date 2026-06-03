@@ -18,6 +18,7 @@
 
 package org.apache.flink.client.program.rest;
 
+import org.apache.flink.api.common.ApplicationID;
 import org.apache.flink.api.common.JobExecutionResult;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
@@ -35,7 +36,6 @@ import org.apache.flink.configuration.JobManagerOptions;
 import org.apache.flink.configuration.RestOptions;
 import org.apache.flink.runtime.client.JobStatusMessage;
 import org.apache.flink.runtime.client.JobSubmissionException;
-import org.apache.flink.runtime.clusterframework.ApplicationStatus;
 import org.apache.flink.runtime.dispatcher.DispatcherGateway;
 import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.instance.SlotSharingGroupId;
@@ -45,7 +45,6 @@ import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.JobGraphTestUtils;
 import org.apache.flink.runtime.jobgraph.JobType;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
-import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.jobmaster.JobResult;
 import org.apache.flink.runtime.messages.Acknowledge;
 import org.apache.flink.runtime.messages.FlinkJobNotFoundException;
@@ -192,6 +191,7 @@ class RestClusterClientTest {
 
     private JobGraph jobGraph;
     private JobID jobId;
+    private ApplicationID applicationId;
 
     private static final Configuration restConfig;
 
@@ -215,6 +215,7 @@ class RestClusterClientTest {
 
         jobGraph = JobGraphTestUtils.emptyJobGraph();
         jobId = jobGraph.getJobID();
+        applicationId = ApplicationID.generate();
     }
 
     @AfterEach
@@ -881,7 +882,7 @@ class RestClusterClientTest {
                         // On an UNKNOWN JobResult it should be retried
                         JobExecutionResultResponseBody.created(
                                 new JobResult.Builder()
-                                        .applicationStatus(ApplicationStatus.UNKNOWN)
+                                        .jobStatus(null)
                                         .jobId(jobId)
                                         .netRuntime(Long.MAX_VALUE)
                                         .accumulatorResults(
@@ -892,7 +893,7 @@ class RestClusterClientTest {
                                         .build()),
                         JobExecutionResultResponseBody.created(
                                 new JobResult.Builder()
-                                        .applicationStatus(ApplicationStatus.SUCCEEDED)
+                                        .jobStatus(JobStatus.FINISHED)
                                         .jobId(jobId)
                                         .netRuntime(Long.MAX_VALUE)
                                         .accumulatorResults(
@@ -903,7 +904,7 @@ class RestClusterClientTest {
                                         .build()),
                         JobExecutionResultResponseBody.created(
                                 new JobResult.Builder()
-                                        .applicationStatus(ApplicationStatus.FAILED)
+                                        .jobStatus(JobStatus.FAILED)
                                         .jobId(jobId)
                                         .netRuntime(Long.MAX_VALUE)
                                         .serializedThrowable(
@@ -1184,7 +1185,7 @@ class RestClusterClientTest {
             TestCoordinationRequest<String> request = new TestCoordinationRequest<>(payload);
             try {
                 CompletableFuture<CoordinationResponse> future =
-                        restClusterClient.sendCoordinationRequest(jobId, new OperatorID(), request);
+                        restClusterClient.sendCoordinationRequest(jobId, "uid", request);
                 TestCoordinationResponse response = (TestCoordinationResponse) future.get();
 
                 assertThat(response.payload).isEqualTo(payload);
@@ -1207,8 +1208,7 @@ class RestClusterClientTest {
                 assertThatThrownBy(
                                 () ->
                                         restClusterClient
-                                                .sendCoordinationRequest(
-                                                        jobId, new OperatorID(), request)
+                                                .sendCoordinationRequest(jobId, "uid", request)
                                                 .get())
                         .matches(
                                 e ->
@@ -1267,10 +1267,12 @@ class RestClusterClientTest {
         final JobDetailsInfo jobDetailsInfo =
                 new JobDetailsInfo(
                         jobId,
+                        applicationId,
                         "foobar",
                         false,
                         JobStatus.RUNNING,
                         JobType.STREAMING,
+                        null,
                         1,
                         2,
                         1,
@@ -1279,7 +1281,9 @@ class RestClusterClientTest {
                         Collections.singletonMap(JobStatus.RUNNING, 1L),
                         jobVertexDetailsInfos,
                         Collections.singletonMap(ExecutionState.RUNNING, 1),
-                        new JobPlanInfo.RawJson("{\"id\":\"1234\"}"));
+                        new JobPlanInfo.Plan("1243", "", "", new ArrayList<>()),
+                        new JobPlanInfo.RawJson("{\"id\":\"1234\"}"),
+                        0);
         final TestJobDetailsInfoHandler jobDetailsInfoHandler =
                 new TestJobDetailsInfoHandler(jobDetailsInfo);
 

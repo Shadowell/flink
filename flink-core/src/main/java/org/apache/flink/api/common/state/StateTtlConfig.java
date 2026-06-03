@@ -19,7 +19,6 @@
 package org.apache.flink.api.common.state;
 
 import org.apache.flink.annotation.PublicEvolving;
-import org.apache.flink.api.common.time.Time;
 import org.apache.flink.util.Preconditions;
 
 import javax.annotation.Nonnegative;
@@ -85,10 +84,7 @@ public class StateTtlConfig implements Serializable {
     /** This option configures time scale to use for ttl. */
     @PublicEvolving
     public enum TtlTimeCharacteristic {
-        /**
-         * Processing time, see also <code>
-         * org.apache.flink.streaming.api.TimeCharacteristic.ProcessingTime</code>.
-         */
+        /** Processing time. */
         ProcessingTime
     }
 
@@ -120,13 +116,6 @@ public class StateTtlConfig implements Serializable {
     @Nonnull
     public StateVisibility getStateVisibility() {
         return stateVisibility;
-    }
-
-    /** @deprecated Use {@link #getTimeToLive()} */
-    @Deprecated
-    @Nonnull
-    public Time getTtl() {
-        return Time.fromDuration(getTimeToLive());
     }
 
     public Duration getTimeToLive() {
@@ -161,15 +150,12 @@ public class StateTtlConfig implements Serializable {
                 + '}';
     }
 
-    /** @deprecated Use {@link #newBuilder(Duration)} */
-    @Deprecated
-    @Nonnull
-    public static Builder newBuilder(@Nonnull Time ttl) {
+    public static Builder newBuilder(Duration ttl) {
         return new Builder(ttl);
     }
 
-    public static Builder newBuilder(Duration ttl) {
-        return new Builder(ttl);
+    public static Builder newBuilder(StateTtlConfig config) {
+        return new Builder(config);
     }
 
     /** Builder for the {@link StateTtlConfig}. */
@@ -184,14 +170,17 @@ public class StateTtlConfig implements Serializable {
         private final EnumMap<CleanupStrategies.Strategies, CleanupStrategies.CleanupStrategy>
                 strategies = new EnumMap<>(CleanupStrategies.Strategies.class);
 
-        /** @deprecated Use {@link #newBuilder(Duration)} */
-        @Deprecated
-        public Builder(@Nonnull Time ttl) {
-            this(Time.toDuration(ttl));
-        }
-
         private Builder(Duration ttl) {
             this.ttl = ttl;
+        }
+
+        private Builder(StateTtlConfig config) {
+            this.updateType = config.updateType;
+            this.stateVisibility = config.stateVisibility;
+            this.ttlTimeCharacteristic = config.ttlTimeCharacteristic;
+            this.ttl = config.ttl;
+            this.strategies.putAll(config.cleanupStrategies.strategies);
+            this.isCleanupInBackground = config.cleanupStrategies.isCleanupInBackground;
         }
 
         /**
@@ -361,18 +350,6 @@ public class StateTtlConfig implements Serializable {
             return this;
         }
 
-        /**
-         * Sets the ttl time.
-         *
-         * @param ttl The ttl time.
-         * @deprecated Use {@link #setTimeToLive(Duration)}
-         */
-        @Deprecated
-        @Nonnull
-        public Builder setTtl(@Nonnull Time ttl) {
-            return setTimeToLive(Time.toDuration(ttl));
-        }
-
         public Builder setTimeToLive(Duration ttl) {
             this.ttl = Preconditions.checkNotNull(ttl);
             return this;
@@ -492,14 +469,14 @@ public class StateTtlConfig implements Serializable {
 
         /**
          * @deprecated Use {@link
-         *     org.apache.flink.contrib.streaming.state.RocksDBConfigurableOptions#COMPACT_FILTER_PERIODIC_COMPACTION_TIME}
+         *     org.apache.flink.state.rocksdb.RocksDBConfigurableOptions#COMPACT_FILTER_PERIODIC_COMPACTION_TIME}
          *     instead.
          */
         @Deprecated static final Duration DEFAULT_PERIODIC_COMPACTION_TIME = Duration.ofDays(30);
 
         /**
          * @deprecated Use {@link
-         *     org.apache.flink.contrib.streaming.state.RocksDBConfigurableOptions#COMPACT_FILTER_QUERY_TIME_AFTER_NUM_ENTRIES}
+         *     org.apache.flink.state.rocksdb.RocksDBConfigurableOptions#COMPACT_FILTER_QUERY_TIME_AFTER_NUM_ENTRIES}
          *     instead.
          */
         @Deprecated

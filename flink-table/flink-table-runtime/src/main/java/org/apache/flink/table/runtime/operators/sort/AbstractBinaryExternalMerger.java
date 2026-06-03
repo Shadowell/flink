@@ -18,12 +18,12 @@
 
 package org.apache.flink.table.runtime.operators.sort;
 
+import org.apache.flink.core.memory.AbstractPagedOutputView;
 import org.apache.flink.runtime.io.compression.BlockCompressionFactory;
 import org.apache.flink.runtime.io.disk.iomanager.AbstractChannelReaderInputView;
 import org.apache.flink.runtime.io.disk.iomanager.AbstractChannelWriterOutputView;
 import org.apache.flink.runtime.io.disk.iomanager.FileIOChannel;
 import org.apache.flink.runtime.io.disk.iomanager.IOManager;
-import org.apache.flink.runtime.memory.AbstractPagedOutputView;
 import org.apache.flink.table.runtime.io.ChannelWithMeta;
 import org.apache.flink.table.runtime.util.FileChannelUtil;
 import org.apache.flink.util.MutableObjectIterator;
@@ -214,14 +214,20 @@ public abstract class AbstractBinaryExternalMerger<Entry> implements Closeable {
 
     // -------------------------------------------------------------------------------------------
 
-    /** @return entry iterator reading from inView. */
+    /**
+     * @return entry iterator reading from inView.
+     */
     protected abstract MutableObjectIterator<Entry> channelReaderInputViewIterator(
             AbstractChannelReaderInputView inView);
 
-    /** @return merging comparator used in merging. */
+    /**
+     * @return merging comparator used in merging.
+     */
     protected abstract Comparator<Entry> mergeComparator();
 
-    /** @return reused entry object used in merging. */
+    /**
+     * @return reused entry object used in merging.
+     */
     protected abstract List<Entry> mergeReusedEntries(int size);
 
     /** read the merged stream and write the data back. */

@@ -31,6 +31,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
@@ -224,15 +225,9 @@ public class HybridSourceReader<T> implements SourceReader<T, HybridSourceSplit>
         } catch (Exception e) {
             throw new RuntimeException("Failed tp create reader", e);
         }
-        reader.start();
+        // currentReader must be switched before `addSplits` is called.
         currentSourceIndex = index;
         currentReader = reader;
-        availabilityFuture.complete(null);
-        LOG.debug(
-                "Reader started: subtask={} sourceIndex={} {}",
-                readerContext.getIndexOfSubtask(),
-                currentSourceIndex,
-                reader);
         // add restored splits
         if (!restoredSplits.isEmpty()) {
             List<HybridSourceSplit> splits = new ArrayList<>(restoredSplits.size());
@@ -246,5 +241,19 @@ public class HybridSourceReader<T> implements SourceReader<T, HybridSourceSplit>
             }
             addSplits(splits);
         }
+
+        reader.start();
+        availabilityFuture.complete(null);
+        LOG.debug(
+                "Reader started: subtask={} sourceIndex={} {}",
+                readerContext.getIndexOfSubtask(),
+                currentSourceIndex,
+                reader);
+    }
+
+    @Override
+    public void pauseOrResumeSplits(
+            Collection<String> splitsToPause, Collection<String> splitsToResume) {
+        currentReader.pauseOrResumeSplits(splitsToPause, splitsToResume);
     }
 }

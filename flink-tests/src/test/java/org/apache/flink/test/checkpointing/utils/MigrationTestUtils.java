@@ -27,14 +27,13 @@ import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
 import org.apache.flink.runtime.state.FunctionSnapshotContext;
 import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
-import org.apache.flink.streaming.api.functions.sink.RichSinkFunction;
-import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunction;
-import org.apache.flink.streaming.api.functions.source.RichSourceFunction;
-import org.apache.flink.streaming.api.functions.source.SourceFunction;
+import org.apache.flink.streaming.api.functions.sink.legacy.RichSinkFunction;
+import org.apache.flink.streaming.api.functions.source.legacy.RichParallelSourceFunction;
+import org.apache.flink.streaming.api.functions.source.legacy.RichSourceFunction;
+import org.apache.flink.streaming.api.functions.source.legacy.SourceFunction;
 import org.apache.flink.streaming.api.watermark.Watermark;
 
-import static org.hamcrest.Matchers.containsInAnyOrder;
-import static org.junit.Assert.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 
 /** A utility class containing common functions/classes used by multiple migration tests. */
 public class MigrationTestUtils {
@@ -132,13 +131,12 @@ public class MigrationTestUtils {
                                     CheckpointingNonParallelSourceWithListState.STATE_DESCRIPTOR);
 
             if (context.isRestored()) {
-                assertThat(
-                        unionListState.get(),
-                        containsInAnyOrder(
+                assertThat(unionListState.get())
+                        .containsExactlyInAnyOrder(
                                 CheckpointingNonParallelSourceWithListState.CHECKPOINTED_STRING,
                                 CheckpointingNonParallelSourceWithListState.CHECKPOINTED_STRING_1,
                                 CheckpointingNonParallelSourceWithListState.CHECKPOINTED_STRING_2,
-                                CheckpointingNonParallelSourceWithListState.CHECKPOINTED_STRING_3));
+                                CheckpointingNonParallelSourceWithListState.CHECKPOINTED_STRING_3);
 
                 getRuntimeContext()
                         .addAccumulator(SUCCESSFUL_RESTORE_CHECK_ACCUMULATOR, new IntCounter());
@@ -273,11 +271,9 @@ public class MigrationTestUtils {
                                     CheckpointingNonParallelSourceWithListState.STATE_DESCRIPTOR);
 
             if (context.isRestored()) {
-                assertThat(
-                        unionListState.get(),
-                        containsInAnyOrder(
-                                CheckpointingParallelSourceWithUnionListState
-                                        .CHECKPOINTED_STRINGS));
+                assertThat(unionListState.get())
+                        .containsExactlyInAnyOrder(
+                                CheckpointingParallelSourceWithUnionListState.CHECKPOINTED_STRINGS);
 
                 getRuntimeContext()
                         .addAccumulator(SUCCESSFUL_RESTORE_CHECK_ACCUMULATOR, new IntCounter());

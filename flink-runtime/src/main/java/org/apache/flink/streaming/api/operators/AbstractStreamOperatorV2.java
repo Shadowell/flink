@@ -29,8 +29,10 @@ import org.apache.flink.api.common.state.State;
 import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.functions.KeySelector;
+import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MetricOptions;
+import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.core.memory.ManagedMemoryUseCase;
 import org.apache.flink.metrics.MetricGroup;
@@ -48,6 +50,7 @@ import org.apache.flink.runtime.state.StateSnapshotContext;
 import org.apache.flink.runtime.state.VoidNamespace;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.streaming.api.graph.StreamConfig;
+import org.apache.flink.streaming.api.operators.AbstractStreamOperator.OutputAdjustment;
 import org.apache.flink.streaming.api.operators.StreamOperatorStateHandler.CheckpointedStreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.LatencyMarker;
@@ -112,13 +115,23 @@ public abstract class AbstractStreamOperatorV2<OUT>
     private @Nullable MailboxWatermarkProcessor watermarkProcessor;
 
     public AbstractStreamOperatorV2(StreamOperatorParameters<OUT> parameters, int numberOfInputs) {
+        this(parameters, numberOfInputs, OutputAdjustment.noAdjustment());
+    }
+
+    public AbstractStreamOperatorV2(
+            StreamOperatorParameters<OUT> parameters,
+            int numberOfInputs,
+            OutputAdjustment<OUT> outputAdjustment) {
         final Environment environment = parameters.getContainingTask().getEnvironment();
         config = parameters.getStreamConfig();
-        output = parameters.getOutput();
+        output = outputAdjustment.apply(parameters.getOutput());
         metrics =
                 environment
                         .getMetricGroup()
-                        .getOrAddOperator(config.getOperatorID(), config.getOperatorName());
+                        .getOrAddOperator(
+                                config.getOperatorID(),
+                                config.getOperatorName(),
+                                config.getAdditionalMetricVariables());
         latencyStats =
                 createLatencyStats(
                         environment.getTaskManagerInfo().getConfiguration(),
@@ -197,8 +210,11 @@ public abstract class AbstractStreamOperatorV2<OUT>
         return metrics;
     }
 
+    /** Initialize necessary state components before initializing state components. */
+    protected void beforeInitializeStateHandler() {}
+
     @Override
-    public void initializeState(StreamTaskStateInitializer streamTaskStateManager)
+    public final void initializeState(StreamTaskStateInitializer streamTaskStateManager)
             throws Exception {
         final TypeSerializer<?> keySerializer =
                 config.getStateKeySerializer(getUserCodeClassloader());
@@ -217,15 +233,22 @@ public abstract class AbstractStreamOperatorV2<OUT>
                                 runtimeContext.getJobConfiguration(),
                                 runtimeContext.getTaskManagerRuntimeInfo().getConfiguration(),
                                 runtimeContext.getUserCodeClassLoader()),
-                        isUsingCustomRawKeyedState());
+                        isUsingCustomRawKeyedState(),
+                        isAsyncKeyOrderedProcessingEnabled());
 
         stateHandler = new StreamOperatorStateHandler(context, getExecutionConfig(), cancelables);
-        timeServiceManager = context.internalTimerServiceManager();
+        timeServiceManager =
+                isAsyncKeyOrderedProcessingEnabled()
+                        ? context.asyncInternalTimerServiceManager()
+                        : context.internalTimerServiceManager();
+
+        beforeInitializeStateHandler();
         stateHandler.initializeOperatorState(this);
 
-        if (useSplittableTimers()
-                && areSplittableTimersConfigured()
+        if (useInterruptibleTimers(runtimeContext.getJobConfiguration())
+                && areInterruptibleTimersConfigured()
                 && getTimeServiceManager().isPresent()) {
+            LOG.info("Interruptible timers enabled for {}", getClass().getSimpleName());
             watermarkProcessor =
                     new MailboxWatermarkProcessor(
                             output, mailboxExecutor, getTimeServiceManager().get());
@@ -237,18 +260,18 @@ public abstract class AbstractStreamOperatorV2<OUT>
      * option is enabled. By default, splittable timers are disabled.
      *
      * @return {@code true} if splittable timers should be used (subject to {@link
-     *     StreamConfig#isUnalignedCheckpointsEnabled()} and {@link
-     *     StreamConfig#isUnalignedCheckpointsSplittableTimersEnabled()}. {@code false} if
-     *     splittable timers should never be used.
+     *     CheckpointingOptions#isUnalignedCheckpointInterruptibleTimersEnabled(Configuration)}.
+     *     {@code false} if splittable timers should never be used.
      */
     @Internal
-    public boolean useSplittableTimers() {
+    public boolean useInterruptibleTimers(ReadableConfig config) {
         return false;
     }
 
     @Internal
-    private boolean areSplittableTimersConfigured() {
-        return AbstractStreamOperator.areSplittableTimersConfigured(config);
+    private boolean areInterruptibleTimersConfigured() {
+        return CheckpointingOptions.isUnalignedCheckpointInterruptibleTimersEnabled(
+                runtimeContext.getJobConfiguration());
     }
 
     /**
@@ -272,6 +295,14 @@ public abstract class AbstractStreamOperatorV2<OUT>
      */
     @Internal
     protected boolean isUsingCustomRawKeyedState() {
+        return false;
+    }
+
+    /**
+     * Indicates whether this operator is enabling the async state. Can be overridden by subclasses.
+     */
+    @Internal
+    public boolean isAsyncKeyOrderedProcessingEnabled() {
         return false;
     }
 
@@ -317,7 +348,8 @@ public abstract class AbstractStreamOperatorV2<OUT>
                 timestamp,
                 checkpointOptions,
                 factory,
-                isUsingCustomRawKeyedState());
+                isUsingCustomRawKeyedState(),
+                isAsyncKeyOrderedProcessingEnabled());
     }
 
     /**
@@ -509,10 +541,10 @@ public abstract class AbstractStreamOperatorV2<OUT>
         @SuppressWarnings("unchecked")
         InternalTimeServiceManager<K> keyedTimeServiceHandler =
                 (InternalTimeServiceManager<K>) timeServiceManager;
-        KeyedStateBackend<K> keyedStateBackend = getKeyedStateBackend();
-        checkState(keyedStateBackend != null, "Timers can only be used on keyed operators.");
+        TypeSerializer<K> keySerializer = stateHandler.getKeySerializer();
+        checkState(keySerializer != null, "Timers can only be used on keyed operators.");
         return keyedTimeServiceHandler.getInternalTimerService(
-                name, keyedStateBackend.getKeySerializer(), namespaceSerializer, triggerable);
+                name, keySerializer, namespaceSerializer, triggerable);
     }
 
     public void processWatermark(Watermark mark) throws Exception {
@@ -539,6 +571,7 @@ public abstract class AbstractStreamOperatorV2<OUT>
     public void processWatermarkStatus(WatermarkStatus watermarkStatus, int inputId)
             throws Exception {
         boolean wasIdle = combinedWatermark.isIdle();
+        // inputId is 1-based
         if (combinedWatermark.updateStatus(inputId - 1, watermarkStatus.isIdle())) {
             processWatermark(new Watermark(combinedWatermark.getCombinedWatermark()));
         }

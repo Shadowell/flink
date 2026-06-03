@@ -17,24 +17,27 @@
  */
 package org.apache.flink.table.planner.runtime.stream.sql
 
-import org.apache.flink.api.scala._
-import org.apache.flink.core.testutils.{EachCallbackWrapper, FlinkAssertions}
-import org.apache.flink.core.testutils.FlinkAssertions.{anyCauseMatches, assertThatChainOfCauses}
-import org.apache.flink.table.api.{DataTypes, TableException}
+import org.apache.flink.core.testutils.EachCallbackWrapper
+import org.apache.flink.core.testutils.FlinkAssertions.anyCauseMatches
+import org.apache.flink.table.api.{createTypeInformation, TableException}
 import org.apache.flink.table.api.bridge.scala._
 import org.apache.flink.table.planner.factories.TestValuesTableFactory
 import org.apache.flink.table.planner.runtime.utils.{StreamingTestBase, TestData, TestingAppendSink, TestingRetractSink}
+import org.apache.flink.table.planner.runtime.utils.BatchTestBase.row
 import org.apache.flink.table.planner.runtime.utils.TestData.data1
-import org.apache.flink.table.planner.utils._
 import org.apache.flink.table.runtime.functions.scalar.SourceWatermarkFunction
 import org.apache.flink.table.utils.LegacyRowExtension
 import org.apache.flink.types.Row
+import org.apache.flink.types.bitmap.Bitmap
 
 import org.assertj.core.api.Assertions.{assertThat, assertThatThrownBy}
+import org.assertj.core.util.Arrays.array
 import org.junit.jupiter.api.{BeforeEach, Test}
 import org.junit.jupiter.api.extension.RegisterExtension
 
 import java.util.concurrent.atomic.AtomicInteger
+
+import scala.collection.mutable
 
 class TableSourceITCase extends StreamingTestBase {
 
@@ -58,7 +61,7 @@ class TableSourceITCase extends StreamingTestBase {
                        |""".stripMargin)
 
     val filterableTableDataId =
-      TestValuesTableFactory.registerData(TestLegacyFilterableTableSource.defaultRows)
+      TestValuesTableFactory.registerData(TestData.orderedLoopRows)
     tEnv.executeSql(s"""
                        |CREATE TABLE FilterableTable (
                        |  name STRING,
@@ -129,7 +132,7 @@ class TableSourceITCase extends StreamingTestBase {
   def testProjectWithoutInputRef(): Unit = {
     val result = tEnv.sqlQuery("SELECT COUNT(*) FROM MyTable").toRetractStream[Row]
     val sink = new TestingRetractSink()
-    result.addSink(sink).setParallelism(result.parallelism)
+    result.addSink(sink).setParallelism(result.getParallelism)
     env.execute()
 
     assertThat(sink.getRetractResults.sorted).isEqualTo(Seq("3"))
@@ -273,6 +276,44 @@ class TableSourceITCase extends StreamingTestBase {
       "false,5,4,123,1234,1.2345,1.2345,8.12,812345678910123451.0123456789,1234,1234,2020-05-01," +
         "23:23:23,2020-05-01T23:23:23,2020-05-01T23:23:23Z,[8],4,c,null",
       "null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null"
+    )
+    assertThat(sink.getAppendResults.sorted.mkString("\n"))
+      .isEqualTo(expected.sorted.mkString("\n"))
+  }
+
+  @Test
+  def testBitmapDataType(): Unit = {
+    val data = new mutable.ListBuffer[Row]
+    val empty = Bitmap.empty()
+    for (i <- 1 to 3) {
+      val bitmap = Bitmap.fromArray(Array[Int](i, i + 1))
+      data += row(i, bitmap, array(empty, bitmap), row(i, bitmap))
+    }
+    val dataId = TestValuesTableFactory.registerData(data)
+
+    tEnv.executeSql(
+      s"""
+         |CREATE TABLE T (
+         |  `a` INT,
+         |  `b` BITMAP,
+         |  `c` ARRAY<BITMAP>,
+         |  `d` ROW<f1 INT, f2 BITMAP>
+         |) WITH (
+         |  'connector' = 'values',
+         |  'data-id' = '$dataId'
+         |)
+         |""".stripMargin
+    )
+
+    val result = tEnv.sqlQuery("SELECT b, c, d.f2, a FROM T").toDataStream
+    val sink = new TestingAppendSink
+    result.addSink(sink)
+    env.execute()
+
+    val expected = Seq(
+      "{1,2},[{}, {1,2}],{1,2},1",
+      "{2,3},[{}, {2,3}],{2,3},2",
+      "{3,4},[{}, {3,4}],{3,4},3"
     )
     assertThat(sink.getAppendResults.sorted.mkString("\n"))
       .isEqualTo(expected.sorted.mkString("\n"))

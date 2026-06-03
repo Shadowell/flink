@@ -19,7 +19,6 @@
 package org.apache.flink.runtime.rest;
 
 import org.apache.flink.annotation.VisibleForTesting;
-import org.apache.flink.api.common.time.Time;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.IllegalConfigurationException;
@@ -49,7 +48,9 @@ import org.apache.flink.shaded.netty4.io.netty.channel.ChannelHandler;
 import org.apache.flink.shaded.netty4.io.netty.channel.ChannelInboundHandler;
 import org.apache.flink.shaded.netty4.io.netty.channel.ChannelInitializer;
 import org.apache.flink.shaded.netty4.io.netty.channel.EventLoopGroup;
-import org.apache.flink.shaded.netty4.io.netty.channel.nio.NioEventLoopGroup;
+import org.apache.flink.shaded.netty4.io.netty.channel.IoHandlerFactory;
+import org.apache.flink.shaded.netty4.io.netty.channel.MultiThreadIoEventLoopGroup;
+import org.apache.flink.shaded.netty4.io.netty.channel.nio.NioIoHandler;
 import org.apache.flink.shaded.netty4.io.netty.channel.socket.SocketChannel;
 import org.apache.flink.shaded.netty4.io.netty.channel.socket.nio.NioServerSocketChannel;
 import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpServerCodec;
@@ -67,6 +68,7 @@ import java.net.InetSocketAddress;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -242,12 +244,17 @@ public abstract class RestServerEndpoint implements RestService {
                         }
                     };
 
-            NioEventLoopGroup bossGroup =
-                    new NioEventLoopGroup(
-                            1, new ExecutorThreadFactory("flink-rest-server-netty-boss"));
-            NioEventLoopGroup workerGroup =
-                    new NioEventLoopGroup(
-                            0, new ExecutorThreadFactory("flink-rest-server-netty-worker"));
+            IoHandlerFactory nioIoHandlerFactory = NioIoHandler.newFactory();
+            MultiThreadIoEventLoopGroup bossGroup =
+                    new MultiThreadIoEventLoopGroup(
+                            1,
+                            new ExecutorThreadFactory("flink-rest-server-netty-boss"),
+                            nioIoHandlerFactory);
+            MultiThreadIoEventLoopGroup workerGroup =
+                    new MultiThreadIoEventLoopGroup(
+                            0,
+                            new ExecutorThreadFactory("flink-rest-server-netty-worker"),
+                            nioIoHandlerFactory);
 
             bootstrap = new ServerBootstrap();
             bootstrap
@@ -438,16 +445,14 @@ public abstract class RestServerEndpoint implements RestService {
                     () -> {
                         CompletableFuture<?> groupFuture = new CompletableFuture<>();
                         CompletableFuture<?> childGroupFuture = new CompletableFuture<>();
-                        final Time gracePeriod = Time.seconds(10L);
+                        final Duration gracePeriod = Duration.ofSeconds(10L);
 
                         if (bootstrap != null) {
                             final ServerBootstrapConfig config = bootstrap.config();
                             final EventLoopGroup group = config.group();
                             if (group != null) {
                                 group.shutdownGracefully(
-                                                0L,
-                                                gracePeriod.toMilliseconds(),
-                                                TimeUnit.MILLISECONDS)
+                                                0L, gracePeriod.toMillis(), TimeUnit.MILLISECONDS)
                                         .addListener(
                                                 finished -> {
                                                     if (finished.isSuccess()) {
@@ -465,9 +470,7 @@ public abstract class RestServerEndpoint implements RestService {
                             if (childGroup != null) {
                                 childGroup
                                         .shutdownGracefully(
-                                                0L,
-                                                gracePeriod.toMilliseconds(),
-                                                TimeUnit.MILLISECONDS)
+                                                0L, gracePeriod.toMillis(), TimeUnit.MILLISECONDS)
                                         .addListener(
                                                 finished -> {
                                                     if (finished.isSuccess()) {

@@ -20,9 +20,7 @@ package org.apache.flink.streaming.api.connector.sink2;
 
 import org.apache.flink.annotation.Experimental;
 
-import javax.annotation.Nullable;
-
-import java.util.OptionalLong;
+import java.util.Objects;
 
 /**
  * This class tracks the information about committables belonging to one checkpoint coming from one
@@ -35,21 +33,42 @@ import java.util.OptionalLong;
 @Experimental
 public class CommittableSummary<CommT> implements CommittableMessage<CommT> {
     private final int subtaskId;
+
     /** May change after recovery. */
     private final int numberOfSubtasks;
 
-    @Nullable private final Long checkpointId;
+    private final long checkpointId;
+
     /** The number of committables coming from the given subtask in the particular checkpoint. */
     private final int numberOfCommittables;
+
+    @Deprecated(forRemoval = true)
     /** The number of committables that have not been successfully committed. */
     private final int numberOfPendingCommittables;
+
     /** The number of committables that are not retried and have been failed. */
     private final int numberOfFailedCommittables;
 
     public CommittableSummary(
             int subtaskId,
             int numberOfSubtasks,
-            @Nullable Long checkpointId,
+            long checkpointId,
+            int numberOfCommittables,
+            int numberOfFailedCommittables) {
+        this(
+                subtaskId,
+                numberOfSubtasks,
+                checkpointId,
+                numberOfCommittables,
+                0,
+                numberOfFailedCommittables);
+    }
+
+    @Deprecated
+    public CommittableSummary(
+            int subtaskId,
+            int numberOfSubtasks,
+            long checkpointId,
             int numberOfCommittables,
             int numberOfPendingCommittables,
             int numberOfFailedCommittables) {
@@ -69,16 +88,17 @@ public class CommittableSummary<CommT> implements CommittableMessage<CommT> {
         return numberOfSubtasks;
     }
 
-    public OptionalLong getCheckpointId() {
-        return checkpointId == null ? OptionalLong.empty() : OptionalLong.of(checkpointId);
+    public long getCheckpointId() {
+        return checkpointId;
     }
 
     public int getNumberOfCommittables() {
         return numberOfCommittables;
     }
 
+    @Deprecated
     public int getNumberOfPendingCommittables() {
-        return numberOfPendingCommittables;
+        return 0;
     }
 
     public int getNumberOfFailedCommittables() {
@@ -87,6 +107,51 @@ public class CommittableSummary<CommT> implements CommittableMessage<CommT> {
 
     public <NewCommT> CommittableSummary<NewCommT> map() {
         return new CommittableSummary<>(
+                subtaskId,
+                numberOfSubtasks,
+                checkpointId,
+                numberOfCommittables,
+                numberOfFailedCommittables);
+    }
+
+    @Override
+    public String toString() {
+        return "CommittableSummary{"
+                + "subtaskId="
+                + subtaskId
+                + ", numberOfSubtasks="
+                + numberOfSubtasks
+                + ", checkpointId="
+                + checkpointId
+                + ", numberOfCommittables="
+                + numberOfCommittables
+                + ", numberOfPendingCommittables="
+                + numberOfPendingCommittables
+                + ", numberOfFailedCommittables="
+                + numberOfFailedCommittables
+                + '}';
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        CommittableSummary<?> that = (CommittableSummary<?>) o;
+        return subtaskId == that.subtaskId
+                && numberOfSubtasks == that.numberOfSubtasks
+                && checkpointId == that.checkpointId
+                && numberOfCommittables == that.numberOfCommittables
+                && numberOfPendingCommittables == that.numberOfPendingCommittables
+                && numberOfFailedCommittables == that.numberOfFailedCommittables;
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(
                 subtaskId,
                 numberOfSubtasks,
                 checkpointId,

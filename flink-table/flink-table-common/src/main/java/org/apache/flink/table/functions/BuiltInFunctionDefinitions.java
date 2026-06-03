@@ -33,8 +33,12 @@ import org.apache.flink.table.expressions.ValueLiteralExpression;
 import org.apache.flink.table.types.inference.ArgumentTypeStrategy;
 import org.apache.flink.table.types.inference.ConstantArgumentCount;
 import org.apache.flink.table.types.inference.InputTypeStrategies;
+import org.apache.flink.table.types.inference.StaticArgument;
+import org.apache.flink.table.types.inference.StaticArgumentTrait;
+import org.apache.flink.table.types.inference.TraitCondition;
 import org.apache.flink.table.types.inference.TypeStrategies;
 import org.apache.flink.table.types.inference.strategies.ArrayOfStringArgumentTypeStrategy;
+import org.apache.flink.table.types.inference.strategies.FromChangelogTypeStrategy;
 import org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies;
 import org.apache.flink.table.types.inference.strategies.SpecificTypeStrategies;
 import org.apache.flink.table.types.logical.LocalZonedTimestampType;
@@ -46,16 +50,20 @@ import org.apache.flink.table.types.logical.TimestampKind;
 import org.apache.flink.table.types.logical.utils.LogicalTypeMerging;
 import org.apache.flink.table.types.utils.TypeConversions;
 import org.apache.flink.table.utils.EncodingUtils;
+import org.apache.flink.types.Row;
 import org.apache.flink.util.Preconditions;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.apache.flink.table.api.DataTypes.BIGINT;
 import static org.apache.flink.table.api.DataTypes.BOOLEAN;
@@ -67,6 +75,7 @@ import static org.apache.flink.table.api.DataTypes.TIMESTAMP;
 import static org.apache.flink.table.api.DataTypes.TIMESTAMP_LTZ;
 import static org.apache.flink.table.functions.FunctionKind.AGGREGATE;
 import static org.apache.flink.table.functions.FunctionKind.OTHER;
+import static org.apache.flink.table.functions.FunctionKind.PROCESS_TABLE;
 import static org.apache.flink.table.functions.FunctionKind.SCALAR;
 import static org.apache.flink.table.functions.FunctionKind.TABLE;
 import static org.apache.flink.table.types.inference.InputTypeStrategies.ANY;
@@ -100,11 +109,19 @@ import static org.apache.flink.table.types.inference.TypeStrategies.nullableIfAr
 import static org.apache.flink.table.types.inference.TypeStrategies.varyingString;
 import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.ARRAY_ELEMENT_ARG;
 import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.ARRAY_FULLY_COMPARABLE;
+import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.FROM_CHANGELOG_INPUT_TYPE_STRATEGY;
 import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.INDEX;
 import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.JSON_ARGUMENT;
+import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.ML_PREDICT_INPUT_TYPE_STRATEGY;
+import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.TO_CHANGELOG_INPUT_TYPE_STRATEGY;
 import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.TWO_EQUALS_COMPARABLE;
 import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.TWO_FULLY_COMPARABLE;
+import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.percentage;
+import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.percentageArray;
 import static org.apache.flink.table.types.inference.strategies.SpecificTypeStrategies.ARRAY_APPEND_PREPEND;
+import static org.apache.flink.table.types.inference.strategies.SpecificTypeStrategies.FROM_CHANGELOG_OUTPUT_TYPE_STRATEGY;
+import static org.apache.flink.table.types.inference.strategies.SpecificTypeStrategies.ML_PREDICT_OUTPUT_TYPE_STRATEGY;
+import static org.apache.flink.table.types.inference.strategies.SpecificTypeStrategies.TO_CHANGELOG_OUTPUT_TYPE_STRATEGY;
 
 /** Dictionary of function definitions for all built-in functions. */
 @PublicEvolving
@@ -224,8 +241,7 @@ public final class BuiltInFunctionDefinitions {
                     .kind(SCALAR)
                     .inputTypeStrategy(varyingSequence(COMMON_ARG_NULLABLE, COMMON_ARG_NULLABLE))
                     .outputTypeStrategy(nullableIfAllArgs(COMMON))
-                    .runtimeClass(
-                            "org.apache.flink.table.runtime.functions.scalar.CoalesceFunction")
+                    .runtimeDeferred()
                     .build();
 
     public static final BuiltInFunctionDefinition ARRAY_APPEND =
@@ -453,6 +469,46 @@ public final class BuiltInFunctionDefinitions {
                             "org.apache.flink.table.runtime.functions.scalar.UrlEncodeFunction")
                     .build();
 
+    public static final BuiltInFunctionDefinition INET_ATON =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("INET_ATON")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(sequence(logical(LogicalTypeFamily.CHARACTER_STRING)))
+                    .outputTypeStrategy(explicit(BIGINT().nullable()))
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.InetAtonFunction")
+                    .build();
+
+    public static final BuiltInFunctionDefinition INET_NTOA =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("INET_NTOA")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(sequence(logical(LogicalTypeFamily.INTEGER_NUMERIC)))
+                    .outputTypeStrategy(explicit(DataTypes.STRING().nullable()))
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.InetNtoaFunction")
+                    .build();
+
+    public static final BuiltInFunctionDefinition IS_VALID_UTF8 =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("IS_VALID_UTF8")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(sequence(logical(LogicalTypeFamily.BINARY_STRING)))
+                    .outputTypeStrategy(nullableIfArgs(explicit(DataTypes.BOOLEAN())))
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.IsValidUtf8Function")
+                    .build();
+
+    public static final BuiltInFunctionDefinition MAKE_VALID_UTF8 =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("MAKE_VALID_UTF8")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(sequence(logical(LogicalTypeFamily.BINARY_STRING)))
+                    .outputTypeStrategy(nullableIfArgs(explicit(DataTypes.STRING())))
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.MakeValidUtf8Function")
+                    .build();
+
     public static final BuiltInFunctionDefinition INTERNAL_REPLICATE_ROWS =
             BuiltInFunctionDefinition.newBuilder()
                     .name("$REPLICATE_ROWS$1")
@@ -470,6 +526,17 @@ public final class BuiltInFunctionDefinitions {
                     .outputTypeStrategy(SpecificTypeStrategies.UNUSED)
                     .runtimeClass(
                             "org.apache.flink.table.runtime.functions.table.UnnestRowsFunction")
+                    .internal()
+                    .build();
+
+    public static final BuiltInFunctionDefinition INTERNAL_UNNEST_ROWS_WITH_ORDINALITY =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("$UNNEST_ROWS_WITH_ORDINALITY$1")
+                    .kind(TABLE)
+                    .inputTypeStrategy(sequence(ANY))
+                    .outputTypeStrategy(SpecificTypeStrategies.UNUSED)
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.table.UnnestRowsWithOrdinalityFunction")
                     .internal()
                     .build();
 
@@ -546,12 +613,12 @@ public final class BuiltInFunctionDefinitions {
             BuiltInFunctionDefinition.newBuilder()
                     .name("ifThenElse")
                     .callSyntax(
-                            (sqlName, operands) ->
+                            (sqlName, operands, sqlFactory) ->
                                     String.format(
                                             "CASE WHEN %s THEN %s ELSE %s END",
-                                            operands.get(0).asSerializableString(),
-                                            operands.get(1).asSerializableString(),
-                                            operands.get(2).asSerializableString()))
+                                            operands.get(0).asSerializableString(sqlFactory),
+                                            operands.get(1).asSerializableString(sqlFactory),
+                                            operands.get(2).asSerializableString(sqlFactory)))
                     .kind(SCALAR)
                     .inputTypeStrategy(
                             compositeSequence()
@@ -678,12 +745,15 @@ public final class BuiltInFunctionDefinitions {
                     .name("between")
                     .kind(SCALAR)
                     .callSyntax(
-                            (sqlName, operands) ->
+                            (sqlName, operands, sqlFactory) ->
                                     String.format(
                                             "%s BETWEEN %s AND %s",
-                                            CallSyntaxUtils.asSerializableOperand(operands.get(0)),
-                                            CallSyntaxUtils.asSerializableOperand(operands.get(1)),
-                                            CallSyntaxUtils.asSerializableOperand(operands.get(2))))
+                                            CallSyntaxUtils.asSerializableOperand(
+                                                    operands.get(0), sqlFactory),
+                                            CallSyntaxUtils.asSerializableOperand(
+                                                    operands.get(1), sqlFactory),
+                                            CallSyntaxUtils.asSerializableOperand(
+                                                    operands.get(2), sqlFactory)))
                     .inputTypeStrategy(
                             comparable(ConstantArgumentCount.of(3), StructuredComparison.FULL))
                     .outputTypeStrategy(nullableIfArgs(explicit(DataTypes.BOOLEAN())))
@@ -693,16 +763,149 @@ public final class BuiltInFunctionDefinitions {
             BuiltInFunctionDefinition.newBuilder()
                     .name("notBetween")
                     .callSyntax(
-                            (sqlName, operands) ->
+                            (sqlName, operands, sqlFactory) ->
                                     String.format(
                                             "%s NOT BETWEEN %s AND %s",
-                                            CallSyntaxUtils.asSerializableOperand(operands.get(0)),
-                                            CallSyntaxUtils.asSerializableOperand(operands.get(1)),
-                                            CallSyntaxUtils.asSerializableOperand(operands.get(2))))
+                                            CallSyntaxUtils.asSerializableOperand(
+                                                    operands.get(0), sqlFactory),
+                                            CallSyntaxUtils.asSerializableOperand(
+                                                    operands.get(1), sqlFactory),
+                                            CallSyntaxUtils.asSerializableOperand(
+                                                    operands.get(2), sqlFactory)))
                     .kind(SCALAR)
                     .inputTypeStrategy(
                             comparable(ConstantArgumentCount.of(3), StructuredComparison.FULL))
                     .outputTypeStrategy(nullableIfArgs(explicit(DataTypes.BOOLEAN())))
+                    .build();
+
+    public static final BuiltInFunctionDefinition ML_PREDICT =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("ML_PREDICT")
+                    .kind(PROCESS_TABLE)
+                    .disableSystemArguments(true)
+                    .staticArguments(
+                            StaticArgument.table(
+                                    "INPUT",
+                                    Row.class,
+                                    false,
+                                    EnumSet.of(StaticArgumentTrait.TABLE)),
+                            StaticArgument.model(
+                                    "MODEL", false, EnumSet.of(StaticArgumentTrait.MODEL)),
+                            StaticArgument.scalar("ARGS", DataTypes.DESCRIPTOR(), false),
+                            StaticArgument.scalar(
+                                    "CONFIG",
+                                    DataTypes.MAP(DataTypes.STRING(), DataTypes.STRING()),
+                                    true))
+                    .inputTypeStrategy(ML_PREDICT_INPUT_TYPE_STRATEGY)
+                    .outputTypeStrategy(ML_PREDICT_OUTPUT_TYPE_STRATEGY)
+                    .runtimeProvided()
+                    .build();
+
+    public static final BuiltInFunctionDefinition TO_CHANGELOG =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("TO_CHANGELOG")
+                    .kind(PROCESS_TABLE)
+                    .staticArguments(
+                            // Row semantics by default; PARTITION BY switches to set semantics.
+                            // REQUIRE_UPDATE_BEFORE / REQUIRE_FULL_DELETE are conditional so the
+                            // planner can skip ChangelogNormalize for upsert sources whose
+                            // op_mapping does not emit UB or full deletes.
+                            StaticArgument.table(
+                                            "input",
+                                            Row.class,
+                                            false,
+                                            EnumSet.of(
+                                                    StaticArgumentTrait.TABLE,
+                                                    StaticArgumentTrait.ROW_SEMANTIC_TABLE,
+                                                    StaticArgumentTrait.SUPPORT_UPDATES))
+                                    .withConditionalTrait(
+                                            StaticArgumentTrait.SET_SEMANTIC_TABLE,
+                                            TraitCondition.hasPartitionBy())
+                                    .withConditionalTrait(
+                                            StaticArgumentTrait.REQUIRE_UPDATE_BEFORE,
+                                            TraitCondition.or(
+                                                    // op_mapping omitted: default mapping includes
+                                                    // UPDATE_BEFORE.
+                                                    TraitCondition.not(
+                                                            TraitCondition.argIsPresent(
+                                                                    "op_mapping")),
+                                                    TraitCondition.argMatches(
+                                                            "op_mapping",
+                                                            Map.class,
+                                                            mapping ->
+                                                                    opMappingContainsKey(
+                                                                            (Map<String, String>)
+                                                                                    mapping,
+                                                                            "UPDATE_BEFORE"))))
+                                    .withConditionalTrait(
+                                            StaticArgumentTrait.REQUIRE_FULL_DELETE,
+                                            // Require full deletes by default. The user can opt
+                                            // out via produces_full_deletes=FALSE.
+                                            // REQUIRE_FULL_DELETE
+                                            // still gates on the active op_mapping mapping DELETE;
+                                            // otherwise no DELETE rows reach the function and there
+                                            // is no point inserting ChangelogNormalize upstream.
+                                            TraitCondition.and(
+                                                    TraitCondition.or(
+                                                            TraitCondition.not(
+                                                                    TraitCondition.argIsPresent(
+                                                                            "produces_full_deletes")),
+                                                            TraitCondition.argIsEqualTo(
+                                                                    "produces_full_deletes",
+                                                                    Boolean.TRUE)),
+                                                    TraitCondition.or(
+                                                            TraitCondition.not(
+                                                                    TraitCondition.argIsPresent(
+                                                                            "op_mapping")),
+                                                            TraitCondition.argMatches(
+                                                                    "op_mapping",
+                                                                    Map.class,
+                                                                    mapping ->
+                                                                            opMappingContainsKey(
+                                                                                    (Map<
+                                                                                                    String,
+                                                                                                    String>)
+                                                                                            mapping,
+                                                                                    "DELETE"))))),
+                            StaticArgument.scalar("op", DataTypes.DESCRIPTOR(), true),
+                            StaticArgument.scalar(
+                                    "op_mapping",
+                                    DataTypes.MAP(DataTypes.STRING(), DataTypes.STRING()),
+                                    true),
+                            StaticArgument.scalar(
+                                    "produces_full_deletes", DataTypes.BOOLEAN(), true))
+                    .inputTypeStrategy(TO_CHANGELOG_INPUT_TYPE_STRATEGY)
+                    .outputTypeStrategy(TO_CHANGELOG_OUTPUT_TYPE_STRATEGY)
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.ptf.ToChangelogFunction")
+                    .build();
+
+    public static final BuiltInFunctionDefinition FROM_CHANGELOG =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("FROM_CHANGELOG")
+                    .kind(PROCESS_TABLE)
+                    .staticArguments(
+                            StaticArgument.table(
+                                            "input",
+                                            Row.class,
+                                            false,
+                                            EnumSet.of(
+                                                    StaticArgumentTrait.TABLE,
+                                                    StaticArgumentTrait.ROW_SEMANTIC_TABLE))
+                                    .withConditionalTrait(
+                                            StaticArgumentTrait.SET_SEMANTIC_TABLE,
+                                            TraitCondition.hasPartitionBy()),
+                            StaticArgument.scalar("op", DataTypes.DESCRIPTOR(), true),
+                            StaticArgument.scalar(
+                                    "op_mapping",
+                                    DataTypes.MAP(DataTypes.STRING(), DataTypes.STRING()),
+                                    true),
+                            StaticArgument.scalar("error_handling", DataTypes.STRING(), true))
+                    .changelogModeStrategy(FromChangelogTypeStrategy.CHANGELOG_MODE_STRATEGY)
+                    .inputTypeStrategy(FROM_CHANGELOG_INPUT_TYPE_STRATEGY)
+                    .outputTypeStrategy(FROM_CHANGELOG_OUTPUT_TYPE_STRATEGY)
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.ptf.FromChangelogFunction")
                     .build();
 
     public static final BuiltInFunctionDefinition GREATEST =
@@ -778,6 +981,24 @@ public final class BuiltInFunctionDefinitions {
                     .outputTypeStrategy(TypeStrategies.aggArg0(t -> t, true))
                     .build();
 
+    public static final BuiltInFunctionDefinition LEAD =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("lead")
+                    .kind(AGGREGATE)
+                    .inputTypeStrategy(SpecificInputTypeStrategies.LEAD_LAG)
+                    .outputTypeStrategy(SpecificTypeStrategies.LEAD_LAG)
+                    .runtimeDeferred()
+                    .build();
+
+    public static final BuiltInFunctionDefinition LAG =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("lag")
+                    .kind(AGGREGATE)
+                    .inputTypeStrategy(SpecificInputTypeStrategies.LEAD_LAG)
+                    .outputTypeStrategy(SpecificTypeStrategies.LEAD_LAG)
+                    .runtimeDeferred()
+                    .build();
+
     public static final BuiltInFunctionDefinition LISTAGG =
             BuiltInFunctionDefinition.newBuilder()
                     .name("listAgg")
@@ -807,6 +1028,7 @@ public final class BuiltInFunctionDefinitions {
     public static final BuiltInFunctionDefinition STDDEV_POP =
             BuiltInFunctionDefinition.newBuilder()
                     .name("stddevPop")
+                    .sqlName("STDDEV_POP")
                     .kind(AGGREGATE)
                     .inputTypeStrategy(sequence(logical(LogicalTypeFamily.NUMERIC)))
                     .outputTypeStrategy(
@@ -816,6 +1038,7 @@ public final class BuiltInFunctionDefinitions {
     public static final BuiltInFunctionDefinition STDDEV_SAMP =
             BuiltInFunctionDefinition.newBuilder()
                     .name("stddevSamp")
+                    .sqlName("STDDEV_SAMP")
                     .kind(AGGREGATE)
                     .inputTypeStrategy(sequence(logical(LogicalTypeFamily.NUMERIC)))
                     .outputTypeStrategy(
@@ -825,6 +1048,7 @@ public final class BuiltInFunctionDefinitions {
     public static final BuiltInFunctionDefinition VAR_POP =
             BuiltInFunctionDefinition.newBuilder()
                     .name("varPop")
+                    .sqlName("VAR_POP")
                     .kind(AGGREGATE)
                     .inputTypeStrategy(sequence(logical(LogicalTypeFamily.NUMERIC)))
                     .outputTypeStrategy(
@@ -834,10 +1058,24 @@ public final class BuiltInFunctionDefinitions {
     public static final BuiltInFunctionDefinition VAR_SAMP =
             BuiltInFunctionDefinition.newBuilder()
                     .name("varSamp")
+                    .sqlName("VAR_SAMP")
                     .kind(AGGREGATE)
                     .inputTypeStrategy(sequence(logical(LogicalTypeFamily.NUMERIC)))
                     .outputTypeStrategy(
                             TypeStrategies.aggArg0(LogicalTypeMerging::findAvgAggType, true))
+                    .build();
+
+    public static final BuiltInFunctionDefinition INTERNAL_WELFORD_M2 =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("$WELFORD_M2$1")
+                    .kind(AGGREGATE)
+                    .inputTypeStrategy(
+                            sequence(
+                                    Collections.singletonList("value"),
+                                    Collections.singletonList(logical(LogicalTypeFamily.NUMERIC))))
+                    .outputTypeStrategy(explicit(DataTypes.DOUBLE()))
+                    .runtimeProvided()
+                    .internal()
                     .build();
 
     public static final BuiltInFunctionDefinition COLLECT =
@@ -864,6 +1102,27 @@ public final class BuiltInFunctionDefinitions {
                     .outputTypeStrategy(nullableIfArgs(SpecificTypeStrategies.ARRAY))
                     .build();
 
+    public static final BuiltInFunctionDefinition PERCENTILE =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("PERCENTILE")
+                    .kind(AGGREGATE)
+                    .inputTypeStrategy(
+                            or(
+                                    sequence(
+                                            Arrays.asList("expr", "percentage"),
+                                            Arrays.asList(
+                                                    logical(LogicalTypeFamily.NUMERIC),
+                                                    or(percentage(false), percentageArray(false)))),
+                                    sequence(
+                                            Arrays.asList("expr", "percentage", "frequency"),
+                                            Arrays.asList(
+                                                    logical(LogicalTypeFamily.NUMERIC),
+                                                    or(percentage(false), percentageArray(false)),
+                                                    logical(LogicalTypeFamily.INTEGER_NUMERIC)))))
+                    .outputTypeStrategy(SpecificTypeStrategies.PERCENTILE)
+                    .runtimeProvided()
+                    .build();
+
     // --------------------------------------------------------------------------------------------
     // String functions
     // --------------------------------------------------------------------------------------------
@@ -871,6 +1130,7 @@ public final class BuiltInFunctionDefinitions {
     public static final BuiltInFunctionDefinition CHAR_LENGTH =
             BuiltInFunctionDefinition.newBuilder()
                     .name("charLength")
+                    .sqlName("CHAR_LENGTH")
                     .kind(SCALAR)
                     .inputTypeStrategy(sequence(logical(LogicalTypeFamily.CHARACTER_STRING)))
                     .outputTypeStrategy(nullableIfArgs(explicit(INT())))
@@ -1075,11 +1335,11 @@ public final class BuiltInFunctionDefinitions {
             BuiltInFunctionDefinition.newBuilder()
                     .name("position")
                     .callSyntax(
-                            (sqlName, operands) ->
+                            (sqlName, operands, sqlFactory) ->
                                     String.format(
                                             "POSITION(%s IN %s)",
-                                            operands.get(0).asSerializableString(),
-                                            operands.get(1).asSerializableString()))
+                                            operands.get(0).asSerializableString(sqlFactory),
+                                            operands.get(1).asSerializableString(sqlFactory)))
                     .kind(SCALAR)
                     .inputTypeStrategy(
                             sequence(
@@ -1174,19 +1434,11 @@ public final class BuiltInFunctionDefinitions {
 
     public static final BuiltInFunctionDefinition REGEXP_EXTRACT =
             BuiltInFunctionDefinition.newBuilder()
-                    .name("regexpExtract")
-                    .sqlName("REGEXP_EXTRACT")
+                    .name("REGEXP_EXTRACT")
                     .kind(SCALAR)
-                    .inputTypeStrategy(
-                            or(
-                                    sequence(
-                                            logical(LogicalTypeFamily.CHARACTER_STRING),
-                                            logical(LogicalTypeFamily.CHARACTER_STRING)),
-                                    sequence(
-                                            logical(LogicalTypeFamily.CHARACTER_STRING),
-                                            logical(LogicalTypeFamily.CHARACTER_STRING),
-                                            logical(LogicalTypeRoot.INTEGER))))
+                    .inputTypeStrategy(SpecificInputTypeStrategies.REGEXP_EXTRACT)
                     .outputTypeStrategy(explicit(DataTypes.STRING().nullable()))
+                    .runtimeProvided()
                     .build();
 
     public static final BuiltInFunctionDefinition REGEXP_EXTRACT_ALL =
@@ -1263,6 +1515,7 @@ public final class BuiltInFunctionDefinitions {
     public static final BuiltInFunctionDefinition FROM_BASE64 =
             BuiltInFunctionDefinition.newBuilder()
                     .name("fromBase64")
+                    .sqlName("FROM_BASE64")
                     .kind(SCALAR)
                     .inputTypeStrategy(sequence(logical(LogicalTypeFamily.CHARACTER_STRING)))
                     .outputTypeStrategy(nullableIfArgs(explicit(DataTypes.STRING())))
@@ -1271,6 +1524,7 @@ public final class BuiltInFunctionDefinitions {
     public static final BuiltInFunctionDefinition TO_BASE64 =
             BuiltInFunctionDefinition.newBuilder()
                     .name("toBase64")
+                    .sqlName("TO_BASE64")
                     .kind(SCALAR)
                     .inputTypeStrategy(sequence(logical(LogicalTypeFamily.CHARACTER_STRING)))
                     .outputTypeStrategy(nullableIfArgs(explicit(DataTypes.STRING())))
@@ -1366,6 +1620,7 @@ public final class BuiltInFunctionDefinitions {
     public static final BuiltInFunctionDefinition PARSE_URL =
             BuiltInFunctionDefinition.newBuilder()
                     .name("parseUrl")
+                    .sqlName("PARSE_URL")
                     .kind(SCALAR)
                     .inputTypeStrategy(
                             or(
@@ -1459,25 +1714,20 @@ public final class BuiltInFunctionDefinitions {
 
     public static final BuiltInFunctionDefinition REGEXP =
             BuiltInFunctionDefinition.newBuilder()
-                    .name("regexp")
+                    .name("REGEXP")
                     .kind(SCALAR)
-                    .inputTypeStrategy(
-                            sequence(
-                                    logical(LogicalTypeFamily.CHARACTER_STRING),
-                                    logical(LogicalTypeFamily.CHARACTER_STRING)))
+                    .inputTypeStrategy(SpecificInputTypeStrategies.REGEXP)
                     .outputTypeStrategy(nullableIfArgs(explicit(DataTypes.BOOLEAN())))
+                    .runtimeProvided()
                     .build();
 
     public static final BuiltInFunctionDefinition REGEXP_REPLACE =
             BuiltInFunctionDefinition.newBuilder()
-                    .name("regexpReplace")
+                    .name("REGEXP_REPLACE")
                     .kind(SCALAR)
-                    .inputTypeStrategy(
-                            sequence(
-                                    logical(LogicalTypeFamily.CHARACTER_STRING),
-                                    logical(LogicalTypeFamily.CHARACTER_STRING),
-                                    logical(LogicalTypeFamily.CHARACTER_STRING)))
+                    .inputTypeStrategy(SpecificInputTypeStrategies.REGEXP_REPLACE)
                     .outputTypeStrategy(nullableIfArgs(explicit(DataTypes.STRING())))
+                    .runtimeProvided()
                     .build();
 
     public static final BuiltInFunctionDefinition REVERSE =
@@ -1491,6 +1741,7 @@ public final class BuiltInFunctionDefinitions {
     public static final BuiltInFunctionDefinition SPLIT_INDEX =
             BuiltInFunctionDefinition.newBuilder()
                     .name("splitIndex")
+                    .sqlName("SPLIT_INDEX")
                     .kind(SCALAR)
                     .inputTypeStrategy(
                             sequence(
@@ -1503,6 +1754,7 @@ public final class BuiltInFunctionDefinitions {
     public static final BuiltInFunctionDefinition STR_TO_MAP =
             BuiltInFunctionDefinition.newBuilder()
                     .name("strToMap")
+                    .sqlName("STR_TO_MAP")
                     .kind(SCALAR)
                     .inputTypeStrategy(
                             or(
@@ -1548,6 +1800,26 @@ public final class BuiltInFunctionDefinitions {
                     .runtimeClass("org.apache.flink.table.runtime.functions.scalar.EltFunction")
                     .build();
 
+    public static final BuiltInFunctionDefinition OBJECT_OF =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("OBJECT_OF")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(SpecificInputTypeStrategies.OBJECT_OF)
+                    .outputTypeStrategy(SpecificTypeStrategies.OBJECT_OF)
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.ObjectOfFunction")
+                    .build();
+
+    public static final BuiltInFunctionDefinition OBJECT_UPDATE =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("OBJECT_UPDATE")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(SpecificInputTypeStrategies.OBJECT_UPDATE)
+                    .outputTypeStrategy(SpecificTypeStrategies.OBJECT_UPDATE)
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.ObjectUpdateFunction")
+                    .build();
+
     // --------------------------------------------------------------------------------------------
     // Math functions
     // --------------------------------------------------------------------------------------------
@@ -1559,7 +1831,7 @@ public final class BuiltInFunctionDefinitions {
     public static final BuiltInFunctionDefinition PLUS =
             BuiltInFunctionDefinition.newBuilder()
                     .name("plus")
-                    .callSyntax("+", SqlCallSyntax.BINARY_OP)
+                    .callSyntax("+", SqlCallSyntax.PLUS_OP)
                     .kind(SCALAR)
                     .inputTypeStrategy(
                             or(
@@ -2005,6 +2277,7 @@ public final class BuiltInFunctionDefinitions {
     public static final BuiltInFunctionDefinition RAND_INTEGER =
             BuiltInFunctionDefinition.newBuilder()
                     .name("randInteger")
+                    .sqlName("RAND_INTEGER")
                     .kind(SCALAR)
                     .notDeterministic()
                     .inputTypeStrategy(
@@ -2082,7 +2355,7 @@ public final class BuiltInFunctionDefinitions {
                     .name("extract")
                     .callSyntax(
                             "EXTRACT",
-                            (sqlName, operands) ->
+                            (sqlName, operands, sqlFactory) ->
                                     String.format(
                                             "%s(%s %s %s)",
                                             sqlName,
@@ -2090,7 +2363,7 @@ public final class BuiltInFunctionDefinitions {
                                                     .getValueAs(TimeIntervalUnit.class)
                                                     .get(),
                                             "FROM",
-                                            operands.get(1).asSerializableString()))
+                                            operands.get(1).asSerializableString(sqlFactory)))
                     .kind(SCALAR)
                     .inputTypeStrategy(SpecificInputTypeStrategies.EXTRACT)
                     .outputTypeStrategy(nullableIfArgs(explicit(BIGINT())))
@@ -2099,6 +2372,8 @@ public final class BuiltInFunctionDefinitions {
     public static final BuiltInFunctionDefinition CURRENT_DATE =
             BuiltInFunctionDefinition.newBuilder()
                     .name("currentDate")
+                    .sqlName("CURRENT_DATE")
+                    .callSyntax(SqlCallSyntax.NO_PARENTHESIS)
                     .kind(SCALAR)
                     .outputTypeStrategy(explicit(DATE().notNull()))
                     .build();
@@ -2106,6 +2381,8 @@ public final class BuiltInFunctionDefinitions {
     public static final BuiltInFunctionDefinition CURRENT_TIME =
             BuiltInFunctionDefinition.newBuilder()
                     .name("currentTime")
+                    .sqlName("CURRENT_TIME")
+                    .callSyntax(SqlCallSyntax.NO_PARENTHESIS)
                     .kind(SCALAR)
                     .outputTypeStrategy(explicit(TIME().notNull()))
                     .build();
@@ -2113,6 +2390,7 @@ public final class BuiltInFunctionDefinitions {
     public static final BuiltInFunctionDefinition LOCAL_TIME =
             BuiltInFunctionDefinition.newBuilder()
                     .name("localTime")
+                    .callSyntax(SqlCallSyntax.NO_PARENTHESIS)
                     .kind(SCALAR)
                     .outputTypeStrategy(explicit(TIME().notNull()))
                     .build();
@@ -2120,6 +2398,8 @@ public final class BuiltInFunctionDefinitions {
     public static final BuiltInFunctionDefinition CURRENT_TIMESTAMP =
             BuiltInFunctionDefinition.newBuilder()
                     .name("currentTimestamp")
+                    .sqlName("CURRENT_TIMESTAMP")
+                    .callSyntax(SqlCallSyntax.NO_PARENTHESIS)
                     .kind(SCALAR)
                     .outputTypeStrategy(explicit(TIMESTAMP_LTZ(3).notNull()))
                     .build();
@@ -2134,6 +2414,7 @@ public final class BuiltInFunctionDefinitions {
     public static final BuiltInFunctionDefinition CURRENT_ROW_TIMESTAMP =
             BuiltInFunctionDefinition.newBuilder()
                     .name("currentRowTimestamp")
+                    .sqlName("CURRENT_ROW_TIMESTAMP")
                     .kind(SCALAR)
                     .outputTypeStrategy(explicit(TIMESTAMP_LTZ(3).notNull()))
                     .notDeterministic()
@@ -2142,6 +2423,7 @@ public final class BuiltInFunctionDefinitions {
     public static final BuiltInFunctionDefinition LOCAL_TIMESTAMP =
             BuiltInFunctionDefinition.newBuilder()
                     .name("localTimestamp")
+                    .callSyntax(SqlCallSyntax.NO_PARENTHESIS)
                     .kind(SCALAR)
                     .outputTypeStrategy(explicit(TIMESTAMP(3).notNull()))
                     .build();
@@ -2150,13 +2432,13 @@ public final class BuiltInFunctionDefinitions {
             BuiltInFunctionDefinition.newBuilder()
                     .name("temporalOverlaps")
                     .callSyntax(
-                            (sqlName, operands) ->
+                            (sqlName, operands, sqlFactory) ->
                                     String.format(
                                             "(%s, %s) OVERLAPS (%s, %s)",
-                                            operands.get(0).asSerializableString(),
-                                            operands.get(1).asSerializableString(),
-                                            operands.get(2).asSerializableString(),
-                                            operands.get(3).asSerializableString()))
+                                            operands.get(0).asSerializableString(sqlFactory),
+                                            operands.get(1).asSerializableString(sqlFactory),
+                                            operands.get(2).asSerializableString(sqlFactory),
+                                            operands.get(3).asSerializableString(sqlFactory)))
                     .kind(SCALAR)
                     .inputTypeStrategy(SpecificInputTypeStrategies.TEMPORAL_OVERLAPS)
                     .outputTypeStrategy(nullableIfArgs(explicit(BOOLEAN())))
@@ -2165,6 +2447,7 @@ public final class BuiltInFunctionDefinitions {
     public static final BuiltInFunctionDefinition DATE_FORMAT =
             BuiltInFunctionDefinition.newBuilder()
                     .name("dateFormat")
+                    .sqlName("DATE_FORMAT")
                     .kind(SCALAR)
                     .inputTypeStrategy(
                             or(
@@ -2181,6 +2464,22 @@ public final class BuiltInFunctionDefinitions {
             BuiltInFunctionDefinition.newBuilder()
                     .name("timestampDiff")
                     .kind(SCALAR)
+                    .callSyntax(
+                            "TIMESTAMPDIFF",
+                            (sqlName, operands, sqlFactory) ->
+                                    String.format(
+                                            "%s(%s, %s)",
+                                            sqlName,
+                                            CallSyntaxUtils.getSymbolLiteral(
+                                                            operands.get(0), TimePointUnit.class)
+                                                    .name(),
+                                            operands.subList(1, operands.size()).stream()
+                                                    .map(
+                                                            resolvedExpression ->
+                                                                    resolvedExpression
+                                                                            .asSerializableString(
+                                                                                    sqlFactory))
+                                                    .collect(Collectors.joining(", "))))
                     .inputTypeStrategy(
                             sequence(
                                     symbol(
@@ -2200,6 +2499,7 @@ public final class BuiltInFunctionDefinitions {
     public static final BuiltInFunctionDefinition CONVERT_TZ =
             BuiltInFunctionDefinition.newBuilder()
                     .name("convertTz")
+                    .sqlName("CONVERT_TZ")
                     .kind(SCALAR)
                     .inputTypeStrategy(
                             sequence(
@@ -2212,6 +2512,7 @@ public final class BuiltInFunctionDefinitions {
     public static final BuiltInFunctionDefinition FROM_UNIXTIME =
             BuiltInFunctionDefinition.newBuilder()
                     .name("fromUnixtime")
+                    .sqlName("FROM_UNIXTIME")
                     .kind(SCALAR)
                     .inputTypeStrategy(
                             or(
@@ -2225,6 +2526,7 @@ public final class BuiltInFunctionDefinitions {
     public static final BuiltInFunctionDefinition UNIX_TIMESTAMP =
             BuiltInFunctionDefinition.newBuilder()
                     .name("unixTimestamp")
+                    .sqlName("UNIX_TIMESTAMP")
                     .kind(SCALAR)
                     .inputTypeStrategy(
                             or(
@@ -2239,6 +2541,7 @@ public final class BuiltInFunctionDefinitions {
     public static final BuiltInFunctionDefinition TO_DATE =
             BuiltInFunctionDefinition.newBuilder()
                     .name("toDate")
+                    .sqlName("TO_DATE")
                     .kind(SCALAR)
                     .inputTypeStrategy(
                             or(
@@ -2251,18 +2554,18 @@ public final class BuiltInFunctionDefinitions {
 
     public static final BuiltInFunctionDefinition TO_TIMESTAMP_LTZ =
             BuiltInFunctionDefinition.newBuilder()
-                    .name("toTimestampLtz")
+                    .name("TO_TIMESTAMP_LTZ")
                     .kind(SCALAR)
-                    .inputTypeStrategy(
-                            sequence(
-                                    logical(LogicalTypeFamily.NUMERIC),
-                                    logical(LogicalTypeFamily.INTEGER_NUMERIC, false)))
+                    .inputTypeStrategy(SpecificInputTypeStrategies.TO_TIMESTAMP_LTZ)
                     .outputTypeStrategy(SpecificTypeStrategies.TO_TIMESTAMP_LTZ)
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.ToTimestampLtzFunction")
                     .build();
 
     public static final BuiltInFunctionDefinition TO_TIMESTAMP =
             BuiltInFunctionDefinition.newBuilder()
                     .name("toTimestamp")
+                    .sqlName("TO_TIMESTAMP")
                     .kind(SCALAR)
                     .inputTypeStrategy(
                             or(
@@ -2281,17 +2584,18 @@ public final class BuiltInFunctionDefinitions {
             BuiltInFunctionDefinition.newBuilder()
                     .name("at")
                     .callSyntax(
-                            (sqlName, operands) ->
+                            (sqlName, operands, sqlFactory) ->
                                     String.format(
                                             "%s[%s]",
-                                            operands.get(0).asSerializableString(),
-                                            operands.get(1).asSerializableString()))
+                                            operands.get(0).asSerializableString(sqlFactory),
+                                            operands.get(1).asSerializableString(sqlFactory)))
                     .kind(SCALAR)
                     .inputTypeStrategy(
                             sequence(
                                     or(
                                             logical(LogicalTypeRoot.ARRAY),
-                                            logical(LogicalTypeRoot.MAP)),
+                                            logical(LogicalTypeRoot.MAP),
+                                            logical(LogicalTypeRoot.VARIANT)),
                                     InputTypeStrategies.ITEM_AT_INDEX))
                     .outputTypeStrategy(SpecificTypeStrategies.ITEM_AT)
                     .build();
@@ -2355,7 +2659,7 @@ public final class BuiltInFunctionDefinitions {
                     .outputTypeStrategy(
                             callContext -> {
                                 throw new UnsupportedOperationException(
-                                        "FLATTEN should be resolved to GET expressions");
+                                        "FLATTEN should be resolved to GET expressions.");
                             })
                     .build();
 
@@ -2363,7 +2667,7 @@ public final class BuiltInFunctionDefinitions {
             BuiltInFunctionDefinition.newBuilder()
                     .name("get")
                     .callSyntax(
-                            (sqlName, operands) -> {
+                            (sqlName, operands, sqlFactory) -> {
                                 final Optional<String> fieldName =
                                         ((ValueLiteralExpression) operands.get(1))
                                                 .getValueAs(String.class);
@@ -2374,12 +2678,13 @@ public final class BuiltInFunctionDefinitions {
                                                         String.format(
                                                                 "%s.%s",
                                                                 operands.get(0)
-                                                                        .asSerializableString(),
+                                                                        .asSerializableString(
+                                                                                sqlFactory),
                                                                 EncodingUtils.escapeIdentifier(n)))
                                         .orElseGet(
                                                 () ->
                                                         SqlCallSyntax.FUNCTION.unparse(
-                                                                sqlName, operands));
+                                                                sqlName, operands, sqlFactory));
                             })
                     .kind(OTHER)
                     .inputTypeStrategy(
@@ -2546,6 +2851,7 @@ public final class BuiltInFunctionDefinitions {
                     .kind(OTHER)
                     .inputTypeStrategy(SpecificInputTypeStrategies.OVER)
                     .outputTypeStrategy(TypeStrategies.argument(0))
+                    .callSyntax(SqlCallSyntax.OVER)
                     .build();
 
     // --------------------------------------------------------------------------------------------
@@ -2724,6 +3030,297 @@ public final class BuiltInFunctionDefinitions {
                     .runtimeDeferred()
                     .build();
 
+    public static final BuiltInFunctionDefinition JSON =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("JSON")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(sequence(logical(LogicalTypeFamily.CHARACTER_STRING)))
+                    .outputTypeStrategy(nullableIfArgs(explicit(DataTypes.STRING())))
+                    .runtimeProvided()
+                    .build();
+
+    // --------------------------------------------------------------------------------------------
+    // Variant functions
+    // --------------------------------------------------------------------------------------------
+
+    public static final BuiltInFunctionDefinition PARSE_JSON =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("PARSE_JSON")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(
+                            or(
+                                    sequence(logical(LogicalTypeFamily.CHARACTER_STRING)),
+                                    sequence(
+                                            logical(LogicalTypeFamily.CHARACTER_STRING),
+                                            logical(LogicalTypeRoot.BOOLEAN))))
+                    .outputTypeStrategy(nullableIfArgs(explicit(DataTypes.VARIANT())))
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.ParseJsonFunction")
+                    .build();
+
+    public static final BuiltInFunctionDefinition TRY_PARSE_JSON =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("TRY_PARSE_JSON")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(
+                            or(
+                                    sequence(logical(LogicalTypeFamily.CHARACTER_STRING)),
+                                    sequence(
+                                            logical(LogicalTypeFamily.CHARACTER_STRING),
+                                            logical(LogicalTypeRoot.BOOLEAN))))
+                    .outputTypeStrategy(forceNullable(explicit(DataTypes.VARIANT())))
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.TryParseJsonFunction")
+                    .build();
+
+    // --------------------------------------------------------------------------------------------
+    // Bitmap functions
+    // --------------------------------------------------------------------------------------------
+
+    public static final BuiltInFunctionDefinition BITMAP_AND =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("BITMAP_AND")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(
+                            sequence(
+                                    Arrays.asList("bitmap1", "bitmap2"),
+                                    Arrays.asList(
+                                            logical(LogicalTypeRoot.BITMAP),
+                                            logical(LogicalTypeRoot.BITMAP))))
+                    .outputTypeStrategy(nullableIfArgs(explicit(DataTypes.BITMAP())))
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.BitmapAndFunction")
+                    .build();
+
+    public static final BuiltInFunctionDefinition BITMAP_ANDNOT =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("BITMAP_ANDNOT")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(
+                            sequence(
+                                    Arrays.asList("bitmap1", "bitmap2"),
+                                    Arrays.asList(
+                                            logical(LogicalTypeRoot.BITMAP),
+                                            logical(LogicalTypeRoot.BITMAP))))
+                    .outputTypeStrategy(nullableIfArgs(explicit(DataTypes.BITMAP())))
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.BitmapAndnotFunction")
+                    .build();
+
+    public static final BuiltInFunctionDefinition BITMAP_AND_AGG =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("BITMAP_AND_AGG")
+                    .kind(AGGREGATE)
+                    .inputTypeStrategy(
+                            sequence(
+                                    Collections.singletonList("bitmap"),
+                                    Collections.singletonList(logical(LogicalTypeRoot.BITMAP))))
+                    .outputTypeStrategy(explicit(DataTypes.BITMAP()))
+                    .runtimeProvided()
+                    .build();
+
+    public static final BuiltInFunctionDefinition BITMAP_AND_CARDINALITY_AGG =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("BITMAP_AND_CARDINALITY_AGG")
+                    .kind(AGGREGATE)
+                    .inputTypeStrategy(
+                            sequence(
+                                    Collections.singletonList("bitmap"),
+                                    Collections.singletonList(logical(LogicalTypeRoot.BITMAP))))
+                    .outputTypeStrategy(explicit(DataTypes.BIGINT()))
+                    .runtimeProvided()
+                    .build();
+
+    public static final BuiltInFunctionDefinition BITMAP_BUILD =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("BITMAP_BUILD")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(
+                            or(
+                                    sequence(
+                                            Collections.singletonList("array"),
+                                            Collections.singletonList(
+                                                    InputTypeStrategies.explicit(
+                                                            DataTypes.ARRAY(DataTypes.INT())
+                                                                    .notNull()))),
+                                    sequence(
+                                            Collections.singletonList("array"),
+                                            Collections.singletonList(
+                                                    InputTypeStrategies.explicit(
+                                                            DataTypes.ARRAY(DataTypes.INT()))))))
+                    .outputTypeStrategy(nullableIfArgs(explicit(DataTypes.BITMAP())))
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.BitmapBuildFunction")
+                    .build();
+
+    public static final BuiltInFunctionDefinition BITMAP_BUILD_AGG =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("BITMAP_BUILD_AGG")
+                    .kind(AGGREGATE)
+                    .inputTypeStrategy(
+                            sequence(
+                                    Collections.singletonList("value"),
+                                    Collections.singletonList(logical(LogicalTypeRoot.INTEGER))))
+                    .outputTypeStrategy(explicit(DataTypes.BITMAP()))
+                    .runtimeProvided()
+                    .build();
+
+    public static final BuiltInFunctionDefinition BITMAP_BUILD_CARDINALITY_AGG =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("BITMAP_BUILD_CARDINALITY_AGG")
+                    .kind(AGGREGATE)
+                    .inputTypeStrategy(
+                            sequence(
+                                    Collections.singletonList("value"),
+                                    Collections.singletonList(logical(LogicalTypeRoot.INTEGER))))
+                    .outputTypeStrategy(explicit(DataTypes.BIGINT()))
+                    .runtimeProvided()
+                    .build();
+
+    public static final BuiltInFunctionDefinition BITMAP_CARDINALITY =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("BITMAP_CARDINALITY")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(
+                            sequence(
+                                    Collections.singletonList("bitmap"),
+                                    Collections.singletonList(logical(LogicalTypeRoot.BITMAP))))
+                    .outputTypeStrategy(nullableIfArgs(explicit(DataTypes.BIGINT())))
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.BitmapCardinalityFunction")
+                    .build();
+
+    public static final BuiltInFunctionDefinition BITMAP_FROM_BYTES =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("BITMAP_FROM_BYTES")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(
+                            sequence(
+                                    Collections.singletonList("bytes"),
+                                    Collections.singletonList(
+                                            logical(LogicalTypeFamily.BINARY_STRING))))
+                    .outputTypeStrategy(nullableIfArgs(explicit(DataTypes.BITMAP())))
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.BitmapFromBytesFunction")
+                    .build();
+
+    public static final BuiltInFunctionDefinition BITMAP_OR =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("BITMAP_OR")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(
+                            sequence(
+                                    Arrays.asList("bitmap1", "bitmap2"),
+                                    Arrays.asList(
+                                            logical(LogicalTypeRoot.BITMAP),
+                                            logical(LogicalTypeRoot.BITMAP))))
+                    .outputTypeStrategy(nullableIfArgs(explicit(DataTypes.BITMAP())))
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.BitmapOrFunction")
+                    .build();
+
+    public static final BuiltInFunctionDefinition BITMAP_OR_AGG =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("BITMAP_OR_AGG")
+                    .kind(AGGREGATE)
+                    .inputTypeStrategy(
+                            sequence(
+                                    Collections.singletonList("bitmap"),
+                                    Collections.singletonList(logical(LogicalTypeRoot.BITMAP))))
+                    .outputTypeStrategy(explicit(DataTypes.BITMAP()))
+                    .runtimeProvided()
+                    .build();
+
+    public static final BuiltInFunctionDefinition BITMAP_OR_CARDINALITY_AGG =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("BITMAP_OR_CARDINALITY_AGG")
+                    .kind(AGGREGATE)
+                    .inputTypeStrategy(
+                            sequence(
+                                    Collections.singletonList("bitmap"),
+                                    Collections.singletonList(logical(LogicalTypeRoot.BITMAP))))
+                    .outputTypeStrategy(explicit(DataTypes.BIGINT()))
+                    .runtimeProvided()
+                    .build();
+
+    public static final BuiltInFunctionDefinition BITMAP_TO_ARRAY =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("BITMAP_TO_ARRAY")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(
+                            sequence(
+                                    Collections.singletonList("bitmap"),
+                                    Collections.singletonList(logical(LogicalTypeRoot.BITMAP))))
+                    .outputTypeStrategy(nullableIfArgs(explicit(DataTypes.ARRAY(DataTypes.INT()))))
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.BitmapToArrayFunction")
+                    .build();
+
+    public static final BuiltInFunctionDefinition BITMAP_TO_BYTES =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("BITMAP_TO_BYTES")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(
+                            sequence(
+                                    Collections.singletonList("bitmap"),
+                                    Collections.singletonList(logical(LogicalTypeRoot.BITMAP))))
+                    .outputTypeStrategy(nullableIfArgs(explicit(DataTypes.BYTES())))
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.BitmapToBytesFunction")
+                    .build();
+
+    public static final BuiltInFunctionDefinition BITMAP_TO_STRING =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("BITMAP_TO_STRING")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(
+                            sequence(
+                                    Collections.singletonList("bitmap"),
+                                    Collections.singletonList(logical(LogicalTypeRoot.BITMAP))))
+                    .outputTypeStrategy(nullableIfArgs(explicit(DataTypes.STRING())))
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.BitmapToStringFunction")
+                    .build();
+
+    public static final BuiltInFunctionDefinition BITMAP_XOR =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("BITMAP_XOR")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(
+                            sequence(
+                                    Arrays.asList("bitmap1", "bitmap2"),
+                                    Arrays.asList(
+                                            logical(LogicalTypeRoot.BITMAP),
+                                            logical(LogicalTypeRoot.BITMAP))))
+                    .outputTypeStrategy(nullableIfArgs(explicit(DataTypes.BITMAP())))
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.BitmapXorFunction")
+                    .build();
+
+    public static final BuiltInFunctionDefinition BITMAP_XOR_AGG =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("BITMAP_XOR_AGG")
+                    .kind(AGGREGATE)
+                    .inputTypeStrategy(
+                            sequence(
+                                    Collections.singletonList("bitmap"),
+                                    Collections.singletonList(logical(LogicalTypeRoot.BITMAP))))
+                    .outputTypeStrategy(explicit(DataTypes.BITMAP()))
+                    .runtimeProvided()
+                    .build();
+
+    public static final BuiltInFunctionDefinition BITMAP_XOR_CARDINALITY_AGG =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("BITMAP_XOR_CARDINALITY_AGG")
+                    .kind(AGGREGATE)
+                    .inputTypeStrategy(
+                            sequence(
+                                    Collections.singletonList("bitmap"),
+                                    Collections.singletonList(logical(LogicalTypeRoot.BITMAP))))
+                    .outputTypeStrategy(explicit(DataTypes.BIGINT()))
+                    .runtimeProvided()
+                    .build();
+
     // --------------------------------------------------------------------------------------------
     // Other functions
     // --------------------------------------------------------------------------------------------
@@ -2782,6 +3379,22 @@ public final class BuiltInFunctionDefinitions {
                     .outputTypeStrategy(TypeStrategies.argument(0))
                     .build();
 
+    public static final BuiltInFunctionDefinition ASSIGNMENT =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("ASSIGNMENT")
+                    .kind(OTHER)
+                    .outputTypeStrategy(TypeStrategies.MISSING)
+                    .build();
+
+    public static final BuiltInFunctionDefinition DEFAULT =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("DEFAULT")
+                    .callSyntax(SqlCallSyntax.NO_PARENTHESIS)
+                    .kind(SCALAR)
+                    .inputTypeStrategy(NO_ARGS)
+                    .outputTypeStrategy(TypeStrategies.MISSING)
+                    .build();
+
     public static final BuiltInFunctionDefinition STREAM_RECORD_TIMESTAMP =
             BuiltInFunctionDefinition.newBuilder()
                     .name("streamRecordTimestamp")
@@ -2804,6 +3417,22 @@ public final class BuiltInFunctionDefinitions {
             new HashSet<>(Arrays.asList(PROCTIME, ROWTIME));
 
     public static final List<FunctionDefinition> ORDERING = Arrays.asList(ORDER_ASC, ORDER_DESC);
+
+    /**
+     * True when {@code key} appears among the {@code op_mapping} keys. Each map key may itself be a
+     * comma-separated list (e.g. {@code "INSERT,UPDATE_AFTER"}) - each part is trimmed and compared
+     * against {@code key}, so one entry can cover multiple change kinds.
+     *
+     * <p>Used by {@code TO_CHANGELOG} conditional traits to inspect the user-provided {@code
+     * op_mapping} argument.
+     */
+    private static boolean opMappingContainsKey(
+            final Map<String, String> opMapping, final String key) {
+        return opMapping.keySet().stream()
+                .flatMap(k -> Arrays.stream(k.split(",")))
+                .map(String::trim)
+                .anyMatch(key::equals);
+    }
 
     @Internal
     public static List<BuiltInFunctionDefinition> getDefinitions() {

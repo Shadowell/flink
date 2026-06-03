@@ -19,12 +19,12 @@
 package org.apache.flink.test.streaming.runtime.util;
 
 import org.apache.flink.api.common.functions.OpenContext;
-import org.apache.flink.streaming.api.functions.sink.RichSinkFunction;
+import org.apache.flink.streaming.api.functions.sink.legacy.RichSinkFunction;
 
 import java.util.ArrayList;
 import java.util.List;
 
-import static org.junit.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * SinkFunction asserting that at least one record was collected.
@@ -43,6 +43,6 @@ public final class ReceiveCheckNoOpSink<T> extends RichSinkFunction<T> {
     }
 
     public void close() {
-        assertTrue(received.size() > 0);
+        assertThat(received).hasSizeGreaterThan(0);
     }
 }

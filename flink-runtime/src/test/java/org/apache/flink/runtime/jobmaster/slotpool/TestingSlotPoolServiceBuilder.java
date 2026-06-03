@@ -18,6 +18,7 @@
 
 package org.apache.flink.runtime.jobmaster.slotpool;
 
+import org.apache.flink.api.common.ApplicationID;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
@@ -71,6 +72,7 @@ public class TestingSlotPoolServiceBuilder implements SlotPoolServiceFactory {
     @Override
     public SlotPoolService createSlotPoolService(
             @Nonnull JobID jobId,
+            @Nonnull ApplicationID applicationId,
             DeclarativeSlotPoolFactory declarativeSlotPoolFactory,
             @Nonnull ComponentMainThreadExecutor componentMainThreadExecutor) {
         return new TestingSlotPoolService(
@@ -89,6 +91,11 @@ public class TestingSlotPoolServiceBuilder implements SlotPoolServiceFactory {
     public TestingSlotPoolServiceBuilder setConnectToResourceManagerConsumer(
             Consumer<? super ResourceManagerGateway> connectToResourceManagerConsumer) {
         this.connectToResourceManagerConsumer = connectToResourceManagerConsumer;
+        return this;
+    }
+
+    public TestingSlotPoolServiceBuilder setCloseRunnable(Runnable closeRunnable) {
+        this.closeRunnable = closeRunnable;
         return this;
     }
 

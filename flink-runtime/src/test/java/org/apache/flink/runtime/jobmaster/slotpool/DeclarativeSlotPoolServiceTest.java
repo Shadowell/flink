@@ -18,6 +18,7 @@
 
 package org.apache.flink.runtime.jobmaster.slotpool;
 
+import org.apache.flink.api.common.ApplicationID;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
@@ -39,7 +40,7 @@ import org.apache.flink.runtime.util.ResourceCounter;
 import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.clock.SystemClock;
 
-import org.apache.flink.shaded.guava32.com.google.common.collect.Iterables;
+import org.apache.flink.shaded.guava33.com.google.common.collect.Iterables;
 
 import org.junit.jupiter.api.Test;
 
@@ -64,6 +65,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class DeclarativeSlotPoolServiceTest {
 
     private static final JobID jobId = new JobID();
+    private static final ApplicationID applicationId = new ApplicationID();
     private static final JobMasterId jobMasterId = JobMasterId.generate();
     private final ComponentMainThreadExecutor mainThreadExecutor = forMainThread();
     private static final String address = "localhost";
@@ -359,6 +361,7 @@ class DeclarativeSlotPoolServiceTest {
         final DeclarativeSlotPoolService declarativeSlotPoolService =
                 new DeclarativeSlotPoolService(
                         jobId,
+                        applicationId,
                         declarativeSlotPoolFactory,
                         SystemClock.getInstance(),
                         Duration.ofSeconds(20L),

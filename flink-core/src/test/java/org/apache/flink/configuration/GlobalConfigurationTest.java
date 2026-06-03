@@ -26,6 +26,7 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -40,49 +41,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class GlobalConfigurationTest {
 
     @TempDir private File tmpDir;
-
-    @Test
-    void testConfigurationWithLegacyYAML() throws FileNotFoundException {
-        File confFile = new File(tmpDir, GlobalConfiguration.LEGACY_FLINK_CONF_FILENAME);
-        try (PrintWriter pw = new PrintWriter(confFile)) {
-            pw.println("###########################"); // should be skipped
-            pw.println("# Some : comments : to skip"); // should be skipped
-            pw.println("###########################"); // should be skipped
-            pw.println("mykey1: myvalue1"); // OK, simple correct case
-            pw.println("mykey2       : myvalue2"); // OK, whitespace before colon is correct
-            pw.println("mykey3:myvalue3"); // SKIP, missing white space after colon
-            pw.println(" some nonsense without colon and whitespace separator"); // SKIP
-            pw.println(" :  "); // SKIP
-            pw.println("   "); // SKIP (silently)
-            pw.println(" "); // SKIP (silently)
-            pw.println("mykey4: myvalue4# some comments"); // OK, skip comments only
-            pw.println("   mykey5    :    myvalue5    "); // OK, trim unnecessary whitespace
-            pw.println("mykey6: my: value6"); // OK, only use first ': ' as separator
-            pw.println("mykey7: "); // SKIP, no value provided
-            pw.println(": myvalue8"); // SKIP, no key provided
-
-            pw.println("mykey9: myvalue9"); // OK
-            pw.println("mykey9: myvalue10"); // OK, overwrite last value
-        }
-        Configuration conf = GlobalConfiguration.loadConfiguration(tmpDir.getAbsolutePath());
-
-        // all distinct keys from confFile1 + confFile2 key
-        assertThat(conf.keySet()).hasSize(6);
-
-        // keys 1, 2, 4, 5, 6, 7, 8 should be OK and match the expected values
-        assertThat(conf.getString("mykey1", null)).isEqualTo("myvalue1");
-        assertThat(conf.getString("mykey1", null)).isEqualTo("myvalue1");
-        assertThat(conf.getString("mykey2", null)).isEqualTo("myvalue2");
-        assertThat(conf.getString("mykey3", "null")).isEqualTo("null");
-        assertThat(conf.getString("mykey4", null)).isEqualTo("myvalue4");
-        assertThat(conf.getString("mykey5", null)).isEqualTo("myvalue5");
-        assertThat(conf.getString("mykey6", null)).isEqualTo("my: value6");
-        assertThat(conf.getString("mykey7", "null")).isEqualTo("null");
-        assertThat(conf.getString("mykey8", "null")).isEqualTo("null");
-        assertThat(conf.getString("mykey9", null)).isEqualTo("myvalue10");
-        // Clear the standard yaml flag to avoid impact to other cases.
-        GlobalConfiguration.setStandardYaml(true);
-    }
 
     @Test
     void testConfigurationWithStandardYAML() throws FileNotFoundException {
@@ -155,21 +113,6 @@ class GlobalConfigurationTest {
     }
 
     @Test
-    // We allow malformed YAML files if loaded legacy flink conf
-    void testInvalidLegacyYamlFile() throws IOException {
-        final File confFile =
-                new File(tmpDir.getPath(), GlobalConfiguration.LEGACY_FLINK_CONF_FILENAME);
-
-        try (PrintWriter pw = new PrintWriter(confFile)) {
-            pw.append("invalid");
-        }
-
-        assertThat(GlobalConfiguration.loadConfiguration(tmpDir.getAbsolutePath())).isNotNull();
-        // Clear the standard yaml flag to avoid impact to other cases.
-        GlobalConfiguration.setStandardYaml(true);
-    }
-
-    @Test
     // We do not allow malformed YAML files if loaded standard yaml
     void testInvalidStandardYamlFile() throws IOException {
         final File confFile = new File(tmpDir.getPath(), GlobalConfiguration.FLINK_CONF_FILENAME);
@@ -193,29 +136,94 @@ class GlobalConfigurationTest {
 
     @Test
     void testHiddenKey() {
-        assertThat(GlobalConfiguration.isSensitive("password123")).isTrue();
-        assertThat(GlobalConfiguration.isSensitive("123pasSword")).isTrue();
-        assertThat(GlobalConfiguration.isSensitive("PasSword")).isTrue();
-        assertThat(GlobalConfiguration.isSensitive("Secret")).isTrue();
-        assertThat(GlobalConfiguration.isSensitive("polaris.client-secret")).isTrue();
-        assertThat(GlobalConfiguration.isSensitive("client-secret")).isTrue();
-        assertThat(GlobalConfiguration.isSensitive("service-key-json")).isTrue();
-        assertThat(GlobalConfiguration.isSensitive("auth.basic.password")).isTrue();
-        assertThat(GlobalConfiguration.isSensitive("auth.basic.token")).isTrue();
-        assertThat(GlobalConfiguration.isSensitive("avro-confluent.basic-auth.user-info")).isTrue();
-        assertThat(GlobalConfiguration.isSensitive("key.avro-confluent.basic-auth.user-info"))
+        assertThat(GlobalConfiguration.isSensitive("password123", Collections.emptyList()))
                 .isTrue();
-        assertThat(GlobalConfiguration.isSensitive("value.avro-confluent.basic-auth.user-info"))
+        assertThat(GlobalConfiguration.isSensitive("123pasSword", Collections.emptyList()))
                 .isTrue();
-        assertThat(GlobalConfiguration.isSensitive("kafka.jaas.config")).isTrue();
-        assertThat(GlobalConfiguration.isSensitive("properties.ssl.truststore.password")).isTrue();
-        assertThat(GlobalConfiguration.isSensitive("properties.ssl.keystore.password")).isTrue();
-
+        assertThat(GlobalConfiguration.isSensitive("PasSword", Collections.emptyList())).isTrue();
+        assertThat(GlobalConfiguration.isSensitive("Secret", Collections.emptyList())).isTrue();
         assertThat(
                         GlobalConfiguration.isSensitive(
-                                "fs.azure.account.key.storageaccount123456.core.windows.net"))
+                                "polaris.client-secret", Collections.emptyList()))
                 .isTrue();
-        assertThat(GlobalConfiguration.isSensitive("Hello")).isFalse();
-        assertThat(GlobalConfiguration.isSensitive("metrics.reporter.dghttp.apikey")).isTrue();
+        assertThat(GlobalConfiguration.isSensitive("client-secret", Collections.emptyList()))
+                .isTrue();
+        assertThat(GlobalConfiguration.isSensitive("service-key-json", Collections.emptyList()))
+                .isTrue();
+        assertThat(GlobalConfiguration.isSensitive("auth.basic.password", Collections.emptyList()))
+                .isTrue();
+        assertThat(GlobalConfiguration.isSensitive("auth.basic.token", Collections.emptyList()))
+                .isTrue();
+        assertThat(
+                        GlobalConfiguration.isSensitive(
+                                "avro-confluent.basic-auth.user-info", Collections.emptyList()))
+                .isTrue();
+        assertThat(
+                        GlobalConfiguration.isSensitive(
+                                "key.avro-confluent.basic-auth.user-info", Collections.emptyList()))
+                .isTrue();
+        assertThat(
+                        GlobalConfiguration.isSensitive(
+                                "value.avro-confluent.basic-auth.user-info",
+                                Collections.emptyList()))
+                .isTrue();
+        assertThat(GlobalConfiguration.isSensitive("kafka.jaas.config", Collections.emptyList()))
+                .isTrue();
+        assertThat(
+                        GlobalConfiguration.isSensitive(
+                                "properties.ssl.truststore.password", Collections.emptyList()))
+                .isTrue();
+        assertThat(
+                        GlobalConfiguration.isSensitive(
+                                "properties.ssl.keystore.password", Collections.emptyList()))
+                .isTrue();
+        assertThat(
+                        GlobalConfiguration.isSensitive(
+                                "fs.azure.account.key.storageaccount123456.core.windows.net",
+                                Collections.emptyList()))
+                .isTrue();
+        assertThat(GlobalConfiguration.isSensitive("Hello", Collections.emptyList())).isFalse();
+        assertThat(
+                        GlobalConfiguration.isSensitive(
+                                "metrics.reporter.dghttp.apikey", Collections.emptyList()))
+                .isTrue();
+
+        // access-key / access.key / accesskey patterns
+        assertThat(GlobalConfiguration.isSensitive("s3.access-key", Collections.emptyList()))
+                .isTrue();
+        assertThat(GlobalConfiguration.isSensitive("fs.s3a.access.key", Collections.emptyList()))
+                .isTrue();
+        assertThat(GlobalConfiguration.isSensitive("s3.access.key", Collections.emptyList()))
+                .isTrue();
+        assertThat(GlobalConfiguration.isSensitive("fs.oss.accessKeyId", Collections.emptyList()))
+                .isTrue();
+        assertThat(GlobalConfiguration.isSensitive("fs.oss.accesskey", Collections.emptyList()))
+                .isTrue();
+    }
+
+    @Test
+    void testAdditionalSensitiveKeys() {
+        assertThat(
+                        GlobalConfiguration.isSensitive(
+                                "my.custom.credential",
+                                Arrays.asList("my.custom.credential", "VENDOR_TOKEN_ID")))
+                .isTrue();
+        assertThat(
+                        GlobalConfiguration.isSensitive(
+                                "prefix.my.custom.credential.suffix",
+                                Arrays.asList("my.custom.credential")))
+                .isTrue();
+        // case-insensitive matching
+        assertThat(
+                        GlobalConfiguration.isSensitive(
+                                "vendor_token_id", Arrays.asList("VENDOR_TOKEN_ID")))
+                .isTrue();
+        // built-in keys are unaffected when additional list is empty
+        assertThat(GlobalConfiguration.isSensitive("password", Collections.emptyList())).isTrue();
+        // unrelated key not matched
+        assertThat(
+                        GlobalConfiguration.isSensitive(
+                                "unrelated.key", Arrays.asList("my.custom.credential")))
+                .isFalse();
     }
 }

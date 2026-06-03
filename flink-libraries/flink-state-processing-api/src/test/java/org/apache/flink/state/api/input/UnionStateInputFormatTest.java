@@ -60,7 +60,8 @@ public class UnionStateInputFormatTest {
             testHarness.processElement(3, 0);
 
             OperatorSubtaskState subtaskState = testHarness.snapshot(0, 0);
-            OperatorState state = new OperatorState(OperatorIDGenerator.fromUid("uid"), 1, 4);
+            OperatorState state =
+                    new OperatorState(null, null, OperatorIDGenerator.fromUid("uid"), 1, 4);
             state.putState(0, subtaskState);
 
             OperatorStateInputSplit split =
@@ -70,7 +71,7 @@ public class UnionStateInputFormatTest {
                     new UnionStateInputFormat<>(
                             state, new Configuration(), null, descriptor, new ExecutionConfig());
 
-            format.setRuntimeContext(new MockStreamingRuntimeContext(false, 1, 0));
+            format.setRuntimeContext(new MockStreamingRuntimeContext(1, 0));
             format.open(split);
 
             List<Integer> results = new ArrayList<>();

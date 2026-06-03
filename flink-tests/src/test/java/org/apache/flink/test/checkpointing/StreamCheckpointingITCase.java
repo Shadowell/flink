@@ -26,9 +26,9 @@ import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.streaming.api.checkpoint.ListCheckpointed;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.sink.SinkFunction;
-import org.apache.flink.streaming.api.functions.source.ParallelSourceFunction;
-import org.apache.flink.streaming.api.functions.source.RichSourceFunction;
+import org.apache.flink.streaming.api.functions.sink.legacy.SinkFunction;
+import org.apache.flink.streaming.api.functions.source.legacy.ParallelSourceFunction;
+import org.apache.flink.streaming.api.functions.source.legacy.RichSourceFunction;
 
 import java.io.IOException;
 import java.util.Collections;
@@ -37,7 +37,7 @@ import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
 
-import static org.junit.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * A simple test that runs a streaming topology with checkpointing enabled.
@@ -45,10 +45,9 @@ import static org.junit.Assert.assertEquals;
  * <p>The test triggers a failure after a while and verifies that, after completion, the state
  * defined with the {@link ListCheckpointed} interface reflects the "exactly once" semantics.
  */
-@SuppressWarnings("serial")
-public class StreamCheckpointingITCase extends StreamFaultToleranceTestBase {
+class StreamCheckpointingITCase extends StreamFaultToleranceTestBase {
 
-    static final long NUM_STRINGS = 10_000_000L;
+    private static final long NUM_STRINGS = 10_000_000L;
 
     /**
      * Runs the following program.
@@ -72,7 +71,7 @@ public class StreamCheckpointingITCase extends StreamFaultToleranceTestBase {
                 .map(new StatefulCounterFunction())
 
                 // -------------- third vertex - counter and the sink ----------------
-                .keyBy("prefix")
+                .keyBy(x -> x.prefix)
                 .map(new OnceFailingPrefixCounter(NUM_STRINGS))
                 .addSink(
                         new SinkFunction<PrefixCount>() {
@@ -106,13 +105,13 @@ public class StreamCheckpointingITCase extends StreamFaultToleranceTestBase {
             reduceInputCount += l;
         }
 
-        assertEquals(NUM_STRINGS, filterSum);
-        assertEquals(NUM_STRINGS, mapSum);
-        assertEquals(NUM_STRINGS, countSum);
-        assertEquals(NUM_STRINGS, reduceInputCount);
+        assertThat(filterSum).isEqualTo(NUM_STRINGS);
+        assertThat(mapSum).isEqualTo(NUM_STRINGS);
+        assertThat(countSum).isEqualTo(NUM_STRINGS);
+        assertThat(reduceInputCount).isEqualTo(NUM_STRINGS);
         // verify that we counted exactly right
         for (Long count : OnceFailingPrefixCounter.prefixCounts.values()) {
-            assertEquals(new Long(NUM_STRINGS / 40), count);
+            assertThat(count).isEqualTo(NUM_STRINGS / 40L);
         }
     }
 

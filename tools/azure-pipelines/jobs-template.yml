@@ -108,6 +108,13 @@ jobs:
     condition: not(eq('${{parameters.test_pool_definition.name}}', 'Default'))
     displayName: Free up disk space
 
+  # Ensure Python devel headers for Python tests
+  - script: |
+      sudo apt-get update
+      sudo apt-get install -y python3-dev
+    condition: eq(variables['module'], 'python')
+    displayName: Install Python development headers
+
   # download artifact from compile stage
   - task: DownloadPipelineArtifact@2
     inputs:
@@ -188,3 +195,17 @@ jobs:
     environment: ${{parameters.environment}}
     jdk: ${{parameters.jdk}}
     group: 2
+- template: e2e-template.yml
+  parameters:
+    stage_name: ${{parameters.stage_name}}
+    e2e_pool_definition: ${{parameters.e2e_pool_definition}}
+    environment: ${{parameters.environment}}
+    jdk: ${{parameters.jdk}}
+    group: 3
+- template: e2e-template.yml
+  parameters:
+    stage_name: ${{parameters.stage_name}}
+    e2e_pool_definition: ${{parameters.e2e_pool_definition}}
+    environment: ${{parameters.environment}}
+    jdk: ${{parameters.jdk}}
+    group: 4

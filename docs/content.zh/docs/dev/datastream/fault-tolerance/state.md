@@ -1,6 +1,6 @@
 ---
 title: "Working with State"
-weight: 2
+weight: 1
 type: docs
 aliases:
   - /zh/dev/stream/state/state.html
@@ -33,7 +33,7 @@ Processing]({{< ref "docs/concepts/stateful-stream-processing" >}})。
 ## Keyed DataStream
 
 如果你希望使用 keyed state，首先需要为`DataStream`指定 key（主键）。这个主键用于状态分区（也会给数据流中的记录本身分区）。
-你可以使用 `DataStream` 中 Java/Scala API 的 `keyBy(KeySelector)` 或者是 Python API 的 `key_by(KeySelector)` 来指定 key。
+你可以使用 `DataStream` 中 Java API 的 `keyBy(KeySelector)` 或者是 Python API 的 `key_by(KeySelector)` 来指定 key。
 它将生成 `KeyedStream`，接下来允许使用 keyed state 操作。
 
 Key selector 函数接收单条记录作为输入，返回这条记录的 key。该 key 可以为任何类型，但是它的计算产生方式**必须**是具备确定性的。
@@ -59,15 +59,6 @@ KeyedStream<WC> keyed = words
 ```
 
 {{< /tab >}}
-{{< tab "Scala" >}}
-```scala
-// some ordinary case class
-case class WC(word: String, count: Int)
-val words: DataStream[WC] = // [...]
-val keyed = words.keyBy( _.word )
-```
-{{< /tab >}}
-
 {{< tab "Python" >}}
 ```python
 words = # type: DataStream[Row]
@@ -78,7 +69,7 @@ keyed = words.key_by(lambda row: row[0])
 
 #### Tuple Keys 和 Expression Keys
 
-Flink 也有两种不同定义 key 的方式：Java/Scala API（Python API 仍未支持） 的 Tuple key（通过字段索引指定的 key）和 Expression key（通过字段名称指定的 key）。
+Flink 也有两种不同定义 key 的方式：Java API（Python API 仍未支持） 的 Tuple key（通过字段索引指定的 key）和 Expression key（通过字段名称指定的 key）。
 借此你可以通过 tuple 字段索引，或者是选取对象字段的表达式来指定 key。
 如今我们不建议这样使用，但你可以参考 `DataStream` 的 Javadoc 来了解它们。 
 使用 KeySelector 函数显然是更好的。以几乎可以忽略的额外开销为代价，结合 Java Lambda 表达式，我们可以更方便得使用KeySelector。
@@ -88,7 +79,7 @@ Flink 也有两种不同定义 key 的方式：Java/Scala API（Python API 仍�
 ## 使用 Keyed State
 
 keyed state 接口提供不同类型状态的访问接口，这些状态都作用于当前输入数据的 key 下。换句话说，这些状态仅可在 `KeyedStream`
-上使用，在Java/Scala API上可以通过 `stream.keyBy(...)` 得到 `KeyedStream`，在Python API上可以通过 `stream.key_by(...)` 得到 `KeyedStream`。
+上使用，在Java API上可以通过 `stream.keyBy(...)` 得到 `KeyedStream`，在Python API上可以通过 `stream.key_by(...)` 得到 `KeyedStream`。
 
 接下来，我们会介绍不同类型的状态，然后介绍如何使用他们。所有支持的状态类型如下所示：
 
@@ -160,7 +151,7 @@ public class CountWindowAverage extends RichFlatMapFunction<Tuple2<Long, Long>, 
     }
 
     @Override
-    public void open(Configuration config) {
+    public void open(OpenContext ctx) {
         ValueStateDescriptor<Tuple2<Long, Long>> descriptor =
                 new ValueStateDescriptor<>(
                         "average", // the state name
@@ -179,64 +170,6 @@ env.fromElements(Tuple2.of(1L, 3L), Tuple2.of(1L, 5L), Tuple2.of(1L, 7L), Tuple2
 // the printed output will be (1,4) and (1,5)
 ```
 {{< /tab >}}
-{{< tab "Scala" >}}
-```scala
-class CountWindowAverage extends RichFlatMapFunction[(Long, Long), (Long, Long)] {
-
-  private var sum: ValueState[(Long, Long)] = _
-
-  override def flatMap(input: (Long, Long), out: Collector[(Long, Long)]): Unit = {
-
-    // access the state value
-    val tmpCurrentSum = sum.value
-
-    // If it hasn't been used before, it will be null
-    val currentSum = if (tmpCurrentSum != null) {
-      tmpCurrentSum
-    } else {
-      (0L, 0L)
-    }
-
-    // update the count
-    val newSum = (currentSum._1 + 1, currentSum._2 + input._2)
-
-    // update the state
-    sum.update(newSum)
-
-    // if the count reaches 2, emit the average and clear the state
-    if (newSum._1 >= 2) {
-      out.collect((input._1, newSum._2 / newSum._1))
-      sum.clear()
-    }
-  }
-
-  override def open(parameters: Configuration): Unit = {
-    sum = getRuntimeContext.getState(
-      new ValueStateDescriptor[(Long, Long)]("average", createTypeInformation[(Long, Long)])
-    )
-  }
-}
-
-
-object ExampleCountWindowAverage extends App {
-  val env = StreamExecutionEnvironment.getExecutionEnvironment
-
-  env.fromCollection(List(
-    (1L, 3L),
-    (1L, 5L),
-    (1L, 7L),
-    (1L, 4L),
-    (1L, 2L)
-  )).keyBy(_._1)
-    .flatMap(new CountWindowAverage())
-    .print()
-  // the printed output will be (1,4) and (1,5)
-
-  env.execute("ExampleKeyedState")
-}
-```
-{{< /tab >}}
-
 {{< tab "Python" >}}
 ```python
 from pyflink.common.typeinfo import Types
@@ -302,7 +235,7 @@ env.execute()
 ```java
 import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
-import org.apache.flink.api.common.time.Time;
+import java.time.Duration;
 
 StateTtlConfig ttlConfig = StateTtlConfig
     .newBuilder(Duration.ofSeconds(1))
@@ -312,38 +245,6 @@ StateTtlConfig ttlConfig = StateTtlConfig
     
 ValueStateDescriptor<String> stateDescriptor = new ValueStateDescriptor<>("text state", String.class);
 stateDescriptor.enableTimeToLive(ttlConfig);
-```
-{{< /tab >}}
-{{< tab "Scala" >}}
-```scala
-import org.apache.flink.api.common.state.StateTtlConfig
-import org.apache.flink.api.common.state.ValueStateDescriptor
-import org.apache.flink.api.common.time.Time
-
-val ttlConfig = StateTtlConfig
-    .newBuilder(Duration.ofSeconds(1))
-    .setUpdateType(StateTtlConfig.UpdateType.OnCreateAndWrite)
-    .setStateVisibility(StateTtlConfig.StateVisibility.NeverReturnExpired)
-    .build
-    
-val stateDescriptor = new ValueStateDescriptor[String]("text state", classOf[String])
-stateDescriptor.enableTimeToLive(ttlConfig)
-```
-{{< /tab >}}
-{{< tab "Python" >}}
-```python
-from pyflink.common.time import Time
-from pyflink.common.typeinfo import Types
-from pyflink.datastream.state import ValueStateDescriptor, StateTtlConfig
-
-ttl_config = StateTtlConfig \
-  .new_builder(Time.seconds(1)) \
-  .set_update_type(StateTtlConfig.UpdateType.OnCreateAndWrite) \
-  .set_state_visibility(StateTtlConfig.StateVisibility.NeverReturnExpired) \
-  .build()
-
-state_descriptor = ValueStateDescriptor("text state", Types.STRING())
-state_descriptor.enable_time_to_live(ttl_config)
 ```
 {{< /tab >}}
 {{< /tabs >}}
@@ -377,8 +278,6 @@ Heap state backend 会额外存储一个包括用户状态以及时间戳的 Jav
 
 - 暂时只支持基于 *processing time* 的 TTL。
 
-- 尝试从 checkpoint/savepoint 进行恢复时，TTL 的状态（是否开启）必须和之前保持一致，否则会遇到 "StateMigrationException"。
-
 - TTL 的配置并不会保存在 checkpoint/savepoint 中，仅对当前 Job 有效。
 
 - 不建议checkpoint恢复前后将state TTL从短调长，这可能会产生潜在的数据错误。
@@ -404,23 +303,13 @@ StateTtlConfig ttlConfig = StateTtlConfig
     .build();
 ```
 {{< /tab >}}
-{{< tab "Scala" >}}
-```scala
-import org.apache.flink.api.common.state.StateTtlConfig
-
-val ttlConfig = StateTtlConfig
-    .newBuilder(Duration.ofSeconds(1))
-    .disableCleanupInBackground
-    .build
-```
-{{< /tab >}}
 {{< tab "Python" >}}
 ```python
 from pyflink.common.time import Time
 from pyflink.datastream.state import StateTtlConfig
 
 ttl_config = StateTtlConfig \
-  .new_builder(Time.seconds(1)) \
+  .new_builder(Duration.ofSeconds(1)) \
   .disable_cleanup_in_background() \
   .build()
 ```
@@ -429,7 +318,7 @@ ttl_config = StateTtlConfig \
 
 可以按照如下所示配置更细粒度的后台清理策略。当前的实现中 `HeapStateBackend` 依赖增量数据清理，`RocksDBStateBackend` 利用压缩过滤器进行后台清理。
 
-#### 全量快照时进行清理
+##### 全量快照时进行清理
 
 另外，你可以启用全量快照时进行清理的策略，这可以减少整个快照的大小。当前实现中不会清理本地的状态，但从上次快照恢复时，不会恢复那些已经删除的过期数据。
 该策略可以通过 `StateTtlConfig` 配置进行配置：
@@ -438,23 +327,12 @@ ttl_config = StateTtlConfig \
 {{< tab "Java" >}}
 ```java
 import org.apache.flink.api.common.state.StateTtlConfig;
-import org.apache.flink.api.common.time.Time;
+import java.time.Duration;
 
 StateTtlConfig ttlConfig = StateTtlConfig
     .newBuilder(Duration.ofSeconds(1))
     .cleanupFullSnapshot()
     .build();
-```
-{{< /tab >}}
-{{< tab "Scala" >}}
-```scala
-import org.apache.flink.api.common.state.StateTtlConfig
-import org.apache.flink.api.common.time.Time
-
-val ttlConfig = StateTtlConfig
-    .newBuilder(Duration.ofSeconds(1))
-    .cleanupFullSnapshot
-    .build
 ```
 {{< /tab >}}
 {{< tab "Python" >}}
@@ -463,7 +341,7 @@ from pyflink.common.time import Time
 from pyflink.datastream.state import StateTtlConfig
 
 ttl_config = StateTtlConfig \
-  .new_builder(Time.seconds(1)) \
+  .new_builder(Duration.ofSeconds(1)) \
   .cleanup_full_snapshot() \
   .build()
 ```
@@ -492,22 +370,13 @@ import org.apache.flink.api.common.state.StateTtlConfig;
     .build();
 ```
 {{< /tab >}}
-{{< tab "Scala" >}}
-```scala
-import org.apache.flink.api.common.state.StateTtlConfig
-val ttlConfig = StateTtlConfig
-    .newBuilder(Duration.ofSeconds(1))
-    .cleanupIncrementally(10, true)
-    .build
-```
-{{< /tab >}}
 {{< tab "Python" >}}
 ```python
 from pyflink.common.time import Time
 from pyflink.datastream.state import StateTtlConfig
 
 ttl_config = StateTtlConfig \
-  .new_builder(Time.seconds(1)) \
+  .new_builder(Duration.ofSeconds(1)) \
   .cleanup_incrementally(10, True) \
   .build()
 ```
@@ -540,16 +409,6 @@ StateTtlConfig ttlConfig = StateTtlConfig
     .newBuilder(Duration.ofSeconds(1))
     .cleanupInRocksdbCompactFilter(1000, Duration.ofHours(1))
     .build();
-```
-{{< /tab >}}
-{{< tab "Scala" >}}
-```scala
-import org.apache.flink.api.common.state.StateTtlConfig
-
-val ttlConfig = StateTtlConfig
-    .newBuilder(Duration.ofSeconds(1))
-    .cleanupInRocksdbCompactFilter(1000, Duration.ofHours(1))
-    .build
 ```
 {{< /tab >}}
 {{< tab "Python" >}}
@@ -590,22 +449,14 @@ RocksDB backend 的默认后台清理策略会每处理 1000 条数据进行一�
 - 对已有的作业，这个清理方式可以在任何时候通过 `StateTtlConfig` 启用或禁用该特性，比如从 savepoint 重启后。
 - 定期压缩功能只在 TTL 启用时生效。
 
-### DataStream 状态相关的 Scala API 
+### TTL Migration Compatibility
 
-除了上面描述的接口之外，Scala API 还在 `KeyedStream` 上对 `map()` 和 `flatMap()` 访问 `ValueState` 提供了一个更便捷的接口。 
-用户函数能够通过 `Option` 获取当前 `ValueState` 的值，并且返回即将保存到状态的值。
+Starting from Flink 2.2.0, Flink supports seamless migration between state with and without TTL enabled.
 
-```scala
-val stream: DataStream[(String, Int)] = ...
+If you previously configured state without TTL and now want to enable it (or vice versa),
+this is now safe to do without triggering restore-time errors.
 
-val counts: DataStream[(String, Int)] = stream
-  .keyBy(_._1)
-  .mapWithState((in: (String, Int), count: Option[Int]) =>
-    count match {
-      case Some(c) => ( (in._1, c), Some(c + in._2) )
-      case None => ( (in._1, 0), Some(in._2) )
-    })
-```
+Read the full details here: [TTL / Non-TTL State Migration Compatibility]({{< ref "docs/dev/datastream/fault-tolerance/state_migration" >}})
 
 ## 算子状态 (Operator State)
 
@@ -676,7 +527,7 @@ public class BufferingSink
     }
 
     @Override
-    public void invoke(Tuple2<String, Integer> value, Context contex) throws Exception {
+    public void invoke(Tuple2<String, Integer> value, Context context) throws Exception {
         bufferedElements.add(value);
         if (bufferedElements.size() >= threshold) {
             for (Tuple2<String, Integer> element: bufferedElements) {
@@ -709,49 +560,6 @@ public class BufferingSink
 }
 ```
 {{< /tab >}}
-{{< tab "Scala" >}}
-```scala
-class BufferingSink(threshold: Int = 0)
-  extends SinkFunction[(String, Int)]
-    with CheckpointedFunction {
-
-  @transient
-  private var checkpointedState: ListState[(String, Int)] = _
-
-  private val bufferedElements = ListBuffer[(String, Int)]()
-
-  override def invoke(value: (String, Int), context: Context): Unit = {
-    bufferedElements += value
-    if (bufferedElements.size >= threshold) {
-      for (element <- bufferedElements) {
-        // send it to the sink
-      }
-      bufferedElements.clear()
-    }
-  }
-
-  override def snapshotState(context: FunctionSnapshotContext): Unit = {
-    checkpointedState.update(bufferedElements.asJava)
-  }
-
-  override def initializeState(context: FunctionInitializationContext): Unit = {
-    val descriptor = new ListStateDescriptor[(String, Int)](
-      "buffered-elements",
-      TypeInformation.of(new TypeHint[(String, Int)]() {})
-    )
-
-    checkpointedState = context.getOperatorStateStore.getListState(descriptor)
-
-    if(context.isRestored) {
-      for(element <- checkpointedState.get().asScala) {
-        bufferedElements += element
-      }
-    }
-  }
-
-}
-```
-{{< /tab >}}
 {{< /tabs >}}
 
 `initializeState` 方法接收一个 `FunctionInitializationContext` 参数，会用来初始化 non-keyed state 的 "容器"。这些容器是一个 `ListState`
@@ -771,18 +579,6 @@ ListStateDescriptor<Tuple2<String, Integer>> descriptor =
 checkpointedState = context.getOperatorStateStore().getListState(descriptor);
 ```
 
-{{< /tab >}}
-{{< tab "Scala" >}}
-```scala
-
-val descriptor = new ListStateDescriptor[(String, Long)](
-    "buffered-elements",
-    TypeInformation.of(new TypeHint[(String, Long)]() {})
-)
-
-checkpointedState = context.getOperatorStateStore.getListState(descriptor)
-
-```
 {{< /tab >}}
 {{< /tabs >}}
 
@@ -850,48 +646,6 @@ public static class CounterSource
     public void snapshotState(FunctionSnapshotContext context) throws Exception {
         state.update(Collections.singletonList(offset));
     }
-}
-```
-{{< /tab >}}
-{{< tab "Scala" >}}
-```scala
-class CounterSource
-       extends RichParallelSourceFunction[Long]
-       with CheckpointedFunction {
-
-  @volatile
-  private var isRunning = true
-
-  private var offset = 0L
-  private var state: ListState[Long] = _
-
-  override def run(ctx: SourceFunction.SourceContext[Long]): Unit = {
-    val lock = ctx.getCheckpointLock
-
-    while (isRunning) {
-      // output and state update are atomic
-      lock.synchronized({
-        ctx.collect(offset)
-
-        offset += 1
-      })
-    }
-  }
-
-  override def cancel(): Unit = isRunning = false
-  
-  override def initializeState(context: FunctionInitializationContext): Unit = {
-    state = context.getOperatorStateStore.getListState(
-      new ListStateDescriptor[Long]("state", classOf[Long]))
-      
-    for (l <- state.get().asScala) {
-      offset = l
-    }
-  }
-
-  override def snapshotState(context: FunctionSnapshotContext): Unit = {
-    state.update(java.util.Collections.singletonList(offset))
-  }
 }
 ```
 {{< /tab >}}

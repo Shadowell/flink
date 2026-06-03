@@ -36,10 +36,12 @@ import org.apache.flink.runtime.metrics.groups.TaskIOMetricGroup;
 import org.apache.flink.runtime.operators.testutils.DummyEnvironment;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
 import org.apache.flink.runtime.state.CheckpointableKeyedStateBackend;
+import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.state.KeyGroupStatePartitionStreamProvider;
 import org.apache.flink.runtime.state.OperatorStateBackend;
 import org.apache.flink.runtime.state.OperatorStateHandle;
 import org.apache.flink.runtime.state.OperatorStreamStateHandle;
+import org.apache.flink.runtime.state.PriorityQueueSetFactory;
 import org.apache.flink.runtime.state.StateBackend;
 import org.apache.flink.runtime.state.StateObject;
 import org.apache.flink.runtime.state.StatePartitionStreamProvider;
@@ -49,7 +51,7 @@ import org.apache.flink.runtime.state.TaskStateManager;
 import org.apache.flink.runtime.state.TaskStateManagerImpl;
 import org.apache.flink.runtime.state.TestTaskLocalStateStore;
 import org.apache.flink.runtime.state.changelog.inmemory.InMemoryStateChangelogStorage;
-import org.apache.flink.runtime.state.memory.MemoryStateBackend;
+import org.apache.flink.runtime.state.hashmap.HashMapStateBackend;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.runtime.taskmanager.TestCheckpointResponder;
 import org.apache.flink.streaming.runtime.tasks.ProcessingTimeService;
@@ -81,7 +83,7 @@ class StreamTaskStateInitializerImplTest {
     @Test
     void testNoRestore() throws Exception {
 
-        MemoryStateBackend stateBackend = spy(new MemoryStateBackend(1024));
+        HashMapStateBackend stateBackend = spy(new HashMapStateBackend());
 
         // No job manager provided state to restore
         StreamTaskStateInitializer streamTaskStateManager =
@@ -109,6 +111,7 @@ class StreamTaskStateInitializerImplTest {
                         closeableRegistry,
                         new UnregisteredMetricsGroup(),
                         1.0,
+                        false,
                         false);
 
         OperatorStateBackend operatorStateBackend = stateContext.operatorStateBackend();
@@ -222,6 +225,7 @@ class StreamTaskStateInitializerImplTest {
                         closeableRegistry,
                         new UnregisteredMetricsGroup(),
                         1.0,
+                        false,
                         false);
 
         OperatorStateBackend operatorStateBackend = stateContext.operatorStateBackend();
@@ -345,7 +349,8 @@ class StreamTaskStateInitializerImplTest {
                         @Override
                         public <K> InternalTimeServiceManager<K> create(
                                 TaskIOMetricGroup taskIOMetricGroup,
-                                CheckpointableKeyedStateBackend<K> keyedStatedBackend,
+                                PriorityQueueSetFactory factory,
+                                KeyGroupRange keyGroupRange,
                                 ClassLoader userClassloader,
                                 KeyContext keyContext,
                                 ProcessingTimeService processingTimeService,

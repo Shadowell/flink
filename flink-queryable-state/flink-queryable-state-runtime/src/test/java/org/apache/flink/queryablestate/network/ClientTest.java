@@ -43,8 +43,8 @@ import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
 import org.apache.flink.runtime.state.AbstractStateBackend;
 import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.state.KeyedStateBackendParametersImpl;
+import org.apache.flink.runtime.state.hashmap.HashMapStateBackend;
 import org.apache.flink.runtime.state.internal.InternalKvState;
-import org.apache.flink.runtime.state.memory.MemoryStateBackend;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.util.ExceptionUtils;
 
@@ -55,7 +55,8 @@ import org.apache.flink.shaded.netty4.io.netty.channel.ChannelHandler;
 import org.apache.flink.shaded.netty4.io.netty.channel.ChannelHandlerContext;
 import org.apache.flink.shaded.netty4.io.netty.channel.ChannelInboundHandlerAdapter;
 import org.apache.flink.shaded.netty4.io.netty.channel.ChannelInitializer;
-import org.apache.flink.shaded.netty4.io.netty.channel.nio.NioEventLoopGroup;
+import org.apache.flink.shaded.netty4.io.netty.channel.MultiThreadIoEventLoopGroup;
+import org.apache.flink.shaded.netty4.io.netty.channel.nio.NioIoHandler;
 import org.apache.flink.shaded.netty4.io.netty.channel.socket.SocketChannel;
 import org.apache.flink.shaded.netty4.io.netty.channel.socket.nio.NioServerSocketChannel;
 import org.apache.flink.shaded.netty4.io.netty.handler.codec.LengthFieldBasedFrameDecoder;
@@ -93,11 +94,11 @@ class ClientTest {
     private static final Logger LOG = LoggerFactory.getLogger(ClientTest.class);
 
     // Thread pool for client bootstrap (shared between tests)
-    private NioEventLoopGroup nioGroup;
+    private MultiThreadIoEventLoopGroup nioGroup;
 
     @BeforeEach
     void setUp() {
-        nioGroup = new NioEventLoopGroup();
+        nioGroup = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
     }
 
     @AfterEach
@@ -541,7 +542,7 @@ class ClientTest {
 
         final int numKeyGroups = 1;
 
-        AbstractStateBackend abstractBackend = new MemoryStateBackend();
+        AbstractStateBackend abstractBackend = new HashMapStateBackend();
         KvStateRegistry dummyRegistry = new KvStateRegistry();
         DummyEnvironment dummyEnv = new DummyEnvironment("test", 1, 0);
         dummyEnv.setKvStateRegistry(dummyRegistry);

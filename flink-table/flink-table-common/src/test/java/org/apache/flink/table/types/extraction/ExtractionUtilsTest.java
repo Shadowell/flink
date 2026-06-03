@@ -18,7 +18,9 @@
 
 package org.apache.flink.table.types.extraction;
 
-import org.apache.flink.shaded.guava32.com.google.common.collect.ImmutableList;
+import org.apache.flink.table.types.extraction.ExtractionUtils.Autoboxing;
+
+import org.apache.flink.shaded.guava33.com.google.common.collect.ImmutableList;
 
 import org.junit.jupiter.api.Test;
 
@@ -28,11 +30,27 @@ import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Supplier;
 
 import static org.assertj.core.api.AssertionsForClassTypes.assertThat;
 
 /** Tests {@link ExtractionUtils}. */
 public class ExtractionUtilsTest {
+
+    @Test
+    void testAutoboxing() {
+        assertThat(ExtractionUtils.isAssignable(int.class, Integer.class, Autoboxing.STRICT))
+                .isTrue();
+
+        // In strict autoboxing this is not allowed
+        assertThat(ExtractionUtils.isAssignable(Integer.class, int.class, Autoboxing.STRICT))
+                .isFalse();
+
+        assertThat(ExtractionUtils.isAssignable(Integer.class, int.class, Autoboxing.JVM)).isTrue();
+
+        assertThat(ExtractionUtils.isAssignable(Integer.class, Number.class, Autoboxing.STRICT))
+                .isTrue();
+    }
 
     @Test
     void testResolveParameters() {
@@ -223,5 +241,27 @@ public class ExtractionUtilsTest {
                 CompletableFuture<Long> genericFuture,
                 List<CompletableFuture<Long>> listOfGenericFuture,
                 Long[] array) {}
+    }
+
+    /**
+     * Verifies that {@link ExtractionUtils#extractExecutableNames} returns correct parameter names
+     * when a method contains a lambda that captures its own parameters, producing a synthetic
+     * method with the same bytecode descriptor.
+     */
+    @Test
+    void testExtractExecutableNamesWithLambdaCapture() {
+        Method method = ExtractionUtils.collectMethods(LambdaCaptureClass.class, "eval").get(0);
+        assertThat(ExtractionUtils.extractExecutableNames(method))
+                .isEqualTo(ImmutableList.of("id", "field"));
+    }
+
+    /** A single-method class where the lambda captures all parameters of the enclosing method. */
+    public static class LambdaCaptureClass {
+
+        @SuppressWarnings("unused")
+        public String eval(Long id, String field) {
+            Supplier<String> supplier = () -> String.valueOf(id) + field;
+            return supplier.get();
+        }
     }
 }

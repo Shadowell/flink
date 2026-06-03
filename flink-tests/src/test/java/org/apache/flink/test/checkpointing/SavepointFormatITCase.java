@@ -31,7 +31,7 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.StateBackendOptions;
 import org.apache.flink.configuration.StateChangelogOptions;
-import org.apache.flink.core.execution.RestoreMode;
+import org.apache.flink.core.execution.RecoveryClaimMode;
 import org.apache.flink.core.execution.SavepointFormatType;
 import org.apache.flink.runtime.checkpoint.OperatorState;
 import org.apache.flink.runtime.checkpoint.metadata.CheckpointMetadata;
@@ -47,8 +47,9 @@ import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.v2.DiscardingSink;
 import org.apache.flink.test.util.MiniClusterWithClientResource;
 import org.apache.flink.testutils.logging.LoggerAuditingExtension;
-import org.apache.flink.util.TestLogger;
+import org.apache.flink.util.TestLoggerExtension;
 
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -70,22 +71,22 @@ import java.util.function.Predicate;
 import static java.util.Arrays.asList;
 import static org.apache.flink.runtime.testutils.CommonTestUtils.waitForAllTaskRunning;
 import static org.apache.flink.test.util.TestUtils.loadCheckpointMetadata;
-import static org.hamcrest.CoreMatchers.instanceOf;
-import static org.hamcrest.MatcherAssert.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 
 /** Tests for taking savepoint in different {@link SavepointFormatType format types}. */
-public class SavepointFormatITCase extends TestLogger {
+@ExtendWith(TestLoggerExtension.class)
+class SavepointFormatITCase {
     private static final Logger LOG = LoggerFactory.getLogger(SavepointFormatITCase.class);
 
     private static final String STATE_BACKEND_ROCKSDB = "ROCKSDB";
     private static final String STATE_BACKEND_HEAP = "HEAP";
 
-    @TempDir Path checkpointsDir;
-    @TempDir Path originalSavepointDir;
-    @TempDir Path renamedSavepointDir;
+    @TempDir private Path checkpointsDir;
+    @TempDir private Path originalSavepointDir;
+    @TempDir private Path renamedSavepointDir;
 
     @RegisterExtension
-    LoggerAuditingExtension loggerAuditingExtension =
+    private LoggerAuditingExtension loggerAuditingExtension =
             new LoggerAuditingExtension(SavepointFormatITCase.class, Level.INFO);
 
     private static List<Arguments> parameters() {
@@ -109,9 +110,9 @@ public class SavepointFormatITCase extends TestLogger {
             SavepointFormatType formatType,
             StateBackendConfig backendConfig) {
         if (formatType == SavepointFormatType.CANONICAL) {
-            assertThat(state, instanceOf(SavepointKeyedStateHandle.class));
+            assertThat(state).isInstanceOf(SavepointKeyedStateHandle.class);
         } else if (backendConfig.isChangelogEnabled()) {
-            assertThat(state, instanceOf(ChangelogStateBackendHandle.class));
+            assertThat(state).isInstanceOf(ChangelogStateBackendHandle.class);
             for (KeyedStateHandle nestedState :
                     ((ChangelogStateBackendHandle) state).getMaterializedStateHandles()) {
                 validateNativeNonChangelogState(nestedState, backendConfig);
@@ -124,9 +125,9 @@ public class SavepointFormatITCase extends TestLogger {
     private void validateNativeNonChangelogState(
             KeyedStateHandle state, StateBackendConfig backendConfig) {
         if (STATE_BACKEND_ROCKSDB.equals(backendConfig.getName())) {
-            assertThat(state, instanceOf(IncrementalRemoteKeyedStateHandle.class));
+            assertThat(state).isInstanceOf(IncrementalRemoteKeyedStateHandle.class);
         } else {
-            assertThat(state, instanceOf(KeyGroupsStateHandle.class));
+            assertThat(state).isInstanceOf(KeyGroupsStateHandle.class);
         }
     }
 
@@ -188,7 +189,7 @@ public class SavepointFormatITCase extends TestLogger {
 
             @Override
             protected String getConfigName() {
-                return "filesystem";
+                return "hashmap";
             }
 
             @Override
@@ -231,7 +232,7 @@ public class SavepointFormatITCase extends TestLogger {
 
     @ParameterizedTest(name = "[{index}] {0}, {1}")
     @MethodSource("parameters")
-    public void testTriggerSavepointAndResumeWithFileBasedCheckpointsAndRelocateBasePath(
+    void testTriggerSavepointAndResumeWithFileBasedCheckpointsAndRelocateBasePath(
             SavepointFormatType formatType, StateBackendConfig stateBackendConfig)
             throws Exception {
         final int numTaskManagers = 2;
@@ -296,7 +297,7 @@ public class SavepointFormatITCase extends TestLogger {
         final JobGraph jobGraph = createJobGraph(config);
         jobGraph.setSavepointRestoreSettings(
                 SavepointRestoreSettings.forPath(
-                        renamedSavepointDir.toUri().toString(), false, RestoreMode.CLAIM));
+                        renamedSavepointDir.toUri().toString(), false, RecoveryClaimMode.CLAIM));
 
         final JobID jobId = jobGraph.getJobID();
         ClusterClient<?> client = cluster.getClusterClient();

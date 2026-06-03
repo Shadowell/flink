@@ -21,7 +21,7 @@ package org.apache.flink.runtime.checkpoint;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.core.execution.RestoreMode;
+import org.apache.flink.core.execution.RecoveryClaimMode;
 import org.apache.flink.core.execution.SavepointFormatType;
 import org.apache.flink.core.fs.FSDataInputStream;
 import org.apache.flink.core.fs.FileSystem;
@@ -70,7 +70,6 @@ import org.apache.flink.runtime.state.TestingStreamStateHandle;
 import org.apache.flink.runtime.state.filesystem.FileStateHandle;
 import org.apache.flink.runtime.state.memory.ByteStreamStateHandle;
 import org.apache.flink.runtime.state.memory.MemoryBackendCheckpointStorageAccess;
-import org.apache.flink.runtime.state.memory.MemoryStateBackend;
 import org.apache.flink.runtime.state.memory.NonPersistentMetadataCheckpointStorageLocation;
 import org.apache.flink.runtime.state.storage.FileSystemCheckpointStorage;
 import org.apache.flink.runtime.state.storage.JobManagerCheckpointStorage;
@@ -87,12 +86,14 @@ import org.apache.flink.util.concurrent.ScheduledExecutor;
 import org.apache.flink.util.concurrent.ScheduledExecutorServiceAdapter;
 import org.apache.flink.util.function.TriFunctionWithException;
 
-import org.apache.flink.shaded.guava32.com.google.common.collect.Iterables;
+import org.apache.flink.shaded.guava33.com.google.common.collect.Iterables;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.verification.VerificationMode;
 
 import javax.annotation.Nullable;
@@ -120,6 +121,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -140,9 +142,9 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
 import static org.apache.flink.util.Preconditions.checkState;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.fail;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.Matchers.any;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -154,6 +156,8 @@ import static org.mockito.Mockito.when;
 
 /** Tests for the checkpoint coordinator. */
 class CheckpointCoordinatorTest {
+
+    private static final long TIMEOUT_SECONDS = TimeUnit.MINUTES.toSeconds(15);
 
     @RegisterExtension
     static final TestExecutorExtension<ScheduledExecutorService> EXECUTOR_RESOURCE =
@@ -2447,7 +2451,7 @@ class CheckpointCoordinatorTest {
     @Test
     void testPeriodicSchedulingWithInactiveTasks() throws Exception {
         CheckpointCoordinator checkpointCoordinator =
-                setupCheckpointCoordinatorWithInactiveTasks(new MemoryStateBackend());
+                setupCheckpointCoordinatorWithInactiveTasks(new JobManagerCheckpointStorage());
 
         // the coordinator should start checkpointing now
         manuallyTriggeredScheduledExecutor.triggerNonPeriodicScheduledTasks(
@@ -2567,6 +2571,44 @@ class CheckpointCoordinatorTest {
         for (CompletableFuture<CompletedCheckpoint> savepointFuture : savepointFutures) {
             assertThat(savepointFuture).isCompletedWithValueMatching(Objects::nonNull);
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void testTriggeringDelay(boolean pauseSourcesUntilFirstCheckpoint) throws Exception {
+        final long minPause = 100L;
+        final long interval = 10000L;
+        CheckpointCoordinatorConfiguration chkConfig =
+                new CheckpointCoordinatorConfiguration.CheckpointCoordinatorConfigurationBuilder()
+                        .setMinPauseBetweenCheckpoints(minPause)
+                        .setPauseSourcesUntilFirstCheckpoint(pauseSourcesUntilFirstCheckpoint)
+                        .setCheckpointInterval(interval)
+                        .build();
+        CheckpointCoordinator checkpointCoordinator =
+                new CheckpointCoordinatorBuilder()
+                        .setCheckpointCoordinatorConfiguration(chkConfig)
+                        .setCompletedCheckpointStore(new StandaloneCompletedCheckpointStore(2))
+                        .setTimer(manuallyTriggeredScheduledExecutor)
+                        .build(EXECUTOR_RESOURCE.getExecutor());
+        // initial start and trigger - delay should be random
+        if (pauseSourcesUntilFirstCheckpoint) {
+            assertThat(startSchedulerAndGetTriggerDelay(checkpointCoordinator))
+                    .as("initial trigger delay should be random between min pause and interval")
+                    .isBetween(minPause, minPause * 2);
+        } else {
+            assertThat(startSchedulerAndGetTriggerDelay(checkpointCoordinator))
+                    .as("initial trigger delay should be random between min pause and interval")
+                    .isBetween(minPause, interval);
+        }
+
+        // restart scheduler and re-trigger - delay should be minimum (pause)
+        checkpointCoordinator.stopCheckpointScheduler();
+        manuallyTriggeredScheduledExecutor.triggerNonPeriodicScheduledTasks();
+        manuallyTriggeredScheduledExecutor.triggerAll();
+
+        assertThat(startSchedulerAndGetTriggerDelay(checkpointCoordinator))
+                .as("subsequent trigger delay should be equal to min pause")
+                .isEqualTo(minPause);
     }
 
     /** Tests that no minimum delay between savepoints is enforced. */
@@ -2911,7 +2953,7 @@ class CheckpointCoordinatorTest {
 
     @Test
     void testSharedStateRegistrationOnRestore() throws Exception {
-        for (RestoreMode restoreMode : RestoreMode.values()) {
+        for (RecoveryClaimMode recoveryClaimMode : RecoveryClaimMode.values()) {
             JobVertexID jobVertexID1 = new JobVertexID();
 
             int parallelism1 = 2;
@@ -2929,7 +2971,7 @@ class CheckpointCoordinatorTest {
                     SharedStateRegistry.DEFAULT_FACTORY.create(
                             org.apache.flink.util.concurrent.Executors.directExecutor(),
                             checkpoints,
-                            restoreMode);
+                            recoveryClaimMode);
             final EmbeddedCompletedCheckpointStore store =
                     new EmbeddedCompletedCheckpointStore(10, checkpoints, firstInstance);
 
@@ -3035,7 +3077,7 @@ class CheckpointCoordinatorTest {
                     SharedStateRegistry.DEFAULT_FACTORY.create(
                             org.apache.flink.util.concurrent.Executors.directExecutor(),
                             store.getAllCheckpoints(),
-                            restoreMode);
+                            recoveryClaimMode);
             final EmbeddedCompletedCheckpointStore secondStore =
                     new EmbeddedCompletedCheckpointStore(
                             10, store.getAllCheckpoints(), secondInstance);
@@ -3079,7 +3121,7 @@ class CheckpointCoordinatorTest {
             verifyDiscard(
                     sharedHandlesByCheckpoint,
                     cpId ->
-                            restoreMode == RestoreMode.CLAIM && cpId == 0
+                            recoveryClaimMode == RecoveryClaimMode.CLAIM && cpId == 0
                                     ? TernaryBoolean.TRUE
                                     : TernaryBoolean.FALSE);
 
@@ -4409,5 +4451,120 @@ class CheckpointCoordinatorTest {
                 return discarded;
             }
         }
+    }
+
+    /**
+     * Tests that Checkpoint CompletableFuture completion happens after reportCompletedCheckpoint
+     * finishes. This ensures that when external components are notified via the CompletableFuture
+     * that a checkpoint is complete, all statistics have already been updated.
+     */
+    @Test
+    void testCompletionFutureCompletesAfterReporting() throws Exception {
+        JobVertexID jobVertexID = new JobVertexID();
+        ExecutionGraph graph =
+                new CheckpointCoordinatorTestingUtils.CheckpointExecutionGraphBuilder()
+                        .addJobVertex(jobVertexID)
+                        .build(EXECUTOR_RESOURCE.getExecutor());
+
+        ControllableCheckpointStatsTracker tracker = new ControllableCheckpointStatsTracker();
+
+        CheckpointCoordinator coordinator =
+                new CheckpointCoordinatorBuilder()
+                        .setCheckpointStatsTracker(tracker)
+                        .setTimer(manuallyTriggeredScheduledExecutor)
+                        .build(graph);
+
+        CompletableFuture<CompletedCheckpoint> checkpointFuture =
+                coordinator.triggerCheckpoint(false);
+        manuallyTriggeredScheduledExecutor.triggerAll();
+
+        CompletableFuture<Void> ackTask =
+                CompletableFuture.runAsync(
+                        () -> {
+                            try {
+                                ackCheckpoint(
+                                        1L,
+                                        coordinator,
+                                        jobVertexID,
+                                        graph,
+                                        handle(),
+                                        handle(),
+                                        handle());
+                            } catch (Exception e) {
+                                throw new RuntimeException(e);
+                            }
+                        },
+                        EXECUTOR_RESOURCE.getExecutor());
+
+        assertThat(tracker.getReportStartedFuture().get(TIMEOUT_SECONDS, TimeUnit.SECONDS))
+                .as("reportCompletedCheckpoint should be started soon when checkpoint is acked.")
+                .isNull();
+
+        for (int i = 0; i < 30; i++) {
+            assertThat(checkpointFuture)
+                    .as(
+                            "Checkpoint future should not complete while reportCompletedCheckpoint is blocked")
+                    .isNotDone();
+            Thread.sleep(100);
+        }
+
+        tracker.getReportBlockingFuture().complete(null);
+
+        CompletedCheckpoint result = checkpointFuture.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertThat(result)
+                .as("Checkpoint future should complete after reportCompletedCheckpoint finishes")
+                .isNotNull();
+
+        ackTask.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+    }
+
+    /**
+     * A controllable checkpoint stats tracker for testing purposes. Allows precise control over
+     * when reportCompletedCheckpoint() completes, enabling verification of execution order and
+     * timing in tests.
+     */
+    private static class ControllableCheckpointStatsTracker extends DefaultCheckpointStatsTracker {
+        private final CompletableFuture<Void> reportStartedFuture;
+        private final CompletableFuture<Void> reportBlockingFuture;
+
+        public ControllableCheckpointStatsTracker() {
+            super(
+                    Integer.MAX_VALUE,
+                    UnregisteredMetricGroups.createUnregisteredJobManagerJobMetricGroup());
+            this.reportStartedFuture = new CompletableFuture<>();
+            this.reportBlockingFuture = new CompletableFuture<>();
+        }
+
+        public CompletableFuture<Void> getReportStartedFuture() {
+            return reportStartedFuture;
+        }
+
+        public CompletableFuture<Void> getReportBlockingFuture() {
+            return reportBlockingFuture;
+        }
+
+        @Override
+        public void reportCompletedCheckpoint(CompletedCheckpointStats completed) {
+            reportStartedFuture.complete(null);
+
+            try {
+                reportBlockingFuture.get();
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+            super.reportCompletedCheckpoint(completed);
+        }
+    }
+
+    private long startSchedulerAndGetTriggerDelay(CheckpointCoordinator checkpointCoordinator) {
+        checkpointCoordinator.startCheckpointScheduler();
+        checkState(checkpointCoordinator.getNumberOfPendingCheckpoints() == 0);
+        long delay =
+                Iterables.getOnlyElement(manuallyTriggeredScheduledExecutor.getAllScheduledTasks())
+                        .getDelay(TimeUnit.MILLISECONDS);
+        manuallyTriggeredScheduledExecutor.triggerNonPeriodicScheduledTasks();
+        manuallyTriggeredScheduledExecutor.triggerAll();
+        checkState(checkpointCoordinator.getNumberOfPendingCheckpoints() >= 1);
+        return delay;
     }
 }

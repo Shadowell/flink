@@ -17,11 +17,12 @@
  */
 package org.apache.flink.table.planner.runtime.stream.table
 
-import org.apache.flink.api.scala._
 import org.apache.flink.core.testutils.EachCallbackWrapper
-import org.apache.flink.streaming.api.scala.{DataStream, StreamExecutionEnvironment}
+import org.apache.flink.streaming.api.datastream.DataStream
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment
 import org.apache.flink.table.api._
 import org.apache.flink.table.api.bridge.scala._
+import org.apache.flink.table.legacy.api.Types
 import org.apache.flink.table.planner.expressions.utils.{Func18, FuncWithOpen, RichFunc2}
 import org.apache.flink.table.planner.runtime.utils._
 import org.apache.flink.table.planner.runtime.utils.StreamingWithStateTestBase.StateBackendMode
@@ -63,7 +64,7 @@ class CorrelateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
     result.addSink(sink)
     env.execute()
 
-    val expected = mutable.MutableList("Jack#22,Jack,22", "Anna#44,Anna,44")
+    val expected = mutable.ListBuffer("Jack#22,Jack,22", "Anna#44,Anna,44")
     assertThat(sink.getAppendResults.sorted).isEqualTo(expected.sorted)
   }
 
@@ -82,7 +83,7 @@ class CorrelateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
       .addSink(sink)
     env.execute()
 
-    val expected = mutable.MutableList(
+    val expected = mutable.ListBuffer(
       "nosharp,null,null",
       "Jack#22,Jack,22",
       "John#19,John,19",
@@ -128,7 +129,7 @@ class CorrelateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
     result.addSink(sink)
     env.execute()
 
-    val expected = mutable.MutableList("Jack#22,Jack,22", "John#19,John,19")
+    val expected = mutable.ListBuffer("Jack#22,Jack,22", "John#19,John,19")
     assertThat(sink.getAppendResults.sorted).isEqualTo(expected.sorted)
   }
 
@@ -147,7 +148,7 @@ class CorrelateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
     result.toDataStream.addSink(sink)
     env.execute()
 
-    val expected = mutable.MutableList("3,Hello", "3,world")
+    val expected = mutable.ListBuffer("3,Hello", "3,world")
     assertThat(sink.getAppendResults.sorted).isEqualTo(expected.sorted)
   }
 
@@ -171,7 +172,7 @@ class CorrelateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
     env.execute()
 
     val expected =
-      mutable.MutableList("1,Hi", "1,test", "2,Hello", "2,test", "3,Hello world", "3,test")
+      mutable.ListBuffer("1,Hi", "1,test", "2,Hello", "2,test", "3,Hello world", "3,test")
     assertThat(sink.getAppendResults.sorted).isEqualTo(expected.sorted)
   }
 
@@ -196,7 +197,7 @@ class CorrelateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
     result.addSink(sink)
     env.execute()
 
-    val expected = mutable.MutableList(
+    val expected = mutable.ListBuffer(
       "Anna#44,Anna,OneConf_Anna,TwoConf__key=key1_value=value1_Anna,44,44,44",
       "Anna#44,Anna,OneConf_Anna,TwoConf__key=key2_value=value2_Anna,44,44,44",
       "Jack#22,Jack,OneConf_Jack,TwoConf__key=key1_value=value1_Jack,22,22,22",
@@ -221,7 +222,7 @@ class CorrelateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
     result.toDataStream.addSink(sink)
     env.execute()
 
-    val expected = mutable.MutableList(
+    val expected = mutable.ListBuffer(
       "Anna#44,1",
       "Anna#44,2",
       "Anna#44,Anna#44",
@@ -246,7 +247,7 @@ class CorrelateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
     result1.toDataStream.addSink(sink1)
     env.execute()
 
-    val expected1 = mutable.MutableList(
+    val expected1 = mutable.ListBuffer(
       "Anna#44,1",
       "Anna#44,2",
       "Jack#22,1",
@@ -278,7 +279,7 @@ class CorrelateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
     )
 
     val rowType = Types.ROW(Types.INT, Types.BOOLEAN, Types.ROW(Types.INT, Types.INT, Types.INT))
-    val in = env.fromElements(row, row)(rowType).toTable(tEnv).as("a", "b", "c")
+    val in = StreamingEnvUtil.fromElements(env, row, row)(rowType).toTable(tEnv).as("a", "b", "c")
 
     val tableFunc = new TableFunc6()
     val result = in
@@ -289,7 +290,7 @@ class CorrelateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
     result.toDataStream.addSink(sink)
     env.execute()
 
-    val expected = mutable.MutableList("1,2,3,3", "1,2,3,3")
+    val expected = mutable.ListBuffer("1,2,3,3", "1,2,3,3")
     assertThat(sink.getAppendResults.sorted).isEqualTo(expected.sorted)
   }
 
@@ -353,7 +354,7 @@ class CorrelateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
     ds.toDataStream.addSink(sink)
     env.execute()
 
-    val expected = mutable.MutableList("Jack,4", "22,2", "John,4", "19,2", "Anna,4", "44,2")
+    val expected = mutable.ListBuffer("Jack,4", "22,2", "John,4", "19,2", "Anna,4", "44,2")
     assertThat(sink.getAppendResults.sorted).isEqualTo(expected.sorted)
   }
 
@@ -369,7 +370,7 @@ class CorrelateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
     )
 
     val rowType = Types.ROW(Types.INT, Types.BOOLEAN, Types.ROW(Types.INT, Types.INT, Types.INT))
-    val in = env.fromElements(row, row)(rowType).toTable(tEnv).as("a", "b", "c")
+    val in = StreamingEnvUtil.fromElements(env, row, row)(rowType).toTable(tEnv).as("a", "b", "c")
     val result = in.select(rf('a).as('d)).joinLateral(call(tf, 'd).as('e))
 
     val sink = new TestingAppendSink
@@ -380,11 +381,11 @@ class CorrelateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
 
   private def testData(env: StreamExecutionEnvironment): DataStream[(Int, Long, String)] = {
 
-    val data = new mutable.MutableList[(Int, Long, String)]
+    val data = new mutable.ListBuffer[(Int, Long, String)]
     data.+=((1, 1L, "Jack#22"))
     data.+=((2, 2L, "John#19"))
     data.+=((3, 2L, "Anna#44"))
     data.+=((4, 3L, "nosharp"))
-    env.fromCollection(data)
+    StreamingEnvUtil.fromCollection(env, data)
   }
 }

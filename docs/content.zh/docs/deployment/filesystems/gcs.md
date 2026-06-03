@@ -38,10 +38,23 @@ The endpoint can either be a single file or a directory, for example:
 
 ```java
 // 读取 GCS bucket
-env.readTextFile("gs://<bucket>/<endpoint>");
+FileSource<String> fileSource = FileSource.forRecordStreamFormat(
+        new TextLineInputFormat(),
+        new Path("gs://<bucket>/<endpoint>")
+    ).build();
+env.fromSource(
+    fileSource,
+    WatermarkStrategy.noWatermarks(),
+    "gcs-input"
+);
 
 // 写入 GCS bucket
-stream.writeAsText("gs://<bucket>/<endpoint>");
+stream.sinkTo(
+    FileSink.forRowFormat(
+        new Path("gs://<bucket>/<endpoint>"), 
+        new SimpleStringEncoder<>()
+    ).build()
+);
 
 // 将 GCS 用作 checkpoint storage
 Configuration config = new Configuration();
@@ -58,7 +71,7 @@ Note that these examples are *not* exhaustive and you can use GCS in other place
 Flink provides the `flink-gs-fs-hadoop` file system to write to GCS.
 This implementation is self-contained with no dependency footprint, so there is no need to add Hadoop to the classpath to use it.
 
-`flink-gs-fs-hadoop` registers a `FileSystem` wrapper for URIs with the *gs://* scheme. It uses Google's [gcs-connector](https://mvnrepository.com/artifact/com.google.cloud.bigdataoss/gcs-connector/hadoop3-2.2.18) Hadoop library to access GCS. It also uses Google's [google-cloud-storage](https://mvnrepository.com/artifact/com.google.cloud/google-cloud-storage/2.29.1) library to provide `RecoverableWriter` support.
+`flink-gs-fs-hadoop` registers a `FileSystem` wrapper for URIs with the *gs://* scheme. It uses Google's [gcs-connector](https://mvnrepository.com/artifact/com.google.cloud.bigdataoss/gcs-connector/hadoop3-2.2.18) Hadoop library to access GCS. It also uses Google's [google-cloud-storage](https://mvnrepository.com/artifact/com.google.cloud/google-cloud-storage/2.68.0) library to provide `RecoverableWriter` support.
 
 This file system can be used with the [FileSystem connector]({{< ref "docs/connectors/datastream/filesystem.md" >}}).
 

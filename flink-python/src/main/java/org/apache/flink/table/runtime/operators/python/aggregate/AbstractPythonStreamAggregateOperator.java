@@ -172,6 +172,7 @@ public abstract class AbstractPythonStreamAggregateOperator
     @Override
     public PythonFunctionRunner createPythonFunctionRunner() throws Exception {
         return BeamTablePythonFunctionRunner.stateful(
+                getContainingTask().getEnvironment(),
                 getRuntimeContext().getTaskInfo().getTaskName(),
                 createPythonEnvironmentManager(),
                 getFunctionUrn(),
@@ -263,6 +264,19 @@ public abstract class AbstractPythonStreamAggregateOperator
                                                 .setValue(entry.getValue())
                                                 .build())
                         .collect(Collectors.toList()));
+        builder.setRuntimeContext(
+                FlinkFnApi.UserDefinedDataStreamFunction.RuntimeContext.newBuilder()
+                        .setTaskName(getRuntimeContext().getTaskInfo().getTaskName())
+                        .setTaskNameWithSubtasks(
+                                getRuntimeContext().getTaskInfo().getTaskNameWithSubtasks())
+                        .setNumberOfParallelSubtasks(
+                                getRuntimeContext().getTaskInfo().getNumberOfParallelSubtasks())
+                        .setMaxNumberOfParallelSubtasks(
+                                getRuntimeContext().getTaskInfo().getMaxNumberOfParallelSubtasks())
+                        .setIndexOfThisSubtask(
+                                getRuntimeContext().getTaskInfo().getIndexOfThisSubtask())
+                        .setAttemptNumber(getRuntimeContext().getTaskInfo().getAttemptNumber())
+                        .build());
         return builder.build();
     }
 

@@ -30,8 +30,8 @@ import org.apache.flink.datastream.impl.operators.MockRecudingMultiplierProcessF
 import org.apache.flink.datastream.impl.operators.MockSumAggregateProcessFunction;
 import org.apache.flink.streaming.api.operators.collect.utils.MockOperatorStateStore;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
-import org.apache.flink.streaming.util.KeyedOneInputStreamOperatorTestHarness;
 import org.apache.flink.streaming.util.MockStreamingRuntimeContext;
+import org.apache.flink.streaming.util.asyncprocessing.AsyncKeyedOneInputStreamOperatorTestHarness;
 
 import org.junit.jupiter.api.Test;
 
@@ -50,8 +50,8 @@ class DefaultStateManagerTest {
         DefaultStateManager stateManager =
                 new DefaultStateManager(
                         () -> key,
-                        ignore -> {},
-                        new MockStreamingRuntimeContext(false, 1, 0),
+                        (r, k) -> r.run(),
+                        new MockStreamingRuntimeContext(1, 0),
                         new MockOperatorStateStore());
         assertThat((String) stateManager.getCurrentKey()).isEqualTo(key);
     }
@@ -63,8 +63,8 @@ class DefaultStateManagerTest {
                         () -> {
                             throw new RuntimeException("Expected Error");
                         },
-                        ignore -> {},
-                        new MockStreamingRuntimeContext(false, 1, 0),
+                        (r, k) -> r.run(),
+                        new MockStreamingRuntimeContext(1, 0),
                         new MockOperatorStateStore());
         assertThatThrownBy(stateManager::getCurrentKey)
                 .isInstanceOf(RuntimeException.class)
@@ -80,8 +80,12 @@ class DefaultStateManagerTest {
         DefaultStateManager stateManager =
                 new DefaultStateManager(
                         () -> oldKey,
-                        k -> setKey.set((Integer) k),
-                        new MockStreamingRuntimeContext(false, 1, 0),
+                        (r, k) -> {
+                            setKey.set((Integer) k);
+                            r.run();
+                            setKey.set(oldKey);
+                        },
+                        new MockStreamingRuntimeContext(1, 0),
                         new MockOperatorStateStore());
         stateManager.executeInKeyContext(() -> assertThat(setKey).hasValue(newKey), newKey);
         assertThat(setKey).hasValue(oldKey);
@@ -94,8 +98,8 @@ class DefaultStateManagerTest {
                 new KeyedProcessOperator<>(
                         function, (KeySelector<Integer, Integer>) value -> value);
 
-        try (KeyedOneInputStreamOperatorTestHarness<Integer, Integer, Integer> testHarness =
-                new KeyedOneInputStreamOperatorTestHarness<>(
+        try (AsyncKeyedOneInputStreamOperatorTestHarness<Integer, Integer, Integer> testHarness =
+                AsyncKeyedOneInputStreamOperatorTestHarness.create(
                         processOperator,
                         (KeySelector<Integer, Integer>) value -> value,
                         Types.INT)) {
@@ -116,8 +120,8 @@ class DefaultStateManagerTest {
         KeyedProcessOperator<Integer, Integer, Integer> processOperator =
                 new KeyedProcessOperator<>(function);
 
-        try (KeyedOneInputStreamOperatorTestHarness<Integer, Integer, Integer> testHarness =
-                new KeyedOneInputStreamOperatorTestHarness<>(
+        try (AsyncKeyedOneInputStreamOperatorTestHarness<Integer, Integer, Integer> testHarness =
+                AsyncKeyedOneInputStreamOperatorTestHarness.create(
                         processOperator,
                         (KeySelector<Integer, Integer>) value -> value,
                         Types.INT)) {
@@ -144,8 +148,8 @@ class DefaultStateManagerTest {
         KeyedProcessOperator<Integer, Integer, Integer> processOperator =
                 new KeyedProcessOperator<>(function);
 
-        try (KeyedOneInputStreamOperatorTestHarness<Integer, Integer, Integer> testHarness =
-                new KeyedOneInputStreamOperatorTestHarness<>(
+        try (AsyncKeyedOneInputStreamOperatorTestHarness<Integer, Integer, Integer> testHarness =
+                AsyncKeyedOneInputStreamOperatorTestHarness.create(
                         processOperator,
                         (KeySelector<Integer, Integer>) value -> value,
                         Types.INT)) {
@@ -171,8 +175,8 @@ class DefaultStateManagerTest {
         KeyedProcessOperator<Integer, Integer, Integer> processOperator =
                 new KeyedProcessOperator<>(function);
 
-        try (KeyedOneInputStreamOperatorTestHarness<Integer, Integer, Integer> testHarness =
-                new KeyedOneInputStreamOperatorTestHarness<>(
+        try (AsyncKeyedOneInputStreamOperatorTestHarness<Integer, Integer, Integer> testHarness =
+                AsyncKeyedOneInputStreamOperatorTestHarness.create(
                         processOperator,
                         (KeySelector<Integer, Integer>) value -> value,
                         Types.INT)) {
@@ -199,8 +203,8 @@ class DefaultStateManagerTest {
         KeyedProcessOperator<Integer, Integer, Integer> processOperator =
                 new KeyedProcessOperator<>(function);
 
-        try (KeyedOneInputStreamOperatorTestHarness<Integer, Integer, Integer> testHarness =
-                new KeyedOneInputStreamOperatorTestHarness<>(
+        try (AsyncKeyedOneInputStreamOperatorTestHarness<Integer, Integer, Integer> testHarness =
+                AsyncKeyedOneInputStreamOperatorTestHarness.create(
                         processOperator,
                         (KeySelector<Integer, Integer>) value -> value,
                         Types.INT)) {
@@ -227,8 +231,8 @@ class DefaultStateManagerTest {
         KeyedProcessOperator<Integer, Integer, Integer> processOperator =
                 new KeyedProcessOperator<>(function);
 
-        try (KeyedOneInputStreamOperatorTestHarness<Integer, Integer, Integer> testHarness =
-                new KeyedOneInputStreamOperatorTestHarness<>(
+        try (AsyncKeyedOneInputStreamOperatorTestHarness<Integer, Integer, Integer> testHarness =
+                AsyncKeyedOneInputStreamOperatorTestHarness.create(
                         processOperator,
                         (KeySelector<Integer, Integer>) value -> value,
                         Types.INT)) {
@@ -256,8 +260,8 @@ class DefaultStateManagerTest {
                 new KeyedProcessOperator<>(
                         function, (KeySelector<Integer, Integer>) value -> value);
 
-        try (KeyedOneInputStreamOperatorTestHarness<Integer, Integer, Integer> testHarness =
-                new KeyedOneInputStreamOperatorTestHarness<>(
+        try (AsyncKeyedOneInputStreamOperatorTestHarness<Integer, Integer, Integer> testHarness =
+                AsyncKeyedOneInputStreamOperatorTestHarness.create(
                         processOperator,
                         (KeySelector<Integer, Integer>) value -> value,
                         Types.INT)) {

@@ -58,8 +58,7 @@ import org.apache.flink.runtime.taskmanager.Task;
 import org.apache.flink.runtime.taskmanager.TaskManagerActions;
 import org.apache.flink.runtime.taskmanager.TaskManagerRuntimeInfo;
 import org.apache.flink.runtime.util.TestingTaskManagerRuntimeInfo;
-import org.apache.flink.streaming.api.TimeCharacteristic;
-import org.apache.flink.streaming.api.functions.source.SourceFunction;
+import org.apache.flink.streaming.api.functions.source.legacy.SourceFunction;
 import org.apache.flink.streaming.api.graph.StreamConfig;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.StreamOperator;
@@ -70,6 +69,7 @@ import org.apache.flink.util.concurrent.Executors;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
@@ -84,6 +84,7 @@ import static org.mockito.Mockito.mock;
  * exit is enabled inside relevant methods that can call user-defined functions in {@code
  * StreamTask}.
  */
+@Tag("org.apache.flink.testutils.junit.FailsOnJava25")
 class StreamTaskSystemExitTest {
     private static final int TEST_EXIT_CODE = 123;
     private SecurityManager originalSecurityManager;
@@ -159,7 +160,6 @@ class StreamTaskSystemExitTest {
         final StreamConfig streamConfig = new StreamConfig(taskConfiguration);
         streamConfig.setOperatorID(new OperatorID());
         streamConfig.setStreamOperator(operator);
-        streamConfig.setTimeCharacteristic(TimeCharacteristic.ProcessingTime); // for source run
         streamConfig.serializeAllConfigs();
 
         final JobInformation jobInformation =

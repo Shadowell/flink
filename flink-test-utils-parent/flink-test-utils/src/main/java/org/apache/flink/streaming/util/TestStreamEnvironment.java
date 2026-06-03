@@ -18,24 +18,31 @@
 
 package org.apache.flink.streaming.util;
 
+import org.apache.flink.api.common.JobExecutionResult;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.ExecutionOptions;
+import org.apache.flink.configuration.PipelineOptions;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.configuration.StateChangelogOptions;
+import org.apache.flink.core.execution.JobClient;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.runtime.minicluster.MiniCluster;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironmentFactory;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.test.util.MiniClusterPipelineExecutorServiceLoader;
 
 import java.net.URL;
 import java.time.Duration;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.apache.flink.runtime.testutils.PseudoRandomValueSelector.randomize;
+import static org.apache.flink.table.api.config.ExecutionConfigOptions.TABLE_EXEC_SINK_UPSERT_MATERIALIZE_STRATEGY;
 
 /** A {@link StreamExecutionEnvironment} that executes its jobs on {@link MiniCluster}. */
 public class TestStreamEnvironment extends StreamExecutionEnvironment {
@@ -46,6 +53,12 @@ public class TestStreamEnvironment extends StreamExecutionEnvironment {
             Boolean.parseBoolean(System.getProperty("checkpointing.randomization", "false"));
     private static final String STATE_CHANGE_LOG_CONFIG =
             System.getProperty("checkpointing.changelog", STATE_CHANGE_LOG_CONFIG_UNSET).trim();
+    private static AtomicReference<JobExecutionResult> lastJobExecutionResult =
+            new AtomicReference<>(null);
+    private final MiniCluster miniCluster;
+    private final int parallelism;
+    private final Collection<Path> jarFiles;
+    private final Collection<URL> classPaths;
 
     public TestStreamEnvironment(
             MiniCluster miniCluster,
@@ -60,6 +73,10 @@ public class TestStreamEnvironment extends StreamExecutionEnvironment {
                 null);
 
         setParallelism(parallelism);
+        this.miniCluster = miniCluster;
+        this.parallelism = parallelism;
+        this.jarFiles = jarFiles;
+        this.classPaths = classPaths;
     }
 
     public TestStreamEnvironment(MiniCluster miniCluster, int parallelism) {
@@ -102,6 +119,22 @@ public class TestStreamEnvironment extends StreamExecutionEnvironment {
         initializeContextEnvironment(factory);
     }
 
+    public void setAsContext() {
+        StreamExecutionEnvironmentFactory factory =
+                conf -> {
+                    TestStreamEnvironment env =
+                            new TestStreamEnvironment(
+                                    miniCluster, conf, parallelism, jarFiles, classPaths);
+
+                    randomizeConfiguration(miniCluster, conf);
+
+                    env.configure(conf, env.getUserClassloader());
+                    return env;
+                };
+
+        initializeContextEnvironment(factory);
+    }
+
     /**
      * This is the place for randomization the configuration that relates to DataStream API such as
      * ExecutionConf, CheckpointConf, StreamExecutionEnvironment. List of the configurations can be
@@ -113,6 +146,10 @@ public class TestStreamEnvironment extends StreamExecutionEnvironment {
         // randomize ITTests for enabling unaligned checkpoint
         if (RANDOMIZE_CHECKPOINTING_CONFIG) {
             randomize(conf, CheckpointingOptions.ENABLE_UNALIGNED, true, false);
+            randomize(
+                    conf, CheckpointingOptions.UNALIGNED_RECOVER_OUTPUT_ON_DOWNSTREAM, true, false);
+            randomize(
+                    conf, CheckpointingOptions.CHECKPOINTING_DURING_RECOVERY_ENABLED, true, false);
             randomize(
                     conf,
                     CheckpointingOptions.ALIGNED_CHECKPOINT_TIMEOUT,
@@ -136,6 +173,8 @@ public class TestStreamEnvironment extends StreamExecutionEnvironment {
                         .noDefaultValue(),
                 true,
                 false);
+
+        randomize(conf, PipelineOptions.WATERMARK_ALIGNMENT_BUFFER_SIZE, 0, 1, 2);
 
         // randomize ITTests for enabling state change log
         // TODO: remove the file merging check after FLINK-32085
@@ -171,6 +210,18 @@ public class TestStreamEnvironment extends StreamExecutionEnvironment {
             }
             miniCluster.overrideRestoreModeForChangelogStateBackend();
         }
+        randomize(
+                conf,
+                ConfigOptions.key("table.exec.unbounded-over.version").intType().noDefaultValue(),
+                1,
+                2);
+        randomize(
+                conf,
+                TABLE_EXEC_SINK_UPSERT_MATERIALIZE_STRATEGY,
+                ExecutionConfigOptions.SinkUpsertMaterializeStrategy.LEGACY,
+                ExecutionConfigOptions.SinkUpsertMaterializeStrategy.VALUE,
+                ExecutionConfigOptions.SinkUpsertMaterializeStrategy.MAP,
+                ExecutionConfigOptions.SinkUpsertMaterializeStrategy.ADAPTIVE);
     }
 
     /**
@@ -187,5 +238,25 @@ public class TestStreamEnvironment extends StreamExecutionEnvironment {
     /** Resets the streaming context environment to null. */
     public static void unsetAsContext() {
         resetContextEnvironment();
+    }
+
+    @Override
+    public JobExecutionResult execute(String jobName) throws Exception {
+        JobExecutionResult result = super.execute(jobName);
+        this.lastJobExecutionResult.set(result);
+        return result;
+    }
+
+    @Override
+    public JobClient executeAsync(String jobName) throws Exception {
+        JobClient jobClient = super.executeAsync(jobName);
+        CompletableFuture<JobExecutionResult> jobExecutionResultFuture =
+                jobClient.getJobExecutionResult();
+        jobExecutionResultFuture.thenAccept((e) -> this.lastJobExecutionResult.set(e));
+        return jobClient;
+    }
+
+    public JobExecutionResult getLastJobExecutionResult() {
+        return lastJobExecutionResult.get();
     }
 }

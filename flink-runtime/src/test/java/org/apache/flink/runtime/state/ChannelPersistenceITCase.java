@@ -21,7 +21,6 @@ import org.apache.flink.api.common.JobID;
 import org.apache.flink.core.memory.MemorySegmentFactory;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.checkpoint.OperatorSubtaskState;
-import org.apache.flink.runtime.checkpoint.StateObjectCollection;
 import org.apache.flink.runtime.checkpoint.TaskStateSnapshot;
 import org.apache.flink.runtime.checkpoint.channel.ChannelStateWriteRequestExecutorFactory;
 import org.apache.flink.runtime.checkpoint.channel.ChannelStateWriter.ChannelStateWriteResult;
@@ -50,6 +49,7 @@ import org.apache.flink.runtime.io.network.partition.consumer.SingleInputGateBui
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.state.storage.JobManagerCheckpointStorage;
+import org.apache.flink.streaming.runtime.io.recovery.RecordFilterContext;
 import org.apache.flink.util.function.SupplierWithException;
 
 import org.junit.jupiter.api.Test;
@@ -71,6 +71,8 @@ import static java.util.Collections.singletonMap;
 import static org.apache.flink.runtime.checkpoint.CheckpointType.CHECKPOINT;
 import static org.apache.flink.runtime.checkpoint.channel.ChannelStateWriter.SEQUENCE_NUMBER_UNKNOWN;
 import static org.apache.flink.runtime.io.network.buffer.Buffer.DataType.RECOVERY_COMPLETION;
+import static org.apache.flink.runtime.state.ChannelStateHelper.castToInputStateCollection;
+import static org.apache.flink.runtime.state.ChannelStateHelper.castToOutputStateCollection;
 import static org.apache.flink.util.CloseableIterator.ofElements;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -118,7 +120,7 @@ class ChannelPersistenceITCase {
         try {
             int numChannels = 1;
             InputGate gate = buildGate(networkBufferPool, numChannels);
-            reader.readInputData(new InputGate[] {gate});
+            reader.readInputData(new InputGate[] {gate}, RecordFilterContext.disabled());
             assertThat(collectBytes(gate::pollNext, BufferOrEvent::getBuffer))
                     .isEqualTo(inputChannelInfoData);
 
@@ -305,10 +307,10 @@ class ChannelPersistenceITCase {
                         new OperatorID(),
                         OperatorSubtaskState.builder()
                                 .setInputChannelState(
-                                        new StateObjectCollection<>(
+                                        castToInputStateCollection(
                                                 t.getInputChannelStateHandles().get()))
                                 .setResultSubpartitionState(
-                                        new StateObjectCollection<>(
+                                        castToOutputStateCollection(
                                                 t.getResultSubpartitionStateHandles().get()))
                                 .build()));
     }

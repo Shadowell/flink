@@ -42,7 +42,7 @@ import org.apache.flink.runtime.operators.testutils.types.StringPairSerializer;
 import org.apache.flink.util.Collector;
 import org.apache.flink.util.MutableObjectIterator;
 
-import org.apache.flink.shaded.guava32.com.google.common.collect.Ordering;
+import org.apache.flink.shaded.guava33.com.google.common.collect.Ordering;
 
 import org.junit.jupiter.api.Test;
 
@@ -118,7 +118,7 @@ class InPlaceMutableHashTableTest extends MutableHashTableTestBase {
                     public int compareToReference(Tuple2<Long, String> candidate) {
                         long x = ref;
                         long y = candidate.f0;
-                        return (x < y) ? -1 : ((x == y) ? 0 : 1);
+                        return Long.compare(x, y);
                     }
                 };
     }

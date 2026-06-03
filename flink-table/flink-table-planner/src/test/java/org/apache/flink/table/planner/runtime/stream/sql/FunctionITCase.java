@@ -20,6 +20,7 @@ package org.apache.flink.table.planner.runtime.stream.sql;
 
 import org.apache.flink.api.common.serialization.SerializerConfigImpl;
 import org.apache.flink.api.java.typeutils.runtime.kryo.KryoSerializer;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.table.annotation.ArgumentHint;
 import org.apache.flink.table.annotation.DataTypeHint;
@@ -33,6 +34,8 @@ import org.apache.flink.table.api.TableResult;
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.api.dataview.MapView;
 import org.apache.flink.table.catalog.Catalog;
+import org.apache.flink.table.catalog.CatalogDatabaseImpl;
+import org.apache.flink.table.catalog.CatalogDescriptor;
 import org.apache.flink.table.catalog.CatalogFunction;
 import org.apache.flink.table.catalog.DataTypeFactory;
 import org.apache.flink.table.catalog.ObjectPath;
@@ -65,26 +68,33 @@ import org.apache.flink.util.UserClassLoaderJarTestUtils;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.lang.invoke.MethodHandle;
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
 import java.time.DayOfWeek;
 import java.time.LocalDateTime;
-import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Random;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static org.apache.flink.table.api.Expressions.$;
 import static org.apache.flink.table.utils.UserDefinedFunctions.GENERATED_LOWER_UDF_CLASS;
 import static org.apache.flink.table.utils.UserDefinedFunctions.GENERATED_LOWER_UDF_CODE;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatNoException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.fail;
 
@@ -124,10 +134,10 @@ public class FunctionITCase extends StreamingTestBase {
     void testCreateCatalogFunctionInDefaultCatalog() {
         String ddl1 = "create function f1 as 'org.apache.flink.function.TestFunction'";
         tEnv().executeSql(ddl1);
-        assertThat(Arrays.asList(tEnv().listFunctions())).contains("f1");
+        assertThat(List.of(tEnv().listFunctions())).contains("f1");
 
         tEnv().executeSql("DROP FUNCTION IF EXISTS default_catalog.default_database.f1");
-        assertThat(Arrays.asList(tEnv().listFunctions())).doesNotContain("f1");
+        assertThat(List.of(tEnv().listFunctions())).doesNotContain("f1");
     }
 
     @Test
@@ -136,10 +146,10 @@ public class FunctionITCase extends StreamingTestBase {
                 "create function default_catalog.default_database.f2 as"
                         + " 'org.apache.flink.function.TestFunction'";
         tEnv().executeSql(ddl1);
-        assertThat(Arrays.asList(tEnv().listFunctions())).contains("f2");
+        assertThat(List.of(tEnv().listFunctions())).contains("f2");
 
         tEnv().executeSql("DROP FUNCTION IF EXISTS default_catalog.default_database.f2");
-        assertThat(Arrays.asList(tEnv().listFunctions())).doesNotContain("f2");
+        assertThat(List.of(tEnv().listFunctions())).doesNotContain("f2");
     }
 
     @Test
@@ -148,10 +158,38 @@ public class FunctionITCase extends StreamingTestBase {
                 "create function default_database.f3 as"
                         + " 'org.apache.flink.function.TestFunction'";
         tEnv().executeSql(ddl1);
-        assertThat(Arrays.asList(tEnv().listFunctions())).contains("f3");
+        assertThat(List.of(tEnv().listFunctions())).contains("f3");
 
         tEnv().executeSql("DROP FUNCTION IF EXISTS default_catalog.default_database.f3");
-        assertThat(Arrays.asList(tEnv().listFunctions())).doesNotContain("f3");
+        assertThat(List.of(tEnv().listFunctions())).doesNotContain("f3");
+    }
+
+    @Test
+    void testDynamicDatetimeFunctions() {
+        assertThatNoException()
+                .isThrownBy(
+                        () ->
+                                tEnv().sqlQuery(
+                                                "SELECT CURRENT_TIMESTAMP, CURRENT_TIMESTAMP(),"
+                                                        + " LOCALTIME, LOCALTIME(),"
+                                                        + " CURRENT_TIME, CURRENT_TIME(),"
+                                                        + " LOCALTIMESTAMP, LOCALTIMESTAMP(),"
+                                                        + " CURRENT_DATE, CURRENT_DATE()")
+                                        .execute());
+    }
+
+    @Test
+    void testDynamicDatetimeFunctionsAreEqual() {
+        TableResult tableResult =
+                tEnv().sqlQuery(
+                                "SELECT CURRENT_TIMESTAMP = CURRENT_TIMESTAMP(),"
+                                        + " LOCALTIME = LOCALTIME(),"
+                                        + " CURRENT_TIME = CURRENT_TIME(),"
+                                        + " LOCALTIMESTAMP = LOCALTIMESTAMP(),"
+                                        + " CURRENT_DATE = CURRENT_DATE()")
+                        .execute();
+        List<Row> actualRows = CollectionUtil.iteratorToList(tableResult.collect());
+        assertThat(actualRows).isEqualTo(List.of(Row.of(true, true, true, true, true)));
     }
 
     @Test
@@ -197,13 +235,13 @@ public class FunctionITCase extends StreamingTestBase {
         String ddl4 = "drop temporary function if exists default_catalog.default_database.f4";
 
         tEnv().executeSql(ddl1);
-        assertThat(Arrays.asList(tEnv().listFunctions())).contains("f4");
+        assertThat(List.of(tEnv().listFunctions())).contains("f4");
 
         tEnv().executeSql(ddl2);
-        assertThat(Arrays.asList(tEnv().listFunctions())).contains("f4");
+        assertThat(List.of(tEnv().listFunctions())).contains("f4");
 
         tEnv().executeSql(ddl3);
-        assertThat(Arrays.asList(tEnv().listFunctions())).doesNotContain("f4");
+        assertThat(List.of(tEnv().listFunctions())).doesNotContain("f4");
 
         tEnv().executeSql(ddl1);
         assertThatThrownBy(() -> tEnv().executeSql(ddl1))
@@ -241,24 +279,24 @@ public class FunctionITCase extends StreamingTestBase {
                         "CREATE TEMPORARY SYSTEM FUNCTION f10 AS '%s' USING JAR '%s'",
                         udfClassName, jarPath);
         tEnv().executeSql(ddl);
-        assertThat(Arrays.asList(tEnv().listFunctions())).contains("f10");
+        assertThat(List.of(tEnv().listFunctions())).contains("f10");
 
         try (CloseableIterator<Row> itor = tEnv().executeSql("SHOW JARS").collect()) {
             assertThat(itor.hasNext()).isFalse();
         }
 
         tEnv().executeSql("DROP TEMPORARY SYSTEM FUNCTION f10");
-        assertThat(Arrays.asList(tEnv().listFunctions())).doesNotContain("f10");
+        assertThat(List.of(tEnv().listFunctions())).doesNotContain("f10");
     }
 
     @Test
     void testCreateTemporarySystemFunctionWithTableAPI() {
         ResourceUri resourceUri = new ResourceUri(ResourceType.JAR, jarPath);
-        tEnv().createTemporarySystemFunction("f10", udfClassName, Arrays.asList(resourceUri));
-        assertThat(Arrays.asList(tEnv().listFunctions())).contains("f10");
+        tEnv().createTemporarySystemFunction("f10", udfClassName, List.of(resourceUri));
+        assertThat(List.of(tEnv().listFunctions())).contains("f10");
 
         tEnv().executeSql("DROP TEMPORARY SYSTEM FUNCTION f10");
-        assertThat(Arrays.asList(tEnv().listFunctions())).doesNotContain("f10");
+        assertThat(List.of(tEnv().listFunctions())).doesNotContain("f10");
     }
 
     @Test
@@ -268,7 +306,7 @@ public class FunctionITCase extends StreamingTestBase {
         testUserDefinedFunctionByUsingJar(
                 environment ->
                         environment.createTemporarySystemFunction(
-                                "lowerUdf", udfClassName, Arrays.asList(resourceUri)),
+                                "lowerUdf", udfClassName, List.of(resourceUri)),
                 dropFunctionSql);
     }
 
@@ -279,20 +317,20 @@ public class FunctionITCase extends StreamingTestBase {
                         "CREATE FUNCTION default_database.f11 AS '%s' USING JAR '%s'",
                         udfClassName, jarPath);
         tEnv().executeSql(ddl);
-        assertThat(Arrays.asList(tEnv().listFunctions())).contains("f11");
+        assertThat(List.of(tEnv().listFunctions())).contains("f11");
 
         tEnv().executeSql("DROP FUNCTION default_database.f11");
-        assertThat(Arrays.asList(tEnv().listFunctions())).doesNotContain("f11");
+        assertThat(List.of(tEnv().listFunctions())).doesNotContain("f11");
     }
 
     @Test
     void testCreateCatalogFunctionWithTableAPI() {
         ResourceUri resourceUri = new ResourceUri(ResourceType.JAR, jarPath);
-        tEnv().createFunction("f11", udfClassName, Arrays.asList(resourceUri));
-        assertThat(Arrays.asList(tEnv().listFunctions())).contains("f11");
+        tEnv().createFunction("f11", udfClassName, List.of(resourceUri));
+        assertThat(List.of(tEnv().listFunctions())).contains("f11");
 
         tEnv().executeSql("DROP FUNCTION default_database.f11");
-        assertThat(Arrays.asList(tEnv().listFunctions())).doesNotContain("f11");
+        assertThat(List.of(tEnv().listFunctions())).doesNotContain("f11");
     }
 
     @Test
@@ -301,8 +339,7 @@ public class FunctionITCase extends StreamingTestBase {
         String dropFunctionSql = "DROP FUNCTION default_database.lowerUdf";
         testUserDefinedFunctionByUsingJar(
                 environment ->
-                        environment.createFunction(
-                                "lowerUdf", udfClassName, Arrays.asList(resourceUri)),
+                        environment.createFunction("lowerUdf", udfClassName, List.of(resourceUri)),
                 dropFunctionSql);
     }
 
@@ -313,20 +350,20 @@ public class FunctionITCase extends StreamingTestBase {
                         "CREATE TEMPORARY FUNCTION default_database.f12 AS '%s' USING JAR '%s'",
                         udfClassName, jarPath);
         tEnv().executeSql(ddl);
-        assertThat(Arrays.asList(tEnv().listFunctions())).contains("f12");
+        assertThat(List.of(tEnv().listFunctions())).contains("f12");
 
         tEnv().executeSql("DROP TEMPORARY FUNCTION default_database.f12");
-        assertThat(Arrays.asList(tEnv().listFunctions())).doesNotContain("f12");
+        assertThat(List.of(tEnv().listFunctions())).doesNotContain("f12");
     }
 
     @Test
     void testCreateTemporaryCatalogFunctionWithTableAPI() {
         ResourceUri resourceUri = new ResourceUri(ResourceType.JAR, jarPath);
-        tEnv().createTemporaryFunction("f12", udfClassName, Arrays.asList(resourceUri));
-        assertThat(Arrays.asList(tEnv().listFunctions())).contains("f12");
+        tEnv().createTemporaryFunction("f12", udfClassName, List.of(resourceUri));
+        assertThat(List.of(tEnv().listFunctions())).contains("f12");
 
         tEnv().executeSql("DROP TEMPORARY FUNCTION default_database.f12");
-        assertThat(Arrays.asList(tEnv().listFunctions())).doesNotContain("f12");
+        assertThat(List.of(tEnv().listFunctions())).doesNotContain("f12");
     }
 
     @Test
@@ -336,7 +373,7 @@ public class FunctionITCase extends StreamingTestBase {
         testUserDefinedFunctionByUsingJar(
                 environment ->
                         environment.createTemporaryFunction(
-                                "lowerUdf", udfClassName, Arrays.asList(resourceUri)),
+                                "lowerUdf", udfClassName, List.of(resourceUri)),
                 dropFunctionSql);
     }
 
@@ -561,7 +598,7 @@ public class FunctionITCase extends StreamingTestBase {
         TableResult tableResult = tEnv().executeSql("SELECT lowerUdf('HELLO')");
 
         List<Row> actualRows = CollectionUtil.iteratorToList(tableResult.collect());
-        assertThat(actualRows).isEqualTo(Arrays.asList(Row.of("hello")));
+        assertThat(actualRows).isEqualTo(List.of(Row.of("hello")));
 
         tEnv().executeSql("drop temporary function lowerUdf");
     }
@@ -576,7 +613,7 @@ public class FunctionITCase extends StreamingTestBase {
 
     private void testUserDefinedCatalogFunction(String createFunctionDDL) throws Exception {
         List<Row> sourceData =
-                Arrays.asList(
+                List.of(
                         Row.of(1, "1000", 2),
                         Row.of(2, "1", 3),
                         Row.of(3, "2000", 4),
@@ -609,7 +646,7 @@ public class FunctionITCase extends StreamingTestBase {
     private void testUserDefinedFunctionByUsingJar(FunctionCreator creator, String dropFunctionDDL)
             throws Exception {
         List<Row> sourceData =
-                Arrays.asList(
+                List.of(
                         Row.of(1, "JARK"),
                         Row.of(2, "RON"),
                         Row.of(3, "LeoNard"),
@@ -632,7 +669,7 @@ public class FunctionITCase extends StreamingTestBase {
 
         List<Row> result = TestCollectionTableFactory.RESULT();
         List<Row> expected =
-                Arrays.asList(
+                List.of(
                         Row.of(1, "jark"),
                         Row.of(2, "ron"),
                         Row.of(3, "leonard"),
@@ -649,10 +686,10 @@ public class FunctionITCase extends StreamingTestBase {
     @Test
     void testPrimitiveScalarFunction() throws Exception {
         final List<Row> sourceData =
-                Arrays.asList(Row.of(1, 1L, "-"), Row.of(2, 2L, "--"), Row.of(3, 3L, "---"));
+                List.of(Row.of(1, 1L, "-"), Row.of(2, 2L, "--"), Row.of(3, 3L, "---"));
 
         final List<Row> sinkData =
-                Arrays.asList(Row.of(1, 3L, "-"), Row.of(2, 6L, "--"), Row.of(3, 9L, "---"));
+                List.of(Row.of(1, 3L, "-"), Row.of(2, 6L, "--"), Row.of(3, 9L, "---"));
 
         TestCollectionTableFactory.reset();
         TestCollectionTableFactory.initData(sourceData);
@@ -703,7 +740,7 @@ public class FunctionITCase extends StreamingTestBase {
     @Test
     void testRowScalarFunction() throws Exception {
         final List<Row> sourceData =
-                Arrays.asList(
+                List.of(
                         Row.of(1, Row.of(1, "1")),
                         Row.of(2, Row.of(2, "2")),
                         Row.of(3, Row.of(3, "3")));
@@ -726,14 +763,14 @@ public class FunctionITCase extends StreamingTestBase {
     @Test
     void testComplexScalarFunction() throws Exception {
         final List<Row> sourceData =
-                Arrays.asList(
+                List.of(
                         Row.of(1, new byte[] {1, 2, 3}),
                         Row.of(2, new byte[] {2, 3, 4}),
                         Row.of(3, new byte[] {3, 4, 5}),
                         Row.of(null, null));
 
         final List<Row> sinkData =
-                Arrays.asList(
+                List.of(
                         Row.of(
                                 1,
                                 "1+2012-12-12 12:12:12.123456789",
@@ -799,11 +836,10 @@ public class FunctionITCase extends StreamingTestBase {
     @Test
     void testCustomScalarFunction() throws Exception {
         final List<Row> sourceData =
-                Arrays.asList(Row.of(1), Row.of(2), Row.of(3), Row.of((Integer) null));
+                List.of(Row.of(1), Row.of(2), Row.of(3), Row.of((Integer) null));
 
         final List<Row> sinkData =
-                Arrays.asList(
-                        Row.of(1, 1, 5), Row.of(2, 2, 5), Row.of(3, 3, 5), Row.of(null, null, 5));
+                List.of(Row.of(1, 1, 5), Row.of(2, 2, 5), Row.of(3, 3, 5), Row.of(null, null, 5));
 
         TestCollectionTableFactory.reset();
         TestCollectionTableFactory.initData(sourceData);
@@ -827,7 +863,7 @@ public class FunctionITCase extends StreamingTestBase {
 
     @Test
     void testVarArgScalarFunction() {
-        final List<Row> sourceData = Arrays.asList(Row.of("Bob", 1), Row.of("Alice", 2));
+        final List<Row> sourceData = List.of(Row.of("Bob", 1), Row.of("Alice", 2));
 
         TestCollectionTableFactory.reset();
         TestCollectionTableFactory.initData(sourceData);
@@ -855,7 +891,7 @@ public class FunctionITCase extends StreamingTestBase {
 
         final List<Row> actual = CollectionUtil.iteratorToList(result.collect());
         final List<Row> expected =
-                Arrays.asList(
+                List.of(
                         Row.of(
                                 "(INT...)",
                                 "(INT...)",
@@ -874,7 +910,7 @@ public class FunctionITCase extends StreamingTestBase {
     @Test
     void testRawLiteralScalarFunction() throws Exception {
         final List<Row> sourceData =
-                Arrays.asList(
+                List.of(
                         Row.of(1, DayOfWeek.MONDAY),
                         Row.of(2, DayOfWeek.FRIDAY),
                         Row.of(null, null));
@@ -933,13 +969,390 @@ public class FunctionITCase extends StreamingTestBase {
         assertThat(TestCollectionTableFactory.getResult()).containsExactlyInAnyOrder(sinkData);
     }
 
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("inputForTestCalcLocalRefReuse")
+    void testCalcLocalRefReuse(
+            String sql, List<Row> expectedRows, int expectedDetCalls, int expectedNonDetCalls) {
+        final List<Row> sourceData = List.of(Row.of("Bob"), Row.of("Alice"));
+
+        TestCollectionTableFactory.reset();
+        TestCollectionTableFactory.initData(sourceData);
+        CountingUpperScalarFunction.COUNT.set(0);
+        NonDeterministicCountingScalarFunction.COUNT.set(0);
+
+        tEnv().createTemporarySystemFunction("Det", CountingUpperScalarFunction.class);
+        tEnv().createTemporarySystemFunction(
+                        "Nondet", NonDeterministicCountingScalarFunction.class);
+        tEnv().executeSql("CREATE TABLE SourceTable (s STRING) WITH ('connector' = 'COLLECTION')");
+
+        final List<Row> actual = CollectionUtil.iteratorToList(tEnv().executeSql(sql).collect());
+
+        assertThat(actual).containsExactlyElementsOf(expectedRows);
+        assertThat(CountingUpperScalarFunction.COUNT.get())
+                .as("Deterministic invocations")
+                .isEqualTo(expectedDetCalls);
+        assertThat(NonDeterministicCountingScalarFunction.COUNT.get())
+                .as("Non-deterministic invocations")
+                .isEqualTo(expectedNonDetCalls);
+    }
+
+    static Stream<Arguments> inputForTestCalcLocalRefReuse() {
+        return Stream.of(
+                Arguments.of(
+                        "SELECT Det(s), Det(s), Det(s) FROM SourceTable",
+                        List.of(Row.of("BOB", "BOB", "BOB"), Row.of("ALICE", "ALICE", "ALICE")),
+                        2, // expected localref calls: rows × 1 (cached)
+                        0),
+                Arguments.of(
+                        "SELECT Det(s), Det(s), UPPER(s) FROM SourceTable",
+                        List.of(Row.of("BOB", "BOB", "BOB"), Row.of("ALICE", "ALICE", "ALICE")),
+                        2, // rows × 1 (cached); built-in UPPER not counted
+                        0),
+                Arguments.of(
+                        "SELECT Det(Det(s)), Det(Det(s)), Det(Det(s)) FROM SourceTable",
+                        List.of(Row.of("BOB", "BOB", "BOB"), Row.of("ALICE", "ALICE", "ALICE")),
+                        4, // rows × 2 layers
+                        0),
+                Arguments.of(
+                        "SELECT Nondet(s), Nondet(s), Nondet(s) FROM SourceTable",
+                        List.of(
+                                Row.of("BOB_1", "BOB_2", "BOB_3"),
+                                Row.of("ALICE_4", "ALICE_5", "ALICE_6")),
+                        0,
+                        6 // rows × 3 projections
+                        ),
+                Arguments.of(
+                        "SELECT Nondet(Det(s)), Nondet(Det(s)), Nondet(Det(s)) FROM SourceTable",
+                        List.of(
+                                Row.of("BOB_1", "BOB_2", "BOB_3"),
+                                Row.of("ALICE_4", "ALICE_5", "ALICE_6")),
+                        2, // rows × 1 (inner cached)
+                        6 // rows × 3 projections
+                        ),
+                Arguments.of(
+                        "SELECT Det(Nondet(s)), Det(Nondet(s)), Det(Nondet(s)) FROM SourceTable",
+                        List.of(
+                                Row.of("BOB_1", "BOB_2", "BOB_3"),
+                                Row.of("ALICE_4", "ALICE_5", "ALICE_6")),
+                        6, // rows × 3 (nondet input disables cache)
+                        6 // rows × 3 projections
+                        ),
+                // shared Det in filter → cached once per row
+                Arguments.of(
+                        "SELECT s FROM SourceTable"
+                                + " WHERE Det(s) IS NOT NULL AND Det(s) <> '' AND Det(s) <> ' '",
+                        List.of(Row.of("Bob"), Row.of("Alice")),
+                        2,
+                        0),
+                // mixed UDF + built-in
+                Arguments.of(
+                        "SELECT s FROM SourceTable"
+                                + " WHERE Det(s) IS NOT NULL AND Det(s) <> '' AND UPPER(s) <> ''",
+                        List.of(Row.of("Bob"), Row.of("Alice")),
+                        2,
+                        0),
+                // nested Det in filter; both layers cached
+                Arguments.of(
+                        "SELECT s FROM SourceTable"
+                                + " WHERE Det(Det(s)) IS NOT NULL"
+                                + " AND Det(Det(s)) <> '' AND Det(Det(s)) <> ' '",
+                        List.of(Row.of("Bob"), Row.of("Alice")),
+                        4,
+                        0),
+                // non-deterministic in filter — never cached
+                Arguments.of(
+                        "SELECT s FROM SourceTable"
+                                + " WHERE Nondet(s) IS NOT NULL"
+                                + " AND Nondet(s) <> '' AND Nondet(s) <> ' '",
+                        List.of(Row.of("Bob"), Row.of("Alice")),
+                        0,
+                        6),
+                // outer nondet, inner Det cached
+                Arguments.of(
+                        "SELECT s FROM SourceTable"
+                                + " WHERE Nondet(Det(s)) IS NOT NULL"
+                                + " AND Nondet(Det(s)) <> '' AND Nondet(Det(s)) <> ' '",
+                        List.of(Row.of("Bob"), Row.of("Alice")),
+                        2,
+                        6),
+                // Det with nondet input → cache bypassed
+                Arguments.of(
+                        "SELECT s FROM SourceTable"
+                                + " WHERE Det(Nondet(s)) IS NOT NULL"
+                                + " AND Det(Nondet(s)) <> '' AND Det(Nondet(s)) <> ' '",
+                        List.of(Row.of("Bob"), Row.of("Alice")),
+                        6,
+                        6),
+                // filter ↔ projection share via unified program
+                Arguments.of(
+                        "SELECT Det(s) FROM SourceTable WHERE Det(s) = 'BOB'",
+                        List.of(Row.of("BOB")),
+                        2,
+                        0),
+                Arguments.of(
+                        "SELECT Det(s), Det(s) FROM SourceTable WHERE Det(s) = 'BOB'",
+                        List.of(Row.of("BOB", "BOB")),
+                        2,
+                        0),
+
+                // ---------------------------------------------------------------------------
+                // JSON construction scenarios. These verify that the localref / RexProgram CSE
+                // cache also fires when the shared sub-expression is wrapped inside (or itself
+                // is) a JSON_OBJECT / JSON_ARRAY / JSON_STRING call.
+                // ---------------------------------------------------------------------------
+
+                // JSON_OBJECT × 2 sharing inner Det → cached once per row.
+                Arguments.of(
+                        "SELECT JSON_OBJECT(KEY 'a' VALUE Det(s)),"
+                                + " JSON_OBJECT(KEY 'b' VALUE Det(s))"
+                                + " FROM SourceTable",
+                        List.of(
+                                Row.of("{\"a\":\"BOB\"}", "{\"b\":\"BOB\"}"),
+                                Row.of("{\"a\":\"ALICE\"}", "{\"b\":\"ALICE\"}")),
+                        2, // rows × 1 (cached)
+                        0),
+                // JSON_ARRAY × 2 sharing inner Det → cached.
+                Arguments.of(
+                        "SELECT JSON_ARRAY(Det(s)), JSON_ARRAY(Det(s)) FROM SourceTable",
+                        List.of(
+                                Row.of("[\"BOB\"]", "[\"BOB\"]"),
+                                Row.of("[\"ALICE\"]", "[\"ALICE\"]")),
+                        2,
+                        0),
+                // JSON_STRING × 2 sharing inner Det → cached.
+                Arguments.of(
+                        "SELECT JSON_STRING(Det(s)), JSON_STRING(Det(s)) FROM SourceTable",
+                        List.of(Row.of("\"BOB\"", "\"BOB\""), Row.of("\"ALICE\"", "\"ALICE\"")),
+                        2,
+                        0),
+                // Mixed JSON_OBJECT + JSON_ARRAY sharing same Det.
+                Arguments.of(
+                        "SELECT JSON_OBJECT(KEY 'k' VALUE Det(s)), JSON_ARRAY(Det(s))"
+                                + " FROM SourceTable",
+                        List.of(
+                                Row.of("{\"k\":\"BOB\"}", "[\"BOB\"]"),
+                                Row.of("{\"k\":\"ALICE\"}", "[\"ALICE\"]")),
+                        2,
+                        0),
+                // Mixed JSON_OBJECT + JSON_STRING sharing same Det.
+                Arguments.of(
+                        "SELECT JSON_OBJECT(KEY 'k' VALUE Det(s)), JSON_STRING(Det(s))"
+                                + " FROM SourceTable",
+                        List.of(
+                                Row.of("{\"k\":\"BOB\"}", "\"BOB\""),
+                                Row.of("{\"k\":\"ALICE\"}", "\"ALICE\"")),
+                        2,
+                        0),
+                // JSON_OBJECT × 3 sharing same Det → cached across all 3 sites.
+                Arguments.of(
+                        "SELECT JSON_OBJECT(KEY 'a' VALUE Det(s)),"
+                                + " JSON_OBJECT(KEY 'b' VALUE Det(s)),"
+                                + " JSON_OBJECT(KEY 'c' VALUE Det(s))"
+                                + " FROM SourceTable",
+                        List.of(
+                                Row.of("{\"a\":\"BOB\"}", "{\"b\":\"BOB\"}", "{\"c\":\"BOB\"}"),
+                                Row.of(
+                                        "{\"a\":\"ALICE\"}",
+                                        "{\"b\":\"ALICE\"}",
+                                        "{\"c\":\"ALICE\"}")),
+                        2,
+                        0),
+                // Nested Det(Det(s)) inside two JSON_OBJECT projections → both layers cached.
+                Arguments.of(
+                        "SELECT JSON_OBJECT(KEY 'a' VALUE Det(Det(s))),"
+                                + " JSON_OBJECT(KEY 'b' VALUE Det(Det(s)))"
+                                + " FROM SourceTable",
+                        List.of(
+                                Row.of("{\"a\":\"BOB\"}", "{\"b\":\"BOB\"}"),
+                                Row.of("{\"a\":\"ALICE\"}", "{\"b\":\"ALICE\"}")),
+                        4, // rows × 2 layers
+                        0),
+                // Nondet inside two JSON_OBJECT projections → never cached.
+                Arguments.of(
+                        "SELECT JSON_OBJECT(KEY 'a' VALUE Nondet(s)),"
+                                + " JSON_OBJECT(KEY 'b' VALUE Nondet(s))"
+                                + " FROM SourceTable",
+                        List.of(
+                                Row.of("{\"a\":\"BOB_1\"}", "{\"b\":\"BOB_2\"}"),
+                                Row.of("{\"a\":\"ALICE_3\"}", "{\"b\":\"ALICE_4\"}")),
+                        0,
+                        4 // rows × 2 projections
+                        ),
+                // Outer Nondet, inner Det inside two JSON_OBJECT projections — Det cached.
+                Arguments.of(
+                        "SELECT JSON_OBJECT(KEY 'a' VALUE Nondet(Det(s))),"
+                                + " JSON_OBJECT(KEY 'b' VALUE Nondet(Det(s)))"
+                                + " FROM SourceTable",
+                        List.of(
+                                Row.of("{\"a\":\"BOB_1\"}", "{\"b\":\"BOB_2\"}"),
+                                Row.of("{\"a\":\"ALICE_3\"}", "{\"b\":\"ALICE_4\"}")),
+                        2, // inner Det cached
+                        4),
+                // Outer Det, inner Nondet → outer cache disabled by nondet operand.
+                Arguments.of(
+                        "SELECT JSON_OBJECT(KEY 'a' VALUE Det(Nondet(s))),"
+                                + " JSON_OBJECT(KEY 'b' VALUE Det(Nondet(s)))"
+                                + " FROM SourceTable",
+                        List.of(
+                                Row.of("{\"a\":\"BOB_1\"}", "{\"b\":\"BOB_2\"}"),
+                                Row.of("{\"a\":\"ALICE_3\"}", "{\"b\":\"ALICE_4\"}")),
+                        4, // outer Det not cached (nondet operand)
+                        4),
+                // Filter ↔ JSON projection share Det via unified program.
+                Arguments.of(
+                        "SELECT JSON_OBJECT(KEY 'k' VALUE Det(s))"
+                                + " FROM SourceTable WHERE Det(s) = 'BOB'",
+                        List.of(Row.of("{\"k\":\"BOB\"}")),
+                        2,
+                        0),
+                // Shared inner JSON_OBJECT(KEY 'k' VALUE Det(s)) inside two outer JSON_OBJECT
+                // projections — verifies CSE works when the cached node is itself a JSON
+                // construction call (and validates the JSON helpers' RexLocalRef deref path
+                // along the way).
+                Arguments.of(
+                        "SELECT JSON_OBJECT(KEY 'outer1' VALUE JSON_OBJECT(KEY 'k' VALUE Det(s))),"
+                                + " JSON_OBJECT(KEY 'outer2' VALUE JSON_OBJECT(KEY 'k' VALUE Det(s)))"
+                                + " FROM SourceTable",
+                        List.of(
+                                Row.of(
+                                        "{\"outer1\":{\"k\":\"BOB\"}}",
+                                        "{\"outer2\":{\"k\":\"BOB\"}}"),
+                                Row.of(
+                                        "{\"outer1\":{\"k\":\"ALICE\"}}",
+                                        "{\"outer2\":{\"k\":\"ALICE\"}}")),
+                        2,
+                        0),
+                // Shared inner JSON_ARRAY(Det(s)) inside two outer JSON_OBJECT projections.
+                Arguments.of(
+                        "SELECT JSON_OBJECT(KEY 'a' VALUE JSON_ARRAY(Det(s))),"
+                                + " JSON_OBJECT(KEY 'b' VALUE JSON_ARRAY(Det(s)))"
+                                + " FROM SourceTable",
+                        List.of(
+                                Row.of("{\"a\":[\"BOB\"]}", "{\"b\":[\"BOB\"]}"),
+                                Row.of("{\"a\":[\"ALICE\"]}", "{\"b\":[\"ALICE\"]}")),
+                        2,
+                        0),
+                // Shared inner JSON_OBJECT(KEY 'k' VALUE Det(s)) inside two JSON_ARRAY
+                // projections.
+                Arguments.of(
+                        "SELECT JSON_ARRAY(JSON_OBJECT(KEY 'k' VALUE Det(s))),"
+                                + " JSON_ARRAY(JSON_OBJECT(KEY 'k' VALUE Det(s)))"
+                                + " FROM SourceTable",
+                        List.of(
+                                Row.of("[{\"k\":\"BOB\"}]", "[{\"k\":\"BOB\"}]"),
+                                Row.of("[{\"k\":\"ALICE\"}]", "[{\"k\":\"ALICE\"}]")),
+                        2,
+                        0));
+    }
+
+    @Test
+    void testLocalRefReuseForMixedArgs() {
+        final List<Row> sourceData = List.of(Row.of("Bob"), Row.of("Alice"));
+        final int callSites = 2;
+
+        TestCollectionTableFactory.reset();
+        TestCollectionTableFactory.initData(sourceData);
+        CountingUpperScalarFunction.COUNT.set(0);
+        NonDeterministicCountingScalarFunction.COUNT.set(0);
+        CountingConcat3ScalarFunction.COUNT.set(0);
+
+        tEnv().createTemporarySystemFunction("Det", CountingUpperScalarFunction.class);
+        tEnv().createTemporarySystemFunction(
+                        "Nondet", NonDeterministicCountingScalarFunction.class);
+        tEnv().createTemporarySystemFunction("Concat3", CountingConcat3ScalarFunction.class);
+        tEnv().executeSql("CREATE TABLE SourceTable (s STRING) WITH ('connector' = 'COLLECTION')");
+
+        final List<Row> actual =
+                CollectionUtil.iteratorToList(
+                        tEnv().executeSql(
+                                        "SELECT Concat3(Det(s), Nondet(s), Det(s)),"
+                                                + " Concat3(Det(s), Nondet(s), Det(s))"
+                                                + " FROM SourceTable")
+                                .collect());
+
+        assertThat(actual)
+                .containsExactly(
+                        Row.of("BOB/BOB_1/BOB", "BOB/BOB_2/BOB"),
+                        Row.of("ALICE/ALICE_3/ALICE", "ALICE/ALICE_4/ALICE"));
+
+        assertThat(CountingUpperScalarFunction.COUNT.get()).isEqualTo(sourceData.size());
+        assertThat(NonDeterministicCountingScalarFunction.COUNT.get())
+                .isEqualTo(sourceData.size() * callSites);
+        // Concat3 is deterministic however has non-deterministic input
+        assertThat(CountingConcat3ScalarFunction.COUNT.get())
+                .isEqualTo(sourceData.size() * callSites);
+    }
+
+    @Test
+    void testCalcSharesSubExpressionBetweenFilterAndProjection() {
+        final List<Row> sourceData =
+                List.of(Row.of("Bob"), Row.of("Bob"), Row.of("Alice"), Row.of("Alice"));
+
+        TestCollectionTableFactory.reset();
+        TestCollectionTableFactory.initData(sourceData);
+        CountingUpperScalarFunction.COUNT.set(0);
+
+        tEnv().createTemporarySystemFunction("CountingUpper", CountingUpperScalarFunction.class);
+        tEnv().executeSql("CREATE TABLE SourceTable (s STRING) WITH ('connector' = 'COLLECTION')");
+
+        final List<Row> actual =
+                CollectionUtil.iteratorToList(
+                        tEnv().executeSql(
+                                        "SELECT CountingUpper(s) FROM SourceTable"
+                                                + " WHERE CountingUpper(s) = 'BOB' AND CountingUpper(s) <> 'BOB2'")
+                                .collect());
+
+        assertThat(actual).containsExactly(Row.of("BOB"), Row.of("BOB"));
+
+        // Filter and projection share via the unified RexProgram, so the UDF runs once per
+        // source row regardless of how many call sites name it.
+        assertThat(CountingUpperScalarFunction.COUNT.get()).isEqualTo(sourceData.size());
+    }
+
+    /**
+     * Pins the CASE-WHEN guard interaction with the RexLocalRef cache.
+     *
+     * <p>Prior to scoped caching, RexProgramBuilder collapsed the division {@code a / b} into a
+     * single exprList entry; the codegen visitor cached the body and {@code
+     * CalcCodeGenerator.reuseLocalRefCode()} hoisted that body to the top of the generated method,
+     * evaluating {@code a / b} for every row regardless of the surrounding {@code CASE WHEN b > 0}.
+     * Rows with {@code b = 0} then threw {@code java.lang.ArithmeticException: Division undefined}
+     * — caught in the wild on TPC-DS query 34. With scoped caching the division body lives inside
+     * the THEN-branch's generated code and never executes when the guard is false.
+     */
+    @Test
+    void testCalcCaseGuardShortCircuit() {
+        final List<Row> sourceData =
+                List.of(Row.of(10, 0), Row.of(10, 2), Row.of(20, 0), Row.of(30, 5), Row.of(40, 0));
+
+        TestCollectionTableFactory.reset();
+        TestCollectionTableFactory.initData(sourceData);
+        tEnv().executeSql(
+                        "CREATE TABLE SourceTable (a INT, b INT) WITH ('connector' = 'COLLECTION')");
+
+        final List<Row> actual =
+                CollectionUtil.iteratorToList(
+                        tEnv().executeSql(
+                                        "SELECT a FROM SourceTable WHERE"
+                                                + " (CASE WHEN b > 0"
+                                                + "       THEN CAST(a AS DECIMAL(7,2))"
+                                                + "          / CAST(b AS DECIMAL(7,2))"
+                                                + "       ELSE NULL END) > 1.2")
+                                .collect());
+
+        // Row(10,2) → 10/2 = 5.0  (>1.2)
+        // Row(30,5) → 30/5 = 6.0  (>1.2)
+        // Rows with b=0 must NOT enter the THEN-branch (the division would fail).
+        assertThat(actual).containsExactly(Row.of(10), Row.of(30));
+    }
+
     @Test
     void testStructuredScalarFunction() throws Exception {
         final List<Row> sourceData =
-                Arrays.asList(Row.of("Bob", 42), Row.of("Alice", 12), Row.of(null, 0));
+                List.of(Row.of("Bob", 42), Row.of("Alice", 12), Row.of(null, 0));
 
         final List<Row> sinkData =
-                Arrays.asList(
+                List.of(
                         Row.of("Bob 42", "Tyler"),
                         Row.of("Alice 12", "Tyler"),
                         Row.of("<<null>>", "Tyler"));
@@ -985,11 +1398,10 @@ public class FunctionITCase extends StreamingTestBase {
     @Test
     void testRowTableFunction() throws Exception {
         final List<Row> sourceData =
-                Arrays.asList(
-                        Row.of("1,2,3"), Row.of("2,3,4"), Row.of("3,4,5"), Row.of((String) null));
+                List.of(Row.of("1,2,3"), Row.of("2,3,4"), Row.of("3,4,5"), Row.of((String) null));
 
         final List<Row> sinkData =
-                Arrays.asList(
+                List.of(
                         Row.of("1,2,3", new String[] {"1", "2", "3"}),
                         Row.of("2,3,4", new String[] {"2", "3", "4"}),
                         Row.of("3,4,5", new String[] {"3", "4", "5"}));
@@ -1013,10 +1425,9 @@ public class FunctionITCase extends StreamingTestBase {
     @Test
     void testStructuredTableFunction() throws Exception {
         final List<Row> sourceData =
-                Arrays.asList(Row.of("Bob", 42), Row.of("Alice", 12), Row.of(null, 0));
+                List.of(Row.of("Bob", 42), Row.of("Alice", 12), Row.of(null, 0));
 
-        final List<Row> sinkData =
-                Arrays.asList(Row.of("Bob", 42), Row.of("Alice", 12), Row.of(null, 0));
+        final List<Row> sinkData = List.of(Row.of("Bob", 42), Row.of("Alice", 12), Row.of(null, 0));
 
         TestCollectionTableFactory.reset();
         TestCollectionTableFactory.initData(sourceData);
@@ -1035,23 +1446,49 @@ public class FunctionITCase extends StreamingTestBase {
         assertThat(TestCollectionTableFactory.getResult()).isEqualTo(sinkData);
     }
 
-    @Test
-    void testDynamicCatalogTableFunction() throws Exception {
+    @ParameterizedTest(name = "{index}: With table wrapper ({0})")
+    @ValueSource(booleans = {true, false})
+    void testDynamicCatalogTableFunction(final boolean withTableWrapper) throws Exception {
         final Row[] sinkData =
                 new Row[] {Row.of("Test is a string"), Row.of("42"), Row.of((String) null)};
+        final String catalogName = "cat";
+        final String databaseName = "db";
+        final String simpleFunctionName = "DynamicTableFunction";
+        final String functionNameWithDb = databaseName + "." + simpleFunctionName;
+        final String fullFunctionName = catalogName + "." + functionNameWithDb;
 
         TestCollectionTableFactory.reset();
 
+        Configuration configuration = new Configuration();
+        configuration.setString("type", "generic_in_memory");
+        tEnv().createCatalog(catalogName, CatalogDescriptor.of(catalogName, configuration));
+        tEnv().getCatalog(catalogName)
+                .get()
+                .createDatabase(
+                        databaseName,
+                        new CatalogDatabaseImpl(new HashMap<>(), databaseName),
+                        false);
+        tEnv().createFunction(fullFunctionName, DynamicTableFunction.class);
+        tEnv().useCatalog(catalogName);
+        tEnv().useDatabase(databaseName);
         tEnv().executeSql("CREATE TABLE SinkTable(s STRING) WITH ('connector' = 'COLLECTION')");
 
-        tEnv().createFunction("DynamicTableFunction", DynamicTableFunction.class);
         tEnv().executeSql(
                         "INSERT INTO SinkTable "
-                                + "SELECT T1.s FROM TABLE(DynamicTableFunction('Test')) AS T1(s) "
+                                + "SELECT T1.s FROM "
+                                + getTableFunctionAsTable(
+                                        simpleFunctionName, "'Test'", withTableWrapper)
+                                + " AS T1(s) "
                                 + "UNION ALL "
-                                + "SELECT CAST(T2.i AS STRING) FROM TABLE(DynamicTableFunction(42)) AS T2(i)"
+                                + "SELECT CAST(T2.i AS STRING) FROM "
+                                + getTableFunctionAsTable(
+                                        functionNameWithDb, "42", withTableWrapper)
+                                + " AS T2(i)"
                                 + "UNION ALL "
-                                + "SELECT CAST(T3.i AS STRING) FROM TABLE(DynamicTableFunction(CAST(NULL AS INT))) AS T3(i)")
+                                + "SELECT CAST(T3.i AS STRING) FROM "
+                                + getTableFunctionAsTable(
+                                        fullFunctionName, "CAST(NULL AS INT)", withTableWrapper)
+                                + " AS T3(i)")
                 .await();
 
         assertThat(TestCollectionTableFactory.getResult()).containsExactlyInAnyOrder(sinkData);
@@ -1096,10 +1533,10 @@ public class FunctionITCase extends StreamingTestBase {
     @Test
     void testNamedArgumentsScalarFunction() throws Exception {
         final List<Row> sourceData =
-                Arrays.asList(Row.of(1, 2, "str1"), Row.of(3, 4, "str2"), Row.of(5, 6, "str3"));
+                List.of(Row.of(1, 2, "str1"), Row.of(3, 4, "str2"), Row.of(5, 6, "str3"));
 
         final List<Row> sinkData =
-                Arrays.asList(Row.of(1, 2, "1: 2"), Row.of(3, 4, "3: 4"), Row.of(5, 6, "5: 6"));
+                List.of(Row.of(1, 2, "1: 2"), Row.of(3, 4, "3: 4"), Row.of(5, 6, "5: 6"));
 
         TestCollectionTableFactory.reset();
         TestCollectionTableFactory.initData(sourceData);
@@ -1121,7 +1558,7 @@ public class FunctionITCase extends StreamingTestBase {
     @Test
     void testNamedParametersScalarFunctionWithOverloadedMethod() throws Exception {
         final List<Row> sourceData =
-                Arrays.asList(Row.of(1, 2, "str1"), Row.of(3, 4, "str2"), Row.of(5, 6, "str3"));
+                List.of(Row.of(1, 2, "str1"), Row.of(3, 4, "str2"), Row.of(5, 6, "str3"));
 
         TestCollectionTableFactory.reset();
         TestCollectionTableFactory.initData(sourceData);
@@ -1140,13 +1577,12 @@ public class FunctionITCase extends StreamingTestBase {
                                                         + " NamedArgumentsScalarFunction(in2 => i2, in1 => i1) as s1 FROM TestTable")
                                         .await())
                 .hasMessageContaining(
-                        "SQL validation failed. Could not find the argument names. Currently named arguments are not supported for varArgs and multi different argument names with overload function");
+                        "SQL validation failed. Unsupported function signature. Function must not be overloaded or use varargs.");
     }
 
     @Test
     void testNamedArgumentsScalarFunctionWithOptionalArguments() throws Exception {
-        final List<Row> sinkData =
-                Arrays.asList(Row.of("s1: null", "null: s2", "s1: s2", "null: null"));
+        final List<Row> sinkData = List.of(Row.of("s1: null", "null: s2", "s1: s2", "null: null"));
         TestCollectionTableFactory.reset();
 
         tEnv().executeSql(
@@ -1169,14 +1605,13 @@ public class FunctionITCase extends StreamingTestBase {
     @Test
     void testNamedArgumentAggregateFunction() throws Exception {
         final List<Row> sourceData =
-                Arrays.asList(
+                List.of(
                         Row.of(LocalDateTime.parse("2007-12-03T10:15:30"), "a", "b", 1, 2),
                         Row.of(LocalDateTime.parse("2007-12-03T10:15:30"), "c", "d", 33, 44),
                         Row.of(LocalDateTime.parse("2007-12-03T10:15:32"), "e", "f", 5, 6),
                         Row.of(LocalDateTime.parse("2007-12-03T10:15:32"), "gg", "hh", 7, 88));
 
-        final List<Row> sinkData =
-                Arrays.asList(Row.of("a: b", "b: a"), Row.of("gg: hh", "hh: gg"));
+        final List<Row> sinkData = List.of(Row.of("a: b", "b: a"), Row.of("gg: hh", "hh: gg"));
 
         TestCollectionTableFactory.reset();
         TestCollectionTableFactory.initData(sourceData);
@@ -1204,14 +1639,14 @@ public class FunctionITCase extends StreamingTestBase {
     @Test
     void testNamedArgumentAggregateFunctionWithOptionalArguments() throws Exception {
         final List<Row> sourceData =
-                Arrays.asList(
+                List.of(
                         Row.of(LocalDateTime.parse("2007-12-03T10:15:30"), "a", "b", 1, 2),
                         Row.of(LocalDateTime.parse("2007-12-03T10:15:30"), "c", "d", 33, 44),
                         Row.of(LocalDateTime.parse("2007-12-03T10:15:32"), "e", "f", 5, 6),
                         Row.of(LocalDateTime.parse("2007-12-03T10:15:32"), "gg", "hh", 7, 88));
 
         final List<Row> sinkData =
-                Arrays.asList(Row.of("a: null", "null: b"), Row.of("gg: null", "null: hh"));
+                List.of(Row.of("a: null", "null: b"), Row.of("gg: null", "null: hh"));
 
         TestCollectionTableFactory.reset();
         TestCollectionTableFactory.initData(sourceData);
@@ -1285,7 +1720,7 @@ public class FunctionITCase extends StreamingTestBase {
     @Test
     void testAggregateFunction() throws Exception {
         final List<Row> sourceData =
-                Arrays.asList(
+                List.of(
                         Row.of(LocalDateTime.parse("2007-12-03T10:15:30"), "Bob"),
                         Row.of(LocalDateTime.parse("2007-12-03T10:15:30"), "Alice"),
                         Row.of(LocalDateTime.parse("2007-12-03T10:15:30"), null),
@@ -1294,7 +1729,7 @@ public class FunctionITCase extends StreamingTestBase {
                         Row.of(LocalDateTime.parse("2007-12-03T10:15:32"), "Alice"));
 
         final List<Row> sinkData =
-                Arrays.asList(
+                List.of(
                         Row.of(
                                 "Jonathan",
                                 "Alice=(Alice, 5), Bob=(Bob, 3), Jonathan=(Jonathan, 8)"),
@@ -1348,10 +1783,10 @@ public class FunctionITCase extends StreamingTestBase {
 
     private void testLookupTableFunctionBase(String lookupTableFunctionClassName)
             throws ExecutionException, InterruptedException {
-        final List<Row> sourceData = Arrays.asList(Row.of("Bob"), Row.of("Alice"));
+        final List<Row> sourceData = List.of(Row.of("Bob"), Row.of("Alice"));
 
         final List<Row> sinkData =
-                Arrays.asList(
+                List.of(
                         Row.of("Bob", new byte[0]),
                         Row.of("Bob", new byte[] {66, 111, 98}),
                         Row.of("Alice", new byte[0]),
@@ -1398,7 +1833,7 @@ public class FunctionITCase extends StreamingTestBase {
     @Test
     void testSpecializedFunction() {
         final List<Row> sourceData =
-                Arrays.asList(
+                List.of(
                         Row.of("Bob", 1, new BigDecimal("123.45")),
                         Row.of("Alice", 2, new BigDecimal("123.456")));
 
@@ -1428,7 +1863,7 @@ public class FunctionITCase extends StreamingTestBase {
 
         final List<Row> actual = CollectionUtil.iteratorToList(result.collect());
         final List<Row> expected =
-                Arrays.asList(
+                List.of(
                         Row.of("CHAR(7) NOT NULL", "STRING", "INT", "DECIMAL(6, 3)"),
                         Row.of("CHAR(7) NOT NULL", "STRING", "INT", "DECIMAL(6, 3)"));
         assertThat(actual).isEqualTo(expected);
@@ -1437,7 +1872,7 @@ public class FunctionITCase extends StreamingTestBase {
     @Test
     void testSpecializedFunctionWithExpressionEvaluation() {
         final List<Row> sourceData =
-                Arrays.asList(
+                List.of(
                         Row.of("Bob", new Integer[] {1, 2, 3}, new BigDecimal("123.000")),
                         Row.of("Bob", new Integer[] {4, 5, 6}, new BigDecimal("123.456")),
                         Row.of("Alice", new Integer[] {1, 2, 3}, null),
@@ -1469,7 +1904,7 @@ public class FunctionITCase extends StreamingTestBase {
 
         final List<Row> actual = CollectionUtil.iteratorToList(result.collect());
         final List<Row> expected =
-                Arrays.asList(
+                List.of(
                         Row.of("Bob", null, null),
                         Row.of(
                                 "Bob",
@@ -1482,7 +1917,7 @@ public class FunctionITCase extends StreamingTestBase {
 
     @Test
     void testTimestampNotNull() {
-        List<Row> sourceData = Arrays.asList(Row.of(1), Row.of(2));
+        List<Row> sourceData = List.of(Row.of(1), Row.of(2));
         TestCollectionTableFactory.reset();
         TestCollectionTableFactory.initData(sourceData);
 
@@ -1496,7 +1931,7 @@ public class FunctionITCase extends StreamingTestBase {
 
     @Test
     void testIsNullType() {
-        List<Row> sourceData = Arrays.asList(Row.of(1), Row.of((Object) null));
+        List<Row> sourceData = List.of(Row.of(1), Row.of((Object) null));
         TestCollectionTableFactory.reset();
         TestCollectionTableFactory.initData(sourceData);
 
@@ -1510,7 +1945,7 @@ public class FunctionITCase extends StreamingTestBase {
 
     @Test
     void testWithBoolNotNullTypeHint() {
-        List<Row> sourceData = Arrays.asList(Row.of(1, 2), Row.of(2, 3));
+        List<Row> sourceData = List.of(Row.of(1, 2), Row.of(2, 3));
         TestCollectionTableFactory.reset();
         TestCollectionTableFactory.initData(sourceData);
 
@@ -1544,7 +1979,7 @@ public class FunctionITCase extends StreamingTestBase {
 
     @Test
     void testUdfWithMultiLocalVariables() {
-        List<Row> sourceData = Arrays.asList(Row.of(1L, 2L), Row.of(2L, 3L));
+        List<Row> sourceData = List.of(Row.of(1L, 2L), Row.of(2L, 3L));
         TestCollectionTableFactory.reset();
         TestCollectionTableFactory.initData(sourceData);
 
@@ -1559,7 +1994,7 @@ public class FunctionITCase extends StreamingTestBase {
                 CollectionUtil.iteratorToList(
                         tEnv().executeSql("SELECT MultiLocalVariables(x, y) FROM SourceTable")
                                 .collect());
-        assertThat(actualRows).isEqualTo(Arrays.asList(Row.of(2L), Row.of(6L)));
+        assertThat(actualRows).isEqualTo(List.of(Row.of(2L), Row.of(6L)));
     }
 
     // --------------------------------------------------------------------------------------------
@@ -1599,7 +2034,7 @@ public class FunctionITCase extends StreamingTestBase {
     public static class NamedArgumentsScalarFunction extends ScalarFunction {
         @FunctionHint(
                 output = @DataTypeHint("STRING"),
-                argument = {
+                arguments = {
                     @ArgumentHint(name = "in1", type = @DataTypeHint("int")),
                     @ArgumentHint(name = "in2", type = @DataTypeHint("int"))
                 })
@@ -1612,7 +2047,7 @@ public class FunctionITCase extends StreamingTestBase {
     public static class NamedArgumentsWithOverloadedScalarFunction extends ScalarFunction {
         @FunctionHint(
                 output = @DataTypeHint("STRING"),
-                argument = {
+                arguments = {
                     @ArgumentHint(name = "in1", type = @DataTypeHint("int")),
                     @ArgumentHint(name = "in2", type = @DataTypeHint("int"))
                 })
@@ -1622,7 +2057,7 @@ public class FunctionITCase extends StreamingTestBase {
 
         @FunctionHint(
                 output = @DataTypeHint("STRING"),
-                argument = {
+                arguments = {
                     @ArgumentHint(name = "in1", type = @DataTypeHint("string")),
                     @ArgumentHint(name = "in2", type = @DataTypeHint("string"))
                 })
@@ -1635,7 +2070,7 @@ public class FunctionITCase extends StreamingTestBase {
     public static class NamedArgumentsScalarFunctionWithOptionalArguments extends ScalarFunction {
         @FunctionHint(
                 output = @DataTypeHint("STRING"),
-                argument = {
+                arguments = {
                     @ArgumentHint(name = "in1", type = @DataTypeHint("STRING"), isOptional = true),
                     @ArgumentHint(name = "in2", type = @DataTypeHint("STRING"), isOptional = true)
                 })
@@ -1693,6 +2128,41 @@ public class FunctionITCase extends StreamingTestBase {
                                 return Optional.of(dayOfWeekDataType);
                             }))
                     .build();
+        }
+    }
+
+    /** Deterministic function with a counter. */
+    public static class CountingUpperScalarFunction extends ScalarFunction {
+        public static final AtomicInteger COUNT = new AtomicInteger();
+
+        public String eval(String s) {
+            COUNT.incrementAndGet();
+            return s == null ? null : s.toUpperCase();
+        }
+    }
+
+    /** Deterministic function with a counter and 3 args. */
+    public static class CountingConcat3ScalarFunction extends ScalarFunction {
+        public static final AtomicInteger COUNT = new AtomicInteger();
+
+        public String eval(String a, String b, String c) {
+            COUNT.incrementAndGet();
+            return a + "/" + b + "/" + c;
+        }
+    }
+
+    /** Non-deterministic function with a counter. */
+    public static class NonDeterministicCountingScalarFunction extends ScalarFunction {
+        public static final AtomicInteger COUNT = new AtomicInteger();
+
+        public String eval(String s) {
+            final int count = COUNT.incrementAndGet();
+            return s == null ? null : s.toUpperCase() + "_" + count;
+        }
+
+        @Override
+        public boolean isDeterministic() {
+            return false;
         }
     }
 
@@ -1775,7 +2245,7 @@ public class FunctionITCase extends StreamingTestBase {
     public static class NamedArgumentsTableFunctionWithOptionalArguments
             extends TableFunction<Object> {
         @FunctionHint(
-                argument = {
+                arguments = {
                     @ArgumentHint(type = @DataTypeHint("STRING"), name = "in1", isOptional = true),
                     @ArgumentHint(type = @DataTypeHint("STRING"), name = "in2", isOptional = true)
                 },
@@ -1940,7 +2410,7 @@ public class FunctionITCase extends StreamingTestBase {
 
         @FunctionHint(
                 output = @DataTypeHint("STRING"),
-                argument = {
+                arguments = {
                     @ArgumentHint(name = "in1", type = @DataTypeHint("STRING"), isOptional = true),
                     @ArgumentHint(name = "in2", type = @DataTypeHint("STRING"), isOptional = true)
                 },
@@ -2184,5 +2654,13 @@ public class FunctionITCase extends StreamingTestBase {
 
     private interface FunctionCreator {
         void createFunction(TableEnvironment environment);
+    }
+
+    private static String getTableFunctionAsTable(
+            final String functionName, final String input, final boolean withTableWrapper) {
+        if (withTableWrapper) {
+            return "TABLE(" + functionName + "(" + input + "))";
+        }
+        return functionName + "(" + input + ")";
     }
 }

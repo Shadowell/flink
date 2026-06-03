@@ -58,6 +58,7 @@ import org.apache.flink.table.catalog.exceptions.TableNotPartitionedException;
 import org.apache.flink.table.catalog.exceptions.TablePartitionedException;
 import org.apache.flink.table.catalog.stats.CatalogColumnStatistics;
 import org.apache.flink.table.catalog.stats.CatalogTableStatistics;
+import org.apache.flink.table.expressions.DefaultSqlFactory;
 import org.apache.flink.table.expressions.Expression;
 import org.apache.flink.table.factories.Factory;
 import org.apache.flink.table.file.testutils.TestFileSystemTableFactory;
@@ -128,7 +129,7 @@ public class TestFileSystemCatalog extends AbstractCatalog {
             }
         } catch (IOException e) {
             throw new CatalogException(
-                    String.format("Checking catalog path %s exists occur exception.", catalogPath),
+                    String.format("Error checking whether catalog path %s exists.", catalogPath),
                     e);
         }
     }
@@ -145,7 +146,7 @@ public class TestFileSystemCatalog extends AbstractCatalog {
                     .map(fileStatus -> fileStatus.getPath().getName())
                     .collect(Collectors.toList());
         } catch (IOException e) {
-            throw new CatalogException("Listing database occur exception.", e);
+            throw new CatalogException("Error listing databases.", e);
         }
     }
 
@@ -188,8 +189,7 @@ public class TestFileSystemCatalog extends AbstractCatalog {
         try {
             fs.mkdirs(dbPath);
         } catch (IOException e) {
-            throw new CatalogException(
-                    String.format("Creating database %s occur exception.", name), e);
+            throw new CatalogException(String.format("Error creating database %s.", name), e);
         }
     }
 
@@ -219,7 +219,7 @@ public class TestFileSystemCatalog extends AbstractCatalog {
             fs.delete(dbPath, true);
         } catch (IOException e) {
             throw new CatalogException(
-                    String.format("Dropping database %s occur exception.", databaseName), e);
+                    String.format("Error dropping database %s.", databaseName), e);
         }
     }
 
@@ -241,10 +241,11 @@ public class TestFileSystemCatalog extends AbstractCatalog {
             return Arrays.stream(fs.listStatus(dbPath))
                     .filter(FileStatus::isDir)
                     .map(fileStatus -> fileStatus.getPath().getName())
+                    .filter(name -> tableExists(new ObjectPath(databaseName, name)))
                     .collect(Collectors.toList());
         } catch (IOException e) {
             throw new CatalogException(
-                    String.format("Listing table in database %s occur exception.", dbPath), e);
+                    String.format("Error listing tables in database %s.", dbPath), e);
         }
     }
 
@@ -272,10 +273,9 @@ public class TestFileSystemCatalog extends AbstractCatalog {
             return deserializeTable(
                     tableInfo.getTableKind(),
                     tableInfo.getCatalogTableInfo(),
-                    tableDataPath.getPath());
+                    tableDataPath.toString());
         } catch (IOException e) {
-            throw new CatalogException(
-                    String.format("Getting table %s occur exception.", tablePath), e);
+            throw new CatalogException(String.format("Error getting table %s.", tablePath), e);
         }
     }
 
@@ -296,7 +296,7 @@ public class TestFileSystemCatalog extends AbstractCatalog {
             return fs.exists(path) && fs.exists(tableSchemaFilePath);
         } catch (IOException e) {
             throw new CatalogException(
-                    String.format("Checking table %s exists occur exception.", tablePath), e);
+                    String.format("Error checking whether table %s exists.", tablePath), e);
         }
     }
 
@@ -315,8 +315,7 @@ public class TestFileSystemCatalog extends AbstractCatalog {
         try {
             fs.delete(path, true);
         } catch (IOException e) {
-            throw new CatalogException(
-                    String.format("Dropping table %s occur exception.", tablePath), e);
+            throw new CatalogException(String.format("Error dropping table %s.", tablePath), e);
         }
     }
 
@@ -355,10 +354,12 @@ public class TestFileSystemCatalog extends AbstractCatalog {
         try {
             if (!fs.exists(path)) {
                 fs.mkdirs(path);
+            }
+            if (!fs.exists(tableSchemaPath)) {
                 fs.mkdirs(tableSchemaPath);
-                if (isFileSystemTable(catalogTable.getOptions())) {
-                    fs.mkdirs(tableDataPath);
-                }
+            }
+            if (isFileSystemTable(catalogTable.getOptions()) && !fs.exists(tableDataPath)) {
+                fs.mkdirs(tableDataPath);
             }
 
             // write table schema
@@ -370,8 +371,7 @@ public class TestFileSystemCatalog extends AbstractCatalog {
             }
 
         } catch (IOException e) {
-            throw new CatalogException(
-                    String.format("Create table %s occur exception.", tablePath), e);
+            throw new CatalogException(String.format("Error creating table %s.", tablePath), e);
         }
     }
 
@@ -400,7 +400,7 @@ public class TestFileSystemCatalog extends AbstractCatalog {
             if (!fs.exists(tableSchemaPath)) {
                 throw new CatalogException(
                         String.format(
-                                "Table %s schema file %s doesn't exists.",
+                                "Table %s schema file %s doesn't exist.",
                                 tablePath, tableSchemaPath));
             }
             // write new table schema
@@ -412,8 +412,7 @@ public class TestFileSystemCatalog extends AbstractCatalog {
             }
 
         } catch (IOException e) {
-            throw new CatalogException(
-                    String.format("Altering table %s occur exception.", tablePath), e);
+            throw new CatalogException(String.format("Error altering table %s.", tablePath), e);
         }
     }
 
@@ -426,8 +425,10 @@ public class TestFileSystemCatalog extends AbstractCatalog {
     @Override
     public List<CatalogPartitionSpec> listPartitions(
             ObjectPath tablePath, CatalogPartitionSpec partitionSpec)
-            throws TableNotExistException, TableNotPartitionedException,
-                    PartitionSpecInvalidException, CatalogException {
+            throws TableNotExistException,
+                    TableNotPartitionedException,
+                    PartitionSpecInvalidException,
+                    CatalogException {
         return Collections.emptyList();
     }
 
@@ -456,8 +457,10 @@ public class TestFileSystemCatalog extends AbstractCatalog {
             CatalogPartitionSpec partitionSpec,
             CatalogPartition partition,
             boolean ignoreIfExists)
-            throws TableNotExistException, TableNotPartitionedException,
-                    PartitionSpecInvalidException, PartitionAlreadyExistsException,
+            throws TableNotExistException,
+                    TableNotPartitionedException,
+                    PartitionSpecInvalidException,
+                    PartitionAlreadyExistsException,
                     CatalogException {
         throw new UnsupportedOperationException("createPartition is not implemented.");
     }
@@ -642,12 +645,13 @@ public class TestFileSystemCatalog extends AbstractCatalog {
 
     private Map<String, String> serializeTable(
             ResolvedCatalogBaseTable<?> resolvedCatalogBaseTable) {
+        final DefaultSqlFactory sqlFactory = DefaultSqlFactory.INSTANCE;
         if (resolvedCatalogBaseTable instanceof ResolvedCatalogTable) {
             return CatalogPropertiesUtil.serializeCatalogTable(
-                    (ResolvedCatalogTable) resolvedCatalogBaseTable);
+                    (ResolvedCatalogTable) resolvedCatalogBaseTable, sqlFactory);
         } else if (resolvedCatalogBaseTable instanceof ResolvedCatalogMaterializedTable) {
             return CatalogPropertiesUtil.serializeCatalogMaterializedTable(
-                    (ResolvedCatalogMaterializedTable) resolvedCatalogBaseTable);
+                    (ResolvedCatalogMaterializedTable) resolvedCatalogBaseTable, sqlFactory);
         }
 
         throw new IllegalArgumentException(

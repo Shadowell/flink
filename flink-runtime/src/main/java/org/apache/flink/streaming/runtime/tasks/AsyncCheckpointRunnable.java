@@ -133,10 +133,20 @@ final class AsyncCheckpointRunnable implements Runnable, Closeable {
             if (asyncCheckpointState.compareAndSet(
                     AsyncCheckpointState.RUNNING, AsyncCheckpointState.COMPLETED)) {
 
-                reportCompletedSnapshotStates(
-                        snapshotsFinalizeResult.jobManagerTaskOperatorSubtaskStates,
-                        snapshotsFinalizeResult.localTaskOperatorSubtaskStates,
-                        asyncDurationMillis);
+                try {
+                    reportCompletedSnapshotStates(
+                            snapshotsFinalizeResult.jobManagerTaskOperatorSubtaskStates,
+                            snapshotsFinalizeResult.localTaskOperatorSubtaskStates,
+                            asyncDurationMillis);
+                } catch (Exception reportFailure) {
+                    // Upload already succeeded; JM is authoritative for state cleanup.
+                    // Running cleanup() here could delete files referenced by a checkpoint
+                    // the JM has already completed (ACK applied but response RPC failed).
+                    // Decline so JM aborts the still-pending checkpoint quickly; if the ACK
+                    // was actually applied, the decline arrives after the checkpoint moved
+                    // to COMPLETED and is silently dropped by the coordinator.
+                    declineWithoutDiscard(reportFailure);
+                }
 
             } else {
                 LOG.debug(
@@ -189,7 +199,7 @@ final class AsyncCheckpointRunnable implements Runnable, Closeable {
 
             // finalize the async part of all by executing all snapshot runnables
             OperatorSnapshotFinalizer finalizedSnapshots =
-                    new OperatorSnapshotFinalizer(snapshotInProgress);
+                    OperatorSnapshotFinalizer.create(snapshotInProgress);
 
             jobManagerTaskOperatorSubtaskStates.putSubtaskStateByOperatorID(
                     operatorID, finalizedSnapshots.getJobManagerOwnedState());
@@ -273,6 +283,31 @@ final class AsyncCheckpointRunnable implements Runnable, Closeable {
         taskEnvironment
                 .getTaskStateManager()
                 .reportIncompleteTaskStateSnapshots(checkpointMetaData, metrics);
+    }
+
+    private void declineWithoutDiscard(Exception reportFailure) {
+        long checkpointId = checkpointMetaData.getCheckpointId();
+        LOG.warn(
+                "{} - failed to report completed checkpoint {} to JobManager. "
+                        + "Declining without discarding uploaded state.",
+                taskName,
+                checkpointId,
+                reportFailure);
+        if (!isTaskRunning.get()) {
+            return;
+        }
+        try {
+            taskEnvironment.declineCheckpoint(
+                    checkpointId,
+                    new CheckpointException(
+                            CheckpointFailureReason.CHECKPOINT_ASYNC_EXCEPTION, reportFailure));
+        } catch (Exception declineFailure) {
+            LOG.warn(
+                    "{} - failed to decline checkpoint {} after report failure.",
+                    taskName,
+                    checkpointId,
+                    declineFailure);
+        }
     }
 
     private void handleExecutionException(Exception e) {
@@ -373,7 +408,9 @@ final class AsyncCheckpointRunnable implements Runnable, Closeable {
         return finishedFuture;
     }
 
-    /** @return discarded full/incremental size (if available). */
+    /**
+     * @return discarded full/incremental size (if available).
+     */
     private Tuple2<Long, Long> cleanup() throws Exception {
         LOG.debug(
                 "Cleanup AsyncCheckpointRunnable for checkpoint {} of {}.",

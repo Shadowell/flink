@@ -18,15 +18,20 @@
 
 package org.apache.flink.state.forst;
 
+import org.apache.flink.api.common.functions.AggregateFunction;
+import org.apache.flink.api.common.state.v2.AggregatingStateDescriptor;
+import org.apache.flink.api.common.state.v2.ListStateDescriptor;
+import org.apache.flink.api.common.state.v2.MapStateDescriptor;
 import org.apache.flink.api.common.state.v2.State;
 import org.apache.flink.api.common.state.v2.StateFuture;
-import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
+import org.apache.flink.api.common.state.v2.ValueStateDescriptor;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
+import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.configuration.ConfigConstants;
+import org.apache.flink.core.asyncprocessing.InternalAsyncFuture;
 import org.apache.flink.core.memory.DataInputDeserializer;
 import org.apache.flink.core.memory.DataOutputSerializer;
-import org.apache.flink.core.state.InternalStateFuture;
 import org.apache.flink.runtime.asyncprocessing.EpochManager.Epoch;
 import org.apache.flink.runtime.asyncprocessing.RecordContext;
 import org.apache.flink.runtime.asyncprocessing.StateRequestHandler;
@@ -35,21 +40,18 @@ import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
 import org.apache.flink.runtime.state.SerializedCompositeKeyBuilder;
 import org.apache.flink.runtime.state.VoidNamespace;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
-import org.apache.flink.runtime.state.v2.InternalPartitionedState;
-import org.apache.flink.runtime.state.v2.ListStateDescriptor;
-import org.apache.flink.runtime.state.v2.MapStateDescriptor;
-import org.apache.flink.runtime.state.v2.ValueStateDescriptor;
+import org.apache.flink.runtime.state.v2.internal.InternalPartitionedState;
 import org.apache.flink.util.function.BiFunctionWithException;
 import org.apache.flink.util.function.FunctionWithException;
 import org.apache.flink.util.function.ThrowingConsumer;
 
+import org.forstdb.ColumnFamilyDescriptor;
+import org.forstdb.ColumnFamilyHandle;
+import org.forstdb.ColumnFamilyOptions;
+import org.forstdb.RocksDB;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.io.TempDir;
-import org.rocksdb.ColumnFamilyDescriptor;
-import org.rocksdb.ColumnFamilyHandle;
-import org.rocksdb.ColumnFamilyOptions;
-import org.rocksdb.RocksDB;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
@@ -93,7 +95,7 @@ public class ForStDBOperationTestBase {
 
         return new StateRequestHandler() {
             @Override
-            public <IN, OUT> InternalStateFuture<OUT> handleRequest(
+            public <IN, OUT> InternalAsyncFuture<OUT> handleRequest(
                     @Nullable State state, StateRequestType type, @Nullable IN payload) {
                 throw new UnsupportedOperationException();
             }
@@ -117,15 +119,15 @@ public class ForStDBOperationTestBase {
     protected ContextKey<Integer, VoidNamespace> buildContextKey(int i) {
         int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(i, 128);
         RecordContext<Integer> recordContext =
-                new RecordContext<>(i, i, t -> {}, keyGroup, new Epoch(0));
-        return new ContextKey<>(recordContext);
+                new RecordContext<>(i, i, t -> {}, keyGroup, new Epoch(0), 0);
+        return new ContextKey<>(recordContext, VoidNamespace.INSTANCE, null);
     }
 
     protected ForStValueState<Integer, VoidNamespace, String> buildForStValueState(String stateName)
             throws Exception {
         ColumnFamilyHandle cf = createColumnFamilyHandle(stateName);
         ValueStateDescriptor<String> valueStateDescriptor =
-                new ValueStateDescriptor<>(stateName, BasicTypeInfo.STRING_TYPE_INFO);
+                new ValueStateDescriptor<>(stateName, StringSerializer.INSTANCE);
         Supplier<SerializedCompositeKeyBuilder<Integer>> serializedKeyBuilder =
                 () -> new SerializedCompositeKeyBuilder<>(IntSerializer.INSTANCE, 2, 32);
         Supplier<DataOutputSerializer> valueSerializerView = () -> new DataOutputSerializer(32);
@@ -134,7 +136,7 @@ public class ForStDBOperationTestBase {
         return new ForStValueState<>(
                 stateRequestHandler,
                 cf,
-                valueStateDescriptor,
+                valueStateDescriptor.getSerializer(),
                 serializedKeyBuilder,
                 VoidNamespace.INSTANCE,
                 () -> VoidNamespaceSerializer.INSTANCE,
@@ -146,7 +148,7 @@ public class ForStDBOperationTestBase {
             throws Exception {
         ColumnFamilyHandle cf = createColumnFamilyHandle(stateName);
         ListStateDescriptor<String> valueStateDescriptor =
-                new ListStateDescriptor<>(stateName, BasicTypeInfo.STRING_TYPE_INFO);
+                new ListStateDescriptor<>(stateName, StringSerializer.INSTANCE);
         Supplier<SerializedCompositeKeyBuilder<Integer>> serializedKeyBuilder =
                 () -> new SerializedCompositeKeyBuilder<>(IntSerializer.INSTANCE, 2, 32);
         Supplier<DataOutputSerializer> valueSerializerView = () -> new DataOutputSerializer(32);
@@ -155,7 +157,53 @@ public class ForStDBOperationTestBase {
         return new ForStListState<>(
                 buildMockStateRequestHandler(),
                 cf,
-                valueStateDescriptor,
+                valueStateDescriptor.getSerializer(),
+                serializedKeyBuilder,
+                VoidNamespace.INSTANCE,
+                () -> VoidNamespaceSerializer.INSTANCE,
+                valueSerializerView,
+                valueDeserializerView);
+    }
+
+    protected ForStAggregatingState<String, ?, Integer, Integer, Integer>
+            buildForStSumAggregateState(String stateName) throws Exception {
+        ColumnFamilyHandle cf = createColumnFamilyHandle(stateName);
+        AggregatingStateDescriptor<Integer, Integer, Integer> valueStateDescriptor =
+                new AggregatingStateDescriptor<>(
+                        stateName,
+                        new AggregateFunction<Integer, Integer, Integer>() {
+                            @Override
+                            public Integer createAccumulator() {
+                                return 0;
+                            }
+
+                            @Override
+                            public Integer add(Integer value, Integer accumulator) {
+                                return value + accumulator;
+                            }
+
+                            @Override
+                            public Integer getResult(Integer accumulator) {
+                                return accumulator;
+                            }
+
+                            @Override
+                            public Integer merge(Integer a, Integer b) {
+                                return a + b;
+                            }
+                        },
+                        IntSerializer.INSTANCE);
+        Supplier<SerializedCompositeKeyBuilder<String>> serializedKeyBuilder =
+                () -> new SerializedCompositeKeyBuilder<>(StringSerializer.INSTANCE, 2, 32);
+        Supplier<DataOutputSerializer> valueSerializerView = () -> new DataOutputSerializer(32);
+        Supplier<DataInputDeserializer> valueDeserializerView =
+                () -> new DataInputDeserializer(new byte[128]);
+
+        return new ForStAggregatingState<>(
+                valueStateDescriptor.getAggregateFunction(),
+                valueStateDescriptor.getSerializer(),
+                buildMockStateRequestHandler(),
+                cf,
                 serializedKeyBuilder,
                 VoidNamespace.INSTANCE,
                 () -> VoidNamespaceSerializer.INSTANCE,
@@ -168,7 +216,7 @@ public class ForStDBOperationTestBase {
         ColumnFamilyHandle cf = createColumnFamilyHandle(stateName);
         MapStateDescriptor<String, String> mapStateDescriptor =
                 new MapStateDescriptor<>(
-                        stateName, BasicTypeInfo.STRING_TYPE_INFO, BasicTypeInfo.STRING_TYPE_INFO);
+                        stateName, StringSerializer.INSTANCE, StringSerializer.INSTANCE);
         Supplier<SerializedCompositeKeyBuilder<Integer>> serializedKeyBuilder =
                 () -> new SerializedCompositeKeyBuilder<>(IntSerializer.INSTANCE, 2, 32);
         Supplier<DataOutputSerializer> valueSerializerView = () -> new DataOutputSerializer(32);
@@ -179,7 +227,8 @@ public class ForStDBOperationTestBase {
         return new ForStMapState<>(
                 stateRequestHandler,
                 cf,
-                mapStateDescriptor,
+                mapStateDescriptor.getUserKeySerializer(),
+                mapStateDescriptor.getSerializer(),
                 serializedKeyBuilder,
                 VoidNamespace.INSTANCE,
                 () -> VoidNamespaceSerializer.INSTANCE,
@@ -189,7 +238,7 @@ public class ForStDBOperationTestBase {
                 1);
     }
 
-    static class TestStateFuture<T> implements InternalStateFuture<T> {
+    static class TestAsyncFuture<T> implements InternalAsyncFuture<T> {
 
         public CompletableFuture<T> future = new CompletableFuture<>();
 
@@ -216,7 +265,7 @@ public class ForStDBOperationTestBase {
 
         @Override
         public void completeExceptionally(String message, Throwable ex) {
-            throw new UnsupportedOperationException();
+            // do nothing
         }
 
         @Override
@@ -229,26 +278,26 @@ public class ForStDBOperationTestBase {
         }
 
         @Override
-        public <U> StateFuture<U> thenApply(
+        public <U> InternalAsyncFuture<U> thenApply(
                 FunctionWithException<? super T, ? extends U, ? extends Exception> fn) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public StateFuture<Void> thenAccept(
+        public InternalAsyncFuture<Void> thenAccept(
                 ThrowingConsumer<? super T, ? extends Exception> action) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public <U> StateFuture<U> thenCompose(
+        public <U> InternalAsyncFuture<U> thenCompose(
                 FunctionWithException<? super T, ? extends StateFuture<U>, ? extends Exception>
                         action) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public <U, V> StateFuture<V> thenCombine(
+        public <U, V> InternalAsyncFuture<V> thenCombine(
                 StateFuture<? extends U> other,
                 BiFunctionWithException<? super T, ? super U, ? extends V, ? extends Exception>
                         fn) {
@@ -256,7 +305,7 @@ public class ForStDBOperationTestBase {
         }
 
         @Override
-        public <U, V> StateFuture<Tuple2<Boolean, Object>> thenConditionallyApply(
+        public <U, V> InternalAsyncFuture<Tuple2<Boolean, Object>> thenConditionallyApply(
                 FunctionWithException<? super T, Boolean, ? extends Exception> condition,
                 FunctionWithException<? super T, ? extends U, ? extends Exception> actionIfTrue,
                 FunctionWithException<? super T, ? extends V, ? extends Exception> actionIfFalse) {
@@ -264,14 +313,14 @@ public class ForStDBOperationTestBase {
         }
 
         @Override
-        public <U> StateFuture<Tuple2<Boolean, U>> thenConditionallyApply(
+        public <U> InternalAsyncFuture<Tuple2<Boolean, U>> thenConditionallyApply(
                 FunctionWithException<? super T, Boolean, ? extends Exception> condition,
                 FunctionWithException<? super T, ? extends U, ? extends Exception> actionIfTrue) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public StateFuture<Boolean> thenConditionallyAccept(
+        public InternalAsyncFuture<Boolean> thenConditionallyAccept(
                 FunctionWithException<? super T, Boolean, ? extends Exception> condition,
                 ThrowingConsumer<? super T, ? extends Exception> actionIfTrue,
                 ThrowingConsumer<? super T, ? extends Exception> actionIfFalse) {
@@ -279,14 +328,14 @@ public class ForStDBOperationTestBase {
         }
 
         @Override
-        public StateFuture<Boolean> thenConditionallyAccept(
+        public InternalAsyncFuture<Boolean> thenConditionallyAccept(
                 FunctionWithException<? super T, Boolean, ? extends Exception> condition,
                 ThrowingConsumer<? super T, ? extends Exception> actionIfTrue) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public <U, V> StateFuture<Tuple2<Boolean, Object>> thenConditionallyCompose(
+        public <U, V> InternalAsyncFuture<Tuple2<Boolean, Object>> thenConditionallyCompose(
                 FunctionWithException<? super T, Boolean, ? extends Exception> condition,
                 FunctionWithException<? super T, ? extends StateFuture<U>, ? extends Exception>
                         actionIfTrue,
@@ -296,7 +345,7 @@ public class ForStDBOperationTestBase {
         }
 
         @Override
-        public <U> StateFuture<Tuple2<Boolean, U>> thenConditionallyCompose(
+        public <U> InternalAsyncFuture<Tuple2<Boolean, U>> thenConditionallyCompose(
                 FunctionWithException<? super T, Boolean, ? extends Exception> condition,
                 FunctionWithException<? super T, ? extends StateFuture<U>, ? extends Exception>
                         actionIfTrue) {

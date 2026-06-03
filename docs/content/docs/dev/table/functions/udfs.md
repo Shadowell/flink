@@ -31,8 +31,8 @@ User-defined functions (UDFs) are extension points to call frequently used logic
 User-defined functions can be implemented in a JVM language (such as Java or Scala) or Python.
 An implementer can use arbitrary third party libraries within a UDF.
 This page will focus on JVM-based languages, please refer to the PyFlink documentation
-for details on writing [general]({{< ref "docs/dev/python/table/udfs/python_udfs" >}}) 
- and [vectorized]({{< ref "docs/dev/python/table/udfs/vectorized_python_udfs" >}}) UDFs in Python.
+for details on writing [general]({{< ref "docs/dev/table/functions/python-udfs" >}}) 
+ and [vectorized]({{< ref "docs/dev/table/functions/python-udfs" >}}) UDFs in Python.
 
 Overview
 --------
@@ -40,10 +40,12 @@ Overview
 Currently, Flink distinguishes between the following kinds of functions:
 
 - *Scalar functions* map scalar values to a new scalar value.
+- *Asynchronous scalar functions* asynchronously map scalar values to a new scalar value.
 - *Table functions* map scalar values to new rows.
+- *Async Table functions* asynchronously map scalar values to new rows and can be used for table sources that perform a lookup.
 - *Aggregate functions* map scalar values of multiple rows to a new scalar value.
 - *Table aggregate functions* map scalar values of multiple rows to new rows.
-- *Async table functions* are special functions for table sources that perform a lookup.
+- *Process table functions* map tables to new rows. Enabling user-defined operators with state and timers.
 
 The following example shows how to create a simple scalar function and how to call the function in both Table API and SQL.
 
@@ -240,7 +242,7 @@ env.from("MyTable").select(call(classOf[MyConcatFunction], $"a", $"b", $"c"));
 It is recommended to use `functionClass` over `functionInstance` as far as user-defined functions provide no args constructor, 
 because Flink as the framework underneath can add more logic to control the process of creating new instance.
 Current built-in standard logic in `TableEnvironmentImpl` will validate the class and methods in the class 
-based on different subclass types of `UserDefinedFunction`, e.g. `ScalaFunction`, `TableFunction`. 
+based on different subclass types of `UserDefinedFunction`, e.g. `ScalarFunction`, `TableFunction`.
 More logic or optimization could be added in the framework in the future with no need to change any users' existing code. 
 {{< /hint >}}
 
@@ -339,7 +341,7 @@ class SumFunction extends ScalarFunction {
 
 ### Type Inference
 
-The table ecosystem (similar to the SQL standard) is a strongly typed API. Therefore, both function parameters and return types must be mapped to a [data type]({{< ref "docs/dev/table/types" >}}).
+The table ecosystem (similar to the SQL standard) is a strongly typed API. Therefore, both function parameters and return types must be mapped to a [data type]({{< ref "docs/sql/reference/data-types" >}}).
 
 From a logical perspective, the planner needs information about expected types, precision, and scale. From a JVM perspective, the planner needs information about how internal data structures are represented as JVM objects when calling a user-defined function.
 
@@ -353,7 +355,7 @@ If more advanced type inference logic is required, an implementer can explicitly
 
 The automatic type inference inspects the function's class and evaluation methods to derive data types for the arguments and result of a function. `@DataTypeHint` and `@FunctionHint` annotations support the automatic extraction.
 
-For a full list of classes that can be implicitly mapped to a data type, see the [data type extraction section]({{< ref "docs/dev/table/types" >}}#data-type-extraction).
+For a full list of classes that can be implicitly mapped to a data type, see the [data type extraction section]({{< ref "docs/sql/reference/data-types" >}}#data-type-extraction).
 
 **`@DataTypeHint`**
 
@@ -415,19 +417,19 @@ class OverloadedFunction extends ScalarFunction {
 
   // define the precision and scale of a decimal
   @DataTypeHint("DECIMAL(12, 3)")
-  def eval(double a, double b): BigDecimal = {
-    java.lang.BigDecimal.valueOf(a + b)
+  def eval(a: Double, b: Double): BigDecimal = {
+    BigDecimal(a + b)
   }
 
   // define a nested data type
   @DataTypeHint("ROW<s STRING, t TIMESTAMP_LTZ(3)>")
-  def eval(Int i): Row = {
-    Row.of(java.lang.String.valueOf(i), java.time.Instant.ofEpochSecond(i))
+  def eval(i: Int): Row = {
+    Row.of(i.toString, java.time.Instant.ofEpochSecond(i))
   }
 
   // allow wildcard input and customly serialized output
   @DataTypeHint(value = "RAW", bridgedTo = classOf[java.nio.ByteBuffer])
-  def eval(@DataTypeHint(inputGroup = InputGroup.ANY) Object o): java.nio.ByteBuffer = {
+  def eval(@DataTypeHint(inputGroup = InputGroup.ANY) o: Any): java.nio.ByteBuffer = {
     MyUtils.serializeToByteBuffer(o)
   }
 }
@@ -645,13 +647,14 @@ public static class NamedParameterClass extends ScalarFunction {
 {{< tab "Scala" >}}
 ```scala
 import org.apache.flink.table.annotation.ArgumentHint;
+import org.apache.flink.table.annotation.DataTypeHint;
 import org.apache.flink.table.functions.ScalarFunction;
 
 class NamedParameterClass extends ScalarFunction {
 
   // Use the @ArgumentHint annotation to specify the name, type, and whether a parameter is required.
-  def eval(@ArgumentHint(name = "param1", isOptional = false, `type` = @DataTypeHint("STRING")) s1: String,
-          @ArgumentHint(name = "param2", isOptional = true, `type` = @DataTypeHint("INTEGER")) s2: Integer) = {
+  def eval(@ArgumentHint(name = "param1", isOptional = false, `type` = new DataTypeHint("STRING")) s1: String,
+           @ArgumentHint(name = "param2", isOptional = true, `type` = new DataTypeHint("INTEGER")) s2: Integer) = {
     s1 + ", " + s2
   }
 }
@@ -671,8 +674,10 @@ public static class NamedParameterClass extends ScalarFunction {
     
   // Use the @ArgumentHint annotation to specify the name, type, and whether a parameter is required.
   @FunctionHint(
-          argument = {@ArgumentHint(name = "param1", isOptional = false, type = @DataTypeHint("STRING")),
-                  @ArgumentHint(name = "param2", isOptional = true, type = @DataTypeHint("INTEGER"))}
+    arguments = {
+      @ArgumentHint(name = "param1", isOptional = false, type = @DataTypeHint("STRING")),
+      @ArgumentHint(name = "param2", isOptional = true, type = @DataTypeHint("INTEGER"))
+    }
   )
   public String eval(String s1, Integer s2) {
     return s1 + ", " + s2;
@@ -683,14 +688,18 @@ public static class NamedParameterClass extends ScalarFunction {
 {{< tab "Scala" >}}
 ```scala
 import org.apache.flink.table.annotation.ArgumentHint;
+import org.apache.flink.table.annotation.DataTypeHint;
+import org.apache.flink.table.annotation.FunctionHint;
 import org.apache.flink.table.functions.ScalarFunction;
 
 class NamedParameterClass extends ScalarFunction {
 
   // Use the @ArgumentHint annotation to specify the name, type, and whether a parameter is required.
   @FunctionHint(
-    argument = Array(new ArgumentHint(name = "param1", isOptional = false, `type` = new DataTypeHint("STRING")),
-                  new ArgumentHint(name = "param2", isOptional = true, `type` = new DataTypeHint("INTEGER")))
+    arguments = Array(
+      new ArgumentHint(name = "param1", isOptional = false, `type` = new DataTypeHint("STRING")),
+      new ArgumentHint(name = "param2", isOptional = true, `type` = new DataTypeHint("INTEGER"))
+    )
   )
   def eval(s1: String, s2: Int): String = {
     s1 + ", " + s2
@@ -706,12 +715,16 @@ class NamedParameterClass extends ScalarFunction {
 {{< tab "Java" >}}
 ```java
 import org.apache.flink.table.annotation.ArgumentHint;
+import org.apache.flink.table.annotation.DataTypeHint;
+import org.apache.flink.table.annotation.FunctionHint;
 import org.apache.flink.table.functions.ScalarFunction;
 
 // Use the @ArgumentHint annotation to specify the name, type, and whether a parameter is required.
 @FunctionHint(
-        argument = {@ArgumentHint(name = "param1", isOptional = false, type = @DataTypeHint("STRING")),
-                @ArgumentHint(name = "param2", isOptional = true, type = @DataTypeHint("INTEGER"))}
+  arguments = {
+    @ArgumentHint(name = "param1", isOptional = false, type = @DataTypeHint("STRING")),
+    @ArgumentHint(name = "param2", isOptional = true, type = @DataTypeHint("INTEGER"))
+  }
 )
 public static class NamedParameterClass extends ScalarFunction {
     
@@ -724,12 +737,16 @@ public static class NamedParameterClass extends ScalarFunction {
 {{< tab "Scala" >}}
 ```scala
 import org.apache.flink.table.annotation.ArgumentHint;
+import org.apache.flink.table.annotation.DataTypeHint;
+import org.apache.flink.table.annotation.FunctionHint;
 import org.apache.flink.table.functions.ScalarFunction;
 
 // Use the @ArgumentHint annotation to specify the name, type, and whether a parameter is required.
 @FunctionHint(
-  argument = Array(new ArgumentHint(name = "param1", isOptional = false, `type` = new DataTypeHint("STRING")),
-    new ArgumentHint(name = "param2", isOptional = true, `type` = new DataTypeHint("INTEGER")))
+  arguments = Array(
+    new ArgumentHint(name = "param1", isOptional = false, `type` = new DataTypeHint("STRING")),
+    new ArgumentHint(name = "param2", isOptional = true, `type` = new DataTypeHint("INTEGER"))
+  )
 )
 class NamedParameterClass extends ScalarFunction {
 
@@ -789,7 +806,7 @@ dynamic function and non-deterministic function, according to Apache Calcite's `
 `isDeterministic` indicates the determinism of a function, will be evaluated per record during runtime if returns `false`.
 `isDynamicFunction` implies the function can only be evaluated at query-start if returns `true`,
 it will be only pre-evaluated during planning for batch mode, while for streaming mode, it is equivalent to a non-deterministic
-function because of the query is continuously being executed logically(the abstraction of [continuous query over the dynamic tables]({{< ref "docs/dev/table/concepts/dynamic_tables" >}}#dynamic-tables-amp-continuous-queries)),
+function because of the query is continuously being executed logically(the abstraction of [continuous query over the dynamic tables]({{< ref "docs/concepts/sql-table-concepts/dynamic_tables" >}}#dynamic-tables-amp-continuous-queries)),
 so the dynamic functions are also re-evaluated for each query execution(equivalent to per record in current implementation).
 
 The following system functions are always non-deterministic(evaluated per record during runtime both in batch and streaming mode):
@@ -927,7 +944,7 @@ env.sqlQuery("SELECT myField, hashCode(myField) FROM MyTable")
 Scalar Functions
 ----------------
 
-A user-defined scalar function maps zero, one, or multiple scalar values to a new scalar value. Any data type listed in the [data types section]({{< ref "docs/dev/table/types" >}}) can be used as a parameter or return type of an evaluation method.
+A user-defined scalar function maps zero, one, or multiple scalar values to a new scalar value. Any data type listed in the [data types section]({{< ref "docs/sql/reference/data-types" >}}) can be used as a parameter or return type of an evaluation method.
 
 In order to define a scalar function, one has to extend the base class `ScalarFunction` in `org.apache.flink.table.functions` and implement one or more evaluation methods named `eval(...)`.
 
@@ -997,7 +1014,110 @@ env.sqlQuery("SELECT HashFunction(myField) FROM MyTable")
 {{< /tab >}}
 {{< /tabs >}}
 
-If you intend to implement or call functions in Python, please refer to the [Python Scalar Functions]({{< ref "docs/dev/python/table/udfs/python_udfs" >}}#scalar-functions) documentation for more details.
+If you intend to implement or call functions in Python, please refer to the [Python Scalar Functions]({{< ref "docs/dev/table/functions/python-udfs" >}}#scalar-functions) documentation for more details.
+
+{{< top >}}
+
+Asynchronous Scalar Functions
+----------------
+
+When interacting with external systems (for example when enriching stream events with data stored in a database), one needs to take care that network or other latency does not dominate the streaming application’s running time.
+
+Naively accessing data in the external database, for example using a `ScalarFunction`, typically means **synchronous** interaction: A request is sent to the database and the `ScalarFunction` waits until the response has been received. In many cases, this waiting makes up the vast majority of the function’s time.
+
+To address this inefficiency, there is an `AsyncScalarFunction`. Asynchronous interaction with the database means that a single function instance can handle many requests concurrently and receive the responses concurrently. That way, the waiting time can be overlaid with sending other requests and receiving responses. At the very least, the waiting time is amortized over multiple requests. This leads in most cases to much higher streaming throughput.
+
+{{< img src="/fig/async_io.svg" width="50%" >}}
+
+#### Defining an AsyncScalarFunction
+
+A user-defined asynchronous scalar function maps zero, one, or multiple scalar values to a new scalar value. Any data type listed in the [data types section]({{< ref "docs/sql/reference/data-types" >}}) can be used as a parameter or return type of an evaluation method.
+
+In order to define an asynchronous scalar function, extend the base class `AsyncScalarFunction` in `org.apache.flink.table.functions` and implement one or more evaluation methods named `eval(...)`.  The first argument must be a `CompletableFuture<...>` which is used to return the result, with subsequent arguments being the parameters passed to the function.
+
+The number of outstanding calls to `eval` may be configured by [`table.exec.async-scalar.max-concurrent-operations`]({{< ref "docs/dev/table/config#table-exec-async-scalar-max-concurrent-operations" >}}).
+
+The following example shows how to do work on a thread pool in the background, though any libraries exposing an async interface may be directly used to complete the `CompletableFuture` from a callback. See the [Implementation Guide](#implementation-guide) for more details.
+
+```java
+import org.apache.flink.table.api.*;
+import org.apache.flink.table.functions.AsyncScalarFunction;
+
+import java.util.Random;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+
+import static org.apache.flink.table.api.Expressions.*;
+
+/**
+ * A function which simulates looking up a beverage name from a database.
+ * Since such lookups are often slow, we use an AsyncScalarFunction.
+ */
+public static class BeverageNameLookupFunction extends AsyncScalarFunction {
+    private transient Executor executor;
+
+    @Override
+    public void open(FunctionContext context) {
+        // Create a thread pool for executing the background lookup.
+        executor = Executors.newFixedThreadPool(10);
+    }
+
+    // The eval method takes a future for the result and the beverage ID to lookup.
+    public void eval(CompletableFuture<String> future, Integer beverageId) {
+        // Submit a task to the thread pool. We don't want to block this main 
+        // thread since that would prevent concurrent execution. The future can be 
+        // completed from another thread when the lookup is done.
+        executor.execute(() -> {
+            // Simulate a database lookup by sleeping for 1s.
+            try {
+                Thread.sleep(1000);
+            } catch (InterruptedException e) {}
+            // Complete the future with the right beverage name.
+            switch (beverageId) {
+                case 0:
+                    future.complete("Latte");
+                    break;
+                case 1:
+                    future.complete("Cappuccino");
+                    break;
+                case 2:
+                    future.complete("Espresso");
+                    break;
+                default:
+                    // In the exceptional case, return an error.
+                    future.completeExceptionally(new IllegalArgumentException("Bad beverageId: " + beverageId));
+            }
+        });
+    }
+}
+
+TableEnvironment env = TableEnvironment.create(...);
+env.getConfig().set("table.exec.async-scalar.max-concurrent-operations", "5");
+env.getConfig().set("table.exec.async-scalar.timeout", "1m");
+
+// call function "inline" without registration in Table API
+env.from("Beverages").select(call(BeverageNameLookupFunction.class, $("beverageId")));
+
+// register function
+env.createTemporarySystemFunction("GetBeverageName", BeverageNameLookupFunction.class);
+
+// call registered function in Table API
+env.from("Beverages").select(call("GetBeverageName", $("beverageId")));
+
+// call registered function in SQL
+env.sqlQuery("SELECT GetBeverageName(beverageId) FROM Beverages");
+
+```
+
+#### Asynchronous Semantics
+While calls to an `AsyncScalarFunction` may be completed out of the original input order, to maintain correct semantics, the outputs of the function are guaranteed to maintain that input order to downstream components of the query. The data itself could reveal completion order (e.g. by containing fetch timestamps), so the user should consider whether this is acceptable for their use-case.
+
+#### Error Handling
+The primary way for a user to indicate an error is to call `CompletableFuture.completeExceptionally(Throwable)`. Similarly, if an exception is encountered by the system when invoking `eval`, that will also result in an error. When an error occurs, the system will consider the retry strategy, configured by [`table.exec.async-scalar.retry-strategy`]({{< ref "docs/dev/table/config#table-exec-async-scalar-retry-strategy" >}}). If this is `NO_RETRY`, the job is failed. If it is set to `FIXED_DELAY`, a period of [`table.exec.async-scalar.retry-delay`]({{< ref "docs/dev/table/config#table-exec-async-scalar-retry-delay" >}}) will be waited, and the function call will be retried. If there have been [`table.exec.async-scalar.max-attempts`]({{< ref "docs/dev/table/config#table-exec-async-scalar-max-attempts" >}}) failed attempts or if the timeout [`table.exec.async-scalar.timeout`]({{< ref "docs/dev/table/config#table-exec-async-scalar-timeout" >}}) expires (including all retry attempts), the job will fail.
+
+#### AsyncScalarFunction vs. ScalarFunction
+One thing to consider is if the UDF contains CPU intensive logic with no blocking calls. If so, it likely doesn't require asynchronous functionality and could use a `ScalarFunction`. If the logic involves waiting for things like network or background operations (e.g. database lookups, RPCs, or REST calls), this may be a useful way to speed things up. There are also some queries that don't support `AsyncScalarFunction`, so when in doubt, `ScalarFunction` should be used.
 
 {{< top >}}
 
@@ -1152,7 +1272,91 @@ env.sqlQuery(
 
 If you intend to implement functions in Scala, do not implement a table function as a Scala `object`. Scala `object`s are singletons and will cause concurrency issues.
 
-If you intend to implement or call functions in Python, please refer to the [Python Table Functions]({{< ref "docs/dev/python/table/udfs/python_udfs" >}}#table-functions) documentation for more details.
+If you intend to implement or call functions in Python, please refer to the [Python Table Functions]({{< ref "docs/dev/table/functions/python-udfs" >}}#table-functions) documentation for more details.
+
+{{< top >}}
+
+Asynchronous Table Functions
+----------------
+
+Similar to `AsyncScalarFunction`, there also exists a `AsyncTableFunction` for returning multiple row results rather than a single scalar value. Similarly, this is most useful when interacting with external systems (for example when enriching stream events with data stored in a database).
+
+Asynchronous interaction with an external system means that a single function instance can handle many requests concurrently and receive the responses concurrently. That way, the waiting time can be overlaid with sending other requests and receiving responses. At the very least, the waiting time is amortized over multiple requests. This leads in most cases to much higher streaming throughput.
+
+#### Defining an AsyncTableFunction
+
+A user-defined asynchronous table function maps zero, one, or multiple scalar values to zero, one, or multiple Rows. Any data type listed in the [data types section]({{< ref "docs/sql/reference/data-types" >}}) can be used as a parameter or return type of an evaluation method.
+
+In order to define an asynchronous table function, extend the base class `AsyncTableFunction` in `org.apache.flink.table.functions` and implement one or more evaluation methods named `eval(...)`.  The first argument must be a `CompletableFuture<...>` which is used to return the result, with subsequent arguments being the parameters passed to the function.
+
+The number of outstanding calls to `eval` may be configured by [`table.exec.async-table.max-concurrent-operations`]({{< ref "docs/dev/table/config#table-exec-async-table-max-concurrent-operations" >}}).
+
+#### Asynchronous Semantics
+While calls to an `AsyncTableFunction` may be completed out of the original input order, to maintain correct semantics, the outputs of the function are guaranteed to maintain that input order to downstream components of the query. The data itself could reveal completion order (e.g. by containing fetch timestamps), so the user should consider whether this is acceptable for their use-case.
+
+#### Error Handling
+The primary way for a user to indicate an error is to call `completableFuture.completeExceptionally(throwable)`. Similarly, if an exception is encountered by the system when invoking `eval`, that will also result in an error. When an error occurs, the system will consider the retry strategy, configured by [`table.exec.async-table.retry-strategy`]({{< ref "docs/dev/table/config#table-exec-async-table-retry-strategy" >}}). If this is `NO_RETRY`, the job is failed. If it is set to `FIXED_DELAY`, a period of [`table.exec.async-table.retry-delay`]({{< ref "docs/dev/table/config#table-exec-async-table-retry-delay" >}}) will be waited, and the function call will be retried. If there have been [`table.exec.async-table.max-attempts`]({{< ref "docs/dev/table/config#table-exec-async-table-max-attempts" >}}) failed attempts or if the timeout [`table.exec.async-table.timeout`]({{< ref "docs/dev/table/config#table-exec-async-table-timeout" >}}) expires (including all retry attempts), the job will fail.
+
+The following example shows how to do work on a thread pool in the background, though any libraries exposing an async interface may be directly used to complete the `CompletableFuture` from a callback. See the [Implementation Guide](#implementation-guide) for more details.
+
+```java
+import org.apache.flink.table.api.*;
+import org.apache.flink.table.functions.AsyncTableFunction;
+
+import java.util.Random;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+
+import static org.apache.flink.table.api.Expressions.*;
+
+public static class BackgroundFunction extends AsyncTableFunction<Long> {
+    private Executor executor;
+
+    @Override
+    public void open(FunctionContext context) {
+        executor = Executors.newFixedThreadPool(10);
+    }
+
+    public void eval(CompletableFuture<Collection<Long>> future, Integer waitMax) {
+        executor.execute(() -> {
+            ArrayList<Long> result = new ArrayList<>();
+            long sleepTime = new Random().nextInt(waitMax);
+            try {
+                Thread.sleep(sleepTime);
+            } catch (InterruptedException e) {}
+            if (sleepTime < 1000) {
+                result.add(1L);
+                result.add(2L);
+            } else {
+                result.add(3L);
+            }
+            future.complete(result);
+        });
+    }
+}
+
+TableEnvironment env = TableEnvironment.create(...);
+env.getConfig().set("table.exec.async-table.max-concurrent-operations", "5");
+env.getConfig().set("table.exec.async-table.timeout", "1m");
+
+// call function "inline" without registration in Table API
+env.from("MyTable")
+        .joinLateral(call(BackgroundFunction.class, $("myField")))
+        .select($("*"))
+
+// register function
+env.createTemporarySystemFunction("BackgroundFunction", BackgroundFunction.class);
+
+// call registered function in Table API
+env.from("MyTable")
+        .joinLateral(call("BackgroundFunction", $("myField")))
+        .select($("*"))
+
+// call registered function in SQL
+env.sqlQuery("SELECT * FROM MyTable, LATERAL TABLE(BackgroundFunction(myField))");
+
+```
 
 {{< top >}}
 
@@ -1188,7 +1392,7 @@ includes the generic argument `ACC` of the class for determining an accumulator 
 argument `T` for determining an accumulator data type. Input arguments are derived from one or more
 `accumulate(...)` methods. See the [Implementation Guide](#implementation-guide) for more details.
 
-If you intend to implement or call functions in Python, please refer to the [Python Functions]({{< ref "docs/dev/python/table/udfs/python_udfs" >}})
+If you intend to implement or call functions in Python, please refer to the [Python Functions]({{< ref "docs/dev/table/functions/python-udfs" >}})
 documentation for more details.
 
 The following example shows how to define your own aggregate function and call it in a query.
@@ -1486,7 +1690,7 @@ def merge(accumulator: ACC, iterable: java.lang.Iterable[ACC]): Unit
 {{< /tab >}}
 {{< /tabs >}}
 
-If you intend to implement or call functions in Python, please refer to the [Python Aggregate Functions]({{< ref "docs/dev/python/table/udfs/python_udfs" >}}#aggregate-functions) documentation for more details.
+If you intend to implement or call functions in Python, please refer to the [Python Aggregate Functions]({{< ref "docs/dev/table/functions/python-udfs" >}}#aggregate-functions) documentation for more details.
 
 {{< top >}}
 
@@ -1526,7 +1730,7 @@ includes the generic argument `ACC` of the class for determining an accumulator 
 argument `T` for determining an accumulator data type. Input arguments are derived from one or more
 `accumulate(...)` methods. See the [Implementation Guide](#implementation-guide) for more details.
 
-If you intend to implement or call functions in Python, please refer to the [Python Functions]({{< ref "docs/dev/python/table/udfs/python_udfs" >}})
+If you intend to implement or call functions in Python, please refer to the [Python Functions]({{< ref "docs/dev/table/functions/python-udfs" >}})
 documentation for more details.
 
 The following example shows how to define your own table aggregate function and call it in a query.
@@ -2054,5 +2258,27 @@ class Top2WithRetract
 ```
 {{< /tab >}}
 {{< /tabs >}}
+
+{{< top >}}
+
+Process Table Functions
+-----------------------
+
+Process Table Functions (PTFs) are the most powerful function kind for Flink SQL and Table API. They enable implementing
+user-defined operators that can be as feature-rich as built-in operations. PTFs can take (partitioned) tables to produce
+a new table. They have access to Flink's managed state, event-time and timer services, and underlying table changelogs.
+
+Conceptually, a PTF is a superset of all other user-defined functions. It maps zero, one, or multiple tables to zero, one,
+or multiple rows (or structured types). Scalar arguments are supported. Due to its stateful nature, implementing aggregating
+behavior is possible as well.
+
+A PTF enables the following tasks:
+- Apply transformations on each row of a table.
+- Logically partition the table into distinct sets and apply transformations per set.
+- Store seen events for repeated access.
+- Continue the processing at a later point in time enabling waiting, synchronization, or timeouts.
+- Buffer and aggregate events using complex state machines or rule-based conditional logic.
+
+See the [dedicated page for PTFs]({{< ref "docs/dev/table/functions/ptfs" >}}) for more details.
 
 {{< top >}}

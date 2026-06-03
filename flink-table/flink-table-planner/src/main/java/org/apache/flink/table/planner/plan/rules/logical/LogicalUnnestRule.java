@@ -19,13 +19,9 @@
 package org.apache.flink.table.planner.plan.rules.logical;
 
 import org.apache.flink.table.functions.BuiltInFunctionDefinitions;
-import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
 import org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction;
-import org.apache.flink.table.planner.utils.ShortcutUtils;
-import org.apache.flink.table.runtime.functions.table.UnnestRowsFunction;
-import org.apache.flink.table.types.logical.LogicalType;
 
-import org.apache.flink.shaded.guava32.com.google.common.collect.ImmutableList;
+import org.apache.flink.shaded.guava33.com.google.common.collect.ImmutableList;
 
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelOptRuleCall;
@@ -38,14 +34,10 @@ import org.apache.calcite.rel.logical.LogicalCorrelate;
 import org.apache.calcite.rel.logical.LogicalFilter;
 import org.apache.calcite.rel.logical.LogicalProject;
 import org.apache.calcite.rel.logical.LogicalTableFunctionScan;
-import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexNode;
 import org.immutables.value.Value;
 
 import java.util.Collections;
-import java.util.Map;
-
-import static org.apache.flink.table.types.logical.utils.LogicalTypeUtils.toRowType;
 
 /**
  * Planner rule that rewrites UNNEST to explode function.
@@ -68,26 +60,18 @@ public class LogicalUnnestRule extends RelRule<LogicalUnnestRule.LogicalUnnestRu
             LogicalFilter logicalFilter = (LogicalFilter) right;
             RelNode relNode = getRel(logicalFilter.getInput());
             if (relNode instanceof Uncollect) {
-                return !((Uncollect) relNode).withOrdinality;
+                return true;
             } else if (relNode instanceof LogicalProject) {
                 LogicalProject logicalProject = (LogicalProject) relNode;
                 relNode = getRel(logicalProject.getInput());
-                if (relNode instanceof Uncollect) {
-                    return !((Uncollect) relNode).withOrdinality;
-                }
-                return false;
+                return relNode instanceof Uncollect;
             }
         } else if (right instanceof LogicalProject) {
             LogicalProject logicalProject = (LogicalProject) right;
             RelNode relNode = getRel(logicalProject.getInput());
-            if (relNode instanceof Uncollect) {
-                Uncollect uncollect = (Uncollect) relNode;
-                return !uncollect.withOrdinality;
-            }
-            return false;
-        } else if (right instanceof Uncollect) {
-            Uncollect uncollect = (Uncollect) right;
-            return !uncollect.withOrdinality;
+            return relNode instanceof Uncollect;
+        } else {
+            return right instanceof Uncollect;
         }
         return false;
     }
@@ -125,22 +109,17 @@ public class LogicalUnnestRule extends RelRule<LogicalUnnestRule.LogicalUnnestRu
         if (relNode instanceof Uncollect) {
             Uncollect uncollect = (Uncollect) relNode;
             RelOptCluster cluster = correlate.getCluster();
-            FlinkTypeFactory typeFactory = ShortcutUtils.unwrapTypeFactory(cluster);
-            RelDataType relDataType =
-                    (RelDataType)
-                            ((Map.Entry) uncollect.getInput().getRowType().getFieldList().get(0))
-                                    .getValue();
-            LogicalType logicalType = FlinkTypeFactory.toLogicalType(relDataType);
             BridgingSqlFunction sqlFunction =
                     BridgingSqlFunction.of(
-                            cluster, BuiltInFunctionDefinitions.INTERNAL_UNNEST_ROWS);
+                            cluster,
+                            uncollect.withOrdinality
+                                    ? BuiltInFunctionDefinitions
+                                            .INTERNAL_UNNEST_ROWS_WITH_ORDINALITY
+                                    : BuiltInFunctionDefinitions.INTERNAL_UNNEST_ROWS);
             RexNode rexCall =
                     cluster.getRexBuilder()
                             .makeCall(
-                                    typeFactory.createFieldTypeFromLogicalType(
-                                            toRowType(
-                                                    UnnestRowsFunction.getUnnestedType(
-                                                            logicalType))),
+                                    uncollect.getRowType(),
                                     sqlFunction,
                                     ((LogicalProject) getRel(uncollect.getInput())).getProjects());
             return new LogicalTableFunctionScan(

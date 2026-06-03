@@ -98,7 +98,6 @@ public class CliFrontend {
 
     // actions
     private static final String ACTION_RUN = "run";
-    private static final String ACTION_RUN_APPLICATION = "run-application";
     private static final String ACTION_INFO = "info";
     private static final String ACTION_LIST = "list";
     private static final String ACTION_CANCEL = "cancel";
@@ -168,23 +167,6 @@ public class CliFrontend {
     //  Execute Actions
     // --------------------------------------------------------------------------------------------
 
-    @Deprecated
-    protected void runApplication(String[] args) throws Exception {
-        LOG.warn(
-                "DEPRECATION WARNING: The 'run-application' option is deprecated and will be removed in the future. Please use 'run' instead.");
-        LOG.info("Running 'run-application' command.");
-
-        final Options commandOptions = CliFrontendParser.getRunCommandOptions();
-        final CommandLine commandLine = getCommandLine(commandOptions, args, true);
-
-        if (commandLine.hasOption(HELP_OPTION.getOpt())) {
-            CliFrontendParser.printHelpForRunApplication(customCommandLines);
-            return;
-        }
-
-        run(args);
-    }
-
     /**
      * Executions the run action.
      *
@@ -205,32 +187,28 @@ public class CliFrontend {
         final CustomCommandLine activeCommandLine =
                 validateAndGetActiveCommandLine(checkNotNull(commandLine));
 
-        if (isDeploymentTargetApplication(activeCommandLine, commandLine)) {
+        final Configuration effectiveConfiguration =
+                getEffectiveConfiguration(activeCommandLine, commandLine);
+
+        if (isDeploymentTargetApplication(effectiveConfiguration)) {
             final ApplicationDeployer deployer =
                     new ApplicationClusterDeployer(clusterClientServiceLoader);
 
             final ProgramOptions programOptions;
-            final Configuration effectiveConfiguration;
 
             // No need to set a jarFile path for PyFlink job.
             if (ProgramOptionsUtils.isPythonEntryPoint(commandLine)) {
                 programOptions = ProgramOptionsUtils.createPythonProgramOptions(commandLine);
-                effectiveConfiguration =
-                        getEffectiveConfiguration(
-                                activeCommandLine,
-                                commandLine,
-                                programOptions,
-                                Collections.emptyList());
+                updateEffectiveConfiguration(
+                        effectiveConfiguration, programOptions, Collections.emptyList());
             } else {
                 programOptions = new ProgramOptions(commandLine);
                 programOptions.validate();
                 final URI uri = PackagedProgramUtils.resolveURI(programOptions.getJarFilePath());
-                effectiveConfiguration =
-                        getEffectiveConfiguration(
-                                activeCommandLine,
-                                commandLine,
-                                programOptions,
-                                Collections.singletonList(uri.toString()));
+                updateEffectiveConfiguration(
+                        effectiveConfiguration,
+                        programOptions,
+                        Collections.singletonList(uri.toString()));
             }
 
             final ApplicationConfiguration applicationConfiguration =
@@ -243,9 +221,7 @@ public class CliFrontend {
 
             final List<URL> jobJars = getJobJarAndDependencies(programOptions);
 
-            final Configuration effectiveConfiguration =
-                    getEffectiveConfiguration(
-                            activeCommandLine, commandLine, programOptions, jobJars);
+            updateEffectiveConfiguration(effectiveConfiguration, programOptions, jobJars);
 
             LOG.debug("Effective executor configuration: {}", effectiveConfiguration);
 
@@ -256,12 +232,7 @@ public class CliFrontend {
         }
     }
 
-    protected boolean isDeploymentTargetApplication(
-            final CustomCommandLine activeCustomCommandLine, final CommandLine commandLine)
-            throws FlinkException {
-        final Configuration effectiveConfiguration =
-                getEffectiveConfiguration(activeCustomCommandLine, commandLine);
-
+    protected boolean isDeploymentTargetApplication(final Configuration effectiveConfiguration) {
         final String executionTarget =
                 effectiveConfiguration
                         .getOptional(DeploymentOptions.TARGET)
@@ -318,26 +289,19 @@ public class CliFrontend {
         return effectiveConfiguration;
     }
 
-    private <T> Configuration getEffectiveConfiguration(
-            final CustomCommandLine activeCustomCommandLine,
-            final CommandLine commandLine,
+    private <T> void updateEffectiveConfiguration(
+            final Configuration effectiveConfiguration,
             final ProgramOptions programOptions,
-            final List<T> jobJars)
-            throws FlinkException {
-
-        final Configuration effectiveConfiguration =
-                getEffectiveConfiguration(activeCustomCommandLine, commandLine);
+            final List<T> jobJars) {
 
         final ExecutionConfigAccessor executionParameters =
-                ExecutionConfigAccessor.fromProgramOptions(
-                        checkNotNull(programOptions), checkNotNull(jobJars));
+                ExecutionConfigAccessor.fromProgramOptions(programOptions, jobJars);
 
         executionParameters.applyToConfiguration(effectiveConfiguration);
 
         LOG.debug(
                 "Effective configuration after Flink conf, custom commandline, and program options: {}",
                 effectiveConfiguration);
-        return effectiveConfiguration;
     }
 
     /**
@@ -373,11 +337,12 @@ public class CliFrontend {
                     validateAndGetActiveCommandLine(checkNotNull(commandLine));
 
             final Configuration effectiveConfiguration =
-                    getEffectiveConfiguration(
-                            activeCommandLine,
-                            commandLine,
-                            programOptions,
-                            getJobJarAndDependencies(programOptions));
+                    getEffectiveConfiguration(activeCommandLine, commandLine);
+
+            updateEffectiveConfiguration(
+                    effectiveConfiguration,
+                    programOptions,
+                    getJobJarAndDependencies(programOptions));
 
             program = buildProgram(programOptions, effectiveConfiguration);
 
@@ -404,11 +369,10 @@ public class CliFrontend {
             }
 
             String description = program.getDescription();
+            System.out.println();
             if (description != null) {
-                System.out.println();
                 System.out.println(description);
             } else {
-                System.out.println();
                 System.out.println("No description provided.");
             }
         } finally {
@@ -498,7 +462,7 @@ public class CliFrontend {
                 });
 
         if (showRunning || showAll) {
-            if (runningJobs.size() == 0) {
+            if (runningJobs.isEmpty()) {
                 System.out.println("No running jobs.");
             } else {
                 System.out.println(
@@ -509,7 +473,7 @@ public class CliFrontend {
             }
         }
         if (showScheduled || showAll) {
-            if (scheduledJobs.size() == 0) {
+            if (scheduledJobs.isEmpty()) {
                 System.out.println("No scheduled jobs.");
             } else {
                 System.out.println(
@@ -520,7 +484,7 @@ public class CliFrontend {
             }
         }
         if (showAll) {
-            if (terminatedJobs.size() != 0) {
+            if (!terminatedJobs.isEmpty()) {
                 System.out.println(
                         "---------------------- Terminated Jobs -----------------------");
                 printJobStatusMessages(terminatedJobs);
@@ -1296,9 +1260,6 @@ public class CliFrontend {
                 case ACTION_RUN:
                     run(params);
                     return 0;
-                case ACTION_RUN_APPLICATION:
-                    runApplication(params);
-                    return 0;
                 case ACTION_LIST:
                     list(params);
                     return 0;
@@ -1335,7 +1296,7 @@ public class CliFrontend {
                     System.out.printf("\"%s\" is not a valid action.\n", action);
                     System.out.println();
                     System.out.println(
-                            "Valid actions are \"run\", \"run-application\" (deprecated), \"list\", \"info\", \"savepoint\", \"stop\", or \"cancel\".");
+                            "Valid actions are \"run\", \"list\", \"info\", \"savepoint\", \"stop\", or \"cancel\".");
                     System.out.println();
                     System.out.println(
                             "Specify the version option (-v or --version) to print Flink version.");

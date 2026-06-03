@@ -18,6 +18,8 @@
 
 package org.apache.flink.streaming.api.connector.sink2;
 
+import org.apache.flink.streaming.runtime.operators.sink.IntegerSerializer;
+
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -40,14 +42,14 @@ class CommittableMessageSerializerTest {
         assertThat(message).isInstanceOf(CommittableWithLineage.class);
         final CommittableWithLineage<Integer> copy = (CommittableWithLineage<Integer>) message;
         assertThat(copy.getCommittable()).isEqualTo(1);
-        assertThat(copy.getCheckpointId()).isPresent().hasValue(2L);
+        assertThat(copy.getCheckpointIdOrEOI()).isEqualTo(2L);
         assertThat(copy.getSubtaskId()).isEqualTo(3);
     }
 
     @Test
     void testCommittableSummarySerDe() throws IOException {
         final CommittableSummary<Integer> committableSummary =
-                new CommittableSummary<>(1, 2, 3L, 4, 5, 6);
+                new CommittableSummary<>(1, 2, 3L, 4, 5);
         final CommittableMessage<Integer> message =
                 SERIALIZER.deserialize(
                         CommittableMessageSerializer.VERSION,
@@ -56,9 +58,7 @@ class CommittableMessageSerializerTest {
         final CommittableSummary<Integer> copy = (CommittableSummary<Integer>) message;
         assertThat(copy.getSubtaskId()).isEqualTo(1);
         assertThat(copy.getNumberOfSubtasks()).isEqualTo(2);
-        assertThat(copy.getCheckpointId()).isPresent().hasValue(3L);
+        assertThat(copy.getCheckpointIdOrEOI()).isEqualTo(3L);
         assertThat(copy.getNumberOfCommittables()).isEqualTo(4);
-        assertThat(copy.getNumberOfPendingCommittables()).isEqualTo(5);
-        assertThat(copy.getNumberOfFailedCommittables()).isEqualTo(6);
     }
 }

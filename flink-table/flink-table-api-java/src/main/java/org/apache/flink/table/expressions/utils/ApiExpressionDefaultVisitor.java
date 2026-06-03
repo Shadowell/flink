@@ -25,6 +25,7 @@ import org.apache.flink.table.expressions.Expression;
 import org.apache.flink.table.expressions.FieldReferenceExpression;
 import org.apache.flink.table.expressions.LocalReferenceExpression;
 import org.apache.flink.table.expressions.LookupCallExpression;
+import org.apache.flink.table.expressions.ModelReferenceExpression;
 import org.apache.flink.table.expressions.NestedFieldReferenceExpression;
 import org.apache.flink.table.expressions.ResolvedExpression;
 import org.apache.flink.table.expressions.SqlCallExpression;
@@ -32,6 +33,7 @@ import org.apache.flink.table.expressions.TableReferenceExpression;
 import org.apache.flink.table.expressions.TypeLiteralExpression;
 import org.apache.flink.table.expressions.UnresolvedCallExpression;
 import org.apache.flink.table.expressions.UnresolvedReferenceExpression;
+import org.apache.flink.table.expressions.UnresolvedTypeLiteralExpression;
 import org.apache.flink.table.expressions.ValueLiteralExpression;
 
 /**
@@ -77,6 +79,11 @@ public abstract class ApiExpressionDefaultVisitor<T> extends ApiExpressionVisito
     }
 
     @Override
+    public T visit(ModelReferenceExpression modelReference) {
+        return defaultMethod(modelReference);
+    }
+
+    @Override
     public T visit(LocalReferenceExpression localReference) {
         return defaultMethod(localReference);
     }
@@ -93,6 +100,11 @@ public abstract class ApiExpressionDefaultVisitor<T> extends ApiExpressionVisito
     @Override
     public T visit(UnresolvedReferenceExpression unresolvedReference) {
         return defaultMethod(unresolvedReference);
+    }
+
+    @Override
+    public T visit(UnresolvedTypeLiteralExpression unresolvedTypeExpression) {
+        return defaultMethod(unresolvedTypeExpression);
     }
 
     @Override

@@ -18,10 +18,11 @@
 
 package org.apache.flink.table.planner.plan.nodes.exec.testutils;
 
+import org.apache.flink.FlinkVersion;
 import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.configuration.StateBackendOptions;
 import org.apache.flink.core.execution.JobClient;
-import org.apache.flink.core.execution.RestoreMode;
+import org.apache.flink.core.execution.RecoveryClaimMode;
 import org.apache.flink.core.execution.SavepointFormatType;
 import org.apache.flink.runtime.jobgraph.SavepointRestoreSettings;
 import org.apache.flink.runtime.testutils.CommonTestUtils;
@@ -31,10 +32,12 @@ import org.apache.flink.table.api.PlanReference;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.TableResult;
 import org.apache.flink.table.api.config.TableConfigOptions;
+import org.apache.flink.table.planner.factories.TestValuesModelFactory;
 import org.apache.flink.table.planner.factories.TestValuesTableFactory;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeMetadata;
 import org.apache.flink.table.planner.plan.utils.ExecNodeMetadataUtil;
+import org.apache.flink.table.test.program.ModelTestStep;
 import org.apache.flink.table.test.program.SinkTestStep;
 import org.apache.flink.table.test.program.SourceTestStep;
 import org.apache.flink.table.test.program.SqlTestStep;
@@ -58,6 +61,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import javax.annotation.Nullable;
+
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -76,9 +81,18 @@ import java.util.stream.Stream;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Base class for implementing restore tests for {@link ExecNode}.You can generate json compiled
- * plan and a savepoint for the latest node version by running {@link
- * RestoreTestBase#generateTestSetupFiles(TableTestProgram)} which is disabled by default.
+ * Base class for implementing restore tests for {@link ExecNode}.
+ *
+ * <p>Restore tests test {@link TableTestProgram}s in two steps: The first step creates and executes
+ * a {@link CompiledPlan} with "before restore" data which generates state that is persisted using a
+ * savepoint. In the second step, the program is restored from the {@link CompiledPlan} and the
+ * corresponding savepoint. "After restore" data is ingested to test the final correctness.
+ *
+ * <p>You can generate a JSON compiled plan and a savepoint for the latest node version by running
+ * {@link RestoreTestBase#generateTestSetupFiles(TableTestProgram)} which is disabled by default.
+ * The "before restore" data of a sink defines the condition when a stop-with-savepoint should be
+ * triggered. You can inspect {@link #registerSinkObserver(List, SinkTestStep, boolean)} to monitor
+ * the savepoint progress.
  *
  * <p><b>Note:</b> The test base uses {@link TableConfigOptions.CatalogPlanCompilation#SCHEMA}
  * because it needs to adjust source and sink properties before and after the restore. Therefore,
@@ -89,6 +103,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 @TestMethodOrder(OrderAnnotation.class)
 public abstract class RestoreTestBase implements TableTestProgramRunner {
 
+    // This version can be set to generate savepoints for a particular Flink version.
+    // By default, the savepoint is generated for the current version in the default directory.
+    private static final FlinkVersion FLINK_VERSION = null;
     private final Class<? extends ExecNode<?>> execNodeUnderTest;
     private final List<Class<? extends ExecNode<?>>> childExecNodesUnderTest;
     private final AfterRestoreSource afterRestoreSource;
@@ -143,6 +160,7 @@ public abstract class RestoreTestBase implements TableTestProgramRunner {
                 TestKind.CONFIG,
                 TestKind.FUNCTION,
                 TestKind.TEMPORAL_FUNCTION,
+                TestKind.MODEL,
                 TestKind.SOURCE_WITH_RESTORE_DATA,
                 TestKind.SOURCE_WITH_DATA,
                 TestKind.SINK_WITH_RESTORE_DATA,
@@ -173,8 +191,66 @@ public abstract class RestoreTestBase implements TableTestProgramRunner {
         return getAllMetadata().stream()
                 .flatMap(
                         metadata ->
-                                supportedPrograms().stream().map(p -> Arguments.of(p, metadata)));
+                                supportedPrograms().stream()
+                                        .flatMap(
+                                                program ->
+                                                        getSavepointPaths(program, metadata)
+                                                                .map(
+                                                                        savepointPath ->
+                                                                                Arguments.of(
+                                                                                        program,
+                                                                                        getPlanPath(
+                                                                                                program,
+                                                                                                metadata),
+                                                                                        savepointPath))));
     }
+
+    // ====================================================================================
+    // Extension points for adjusting test combinations
+    // ====================================================================================
+
+    /**
+     * Can be overridden with a collection of programs that should be ignored for a particular
+     * version of the node under test.
+     */
+    protected Map<Integer, List<TableTestProgram>> programsToIgnore() {
+        return Collections.emptyMap();
+    }
+
+    /**
+     * The method can be overridden in a subclass to test multiple savepoint files for a given
+     * program and a node in a particular version. This can be useful e.g. to test a node against
+     * savepoint generated in different Flink versions.
+     */
+    protected Stream<String> getSavepointPaths(
+            TableTestProgram program, ExecNodeMetadata metadata) {
+        if (programsToIgnore()
+                .getOrDefault(metadata.version(), Collections.emptyList())
+                .contains(program)) {
+            return Stream.empty();
+        } else {
+            return Stream.of(getSavepointPath(program, metadata, null));
+        }
+    }
+
+    /** Can be used in {@link #getSavepointPaths(TableTestProgram, ExecNodeMetadata)}. */
+    protected final String getSavepointPath(
+            TableTestProgram program,
+            ExecNodeMetadata metadata,
+            @Nullable FlinkVersion flinkVersion) {
+        StringBuilder builder = new StringBuilder();
+        builder.append(getTestResourceDirectory(program, metadata));
+        if (flinkVersion != null) {
+            builder.append("/").append(flinkVersion);
+        }
+        builder.append("/savepoint/");
+
+        return builder.toString();
+    }
+
+    // ====================================================================================
+    // End of extension points
+    // ====================================================================================
 
     private void registerSinkObserver(
             final List<CompletableFuture<?>> futures,
@@ -186,14 +262,14 @@ public abstract class RestoreTestBase implements TableTestProgramRunner {
         TestValuesTableFactory.registerLocalRawResultsObserver(
                 tableName,
                 (integer, strings) -> {
-                    List<String> results =
+                    final List<String> expected =
                             new ArrayList<>(sinkTestStep.getExpectedBeforeRestoreAsStrings());
                     if (!ignoreAfter) {
-                        results.addAll(sinkTestStep.getExpectedAfterRestoreAsStrings());
+                        expected.addAll(sinkTestStep.getExpectedAfterRestoreAsStrings());
                     }
-                    List<String> expectedResults = getExpectedResults(sinkTestStep, tableName);
+                    final List<String> actual = getActualResults(sinkTestStep, tableName);
                     final boolean shouldComplete =
-                            CollectionUtils.isEqualCollection(expectedResults, results);
+                            CollectionUtils.isEqualCollection(actual, expected);
                     if (shouldComplete) {
                         future.complete(null);
                     }
@@ -225,7 +301,15 @@ public abstract class RestoreTestBase implements TableTestProgramRunner {
             options.put("data-id", id);
             options.put("terminating", "false");
             options.put("runtime-source", "NewSource");
+            enablePerRecordWatermarks(sourceTestStep, options);
             sourceTestStep.apply(tEnv, options);
+        }
+
+        for (ModelTestStep modelTestStep : program.getSetupModelTestSteps()) {
+            final Map<String, String> options = new HashMap<>();
+            options.put("provider", "values");
+            options.put("data-id", TestValuesModelFactory.registerData(modelTestStep.data));
+            modelTestStep.apply(tEnv, options);
         }
 
         final List<CompletableFuture<?>> futures = new ArrayList<>();
@@ -260,7 +344,8 @@ public abstract class RestoreTestBase implements TableTestProgramRunner {
                         .get();
         CommonTestUtils.waitForJobStatus(jobClient, Collections.singletonList(JobStatus.FINISHED));
         final Path savepointPath = Paths.get(new URI(savepoint));
-        final Path savepointDirPath = getSavepointPath(program, getLatestMetadata());
+        final Path savepointDirPath =
+                Paths.get(getSavepointPath(program, getLatestMetadata(), FLINK_VERSION));
         Files.createDirectories(savepointDirPath);
         Files.move(savepointPath, savepointDirPath, StandardCopyOption.ATOMIC_MOVE);
     }
@@ -268,7 +353,8 @@ public abstract class RestoreTestBase implements TableTestProgramRunner {
     @ParameterizedTest
     @MethodSource("createSpecs")
     @Order(1)
-    void testRestore(TableTestProgram program, ExecNodeMetadata metadata) throws Exception {
+    void testRestore(TableTestProgram program, Path planPath, String savepointPath)
+            throws Exception {
         final EnvironmentSettings settings = EnvironmentSettings.inStreamingMode();
         final SavepointRestoreSettings restoreSettings;
         if (afterRestoreSource == AfterRestoreSource.NO_RESTORE) {
@@ -276,9 +362,7 @@ public abstract class RestoreTestBase implements TableTestProgramRunner {
         } else {
             restoreSettings =
                     SavepointRestoreSettings.forPath(
-                            getSavepointPath(program, metadata).toString(),
-                            false,
-                            RestoreMode.NO_CLAIM);
+                            savepointPath, false, RecoveryClaimMode.NO_CLAIM);
         }
         SavepointRestoreSettings.toConfiguration(restoreSettings, settings.getConfiguration());
         settings.getConfiguration().set(StateBackendOptions.STATE_BACKEND, "rocksdb");
@@ -295,15 +379,33 @@ public abstract class RestoreTestBase implements TableTestProgramRunner {
                     afterRestoreSource == AfterRestoreSource.NO_RESTORE
                             ? sourceTestStep.dataBeforeRestore
                             : sourceTestStep.dataAfterRestore;
+
             final String id = TestValuesTableFactory.registerData(data);
+
+            if (sourceTestStep.treatDataBeforeRestoreAsConsumedData) {
+                final Collection<Row> consumedData =
+                        afterRestoreSource == AfterRestoreSource.NO_RESTORE
+                                ? Collections.emptyList()
+                                : sourceTestStep.dataBeforeRestore;
+                TestValuesTableFactory.registerConsumedData(consumedData, id);
+            }
+
             final Map<String, String> options = new HashMap<>();
             options.put("connector", "values");
             options.put("data-id", id);
             options.put("runtime-source", "NewSource");
+            enablePerRecordWatermarks(sourceTestStep, options);
             if (afterRestoreSource == AfterRestoreSource.INFINITE) {
                 options.put("terminating", "false");
             }
             sourceTestStep.apply(tEnv, options);
+        }
+
+        for (ModelTestStep modelTestStep : program.getSetupModelTestSteps()) {
+            final Map<String, String> options = new HashMap<>();
+            options.put("provider", "values");
+            options.put("data-id", TestValuesModelFactory.registerData(modelTestStep.data));
+            modelTestStep.apply(tEnv, options);
         }
 
         final List<CompletableFuture<?>> futures = new ArrayList<>();
@@ -322,8 +424,10 @@ public abstract class RestoreTestBase implements TableTestProgramRunner {
         program.getSetupFunctionTestSteps().forEach(s -> s.apply(tEnv));
         program.getSetupTemporalFunctionTestSteps().forEach(s -> s.apply(tEnv));
 
+        final byte[] compiledPlanAsSmileBytes =
+                tEnv.loadPlan(PlanReference.fromFile(planPath)).asSmileBytes();
         final CompiledPlan compiledPlan =
-                tEnv.loadPlan(PlanReference.fromFile(getPlanPath(program, metadata)));
+                tEnv.loadPlan(PlanReference.fromSmileBytes(compiledPlanAsSmileBytes));
 
         if (afterRestoreSource == AfterRestoreSource.INFINITE) {
             final TableResult tableResult = compiledPlan.execute();
@@ -332,15 +436,11 @@ public abstract class RestoreTestBase implements TableTestProgramRunner {
         } else {
             compiledPlan.execute().await();
             for (SinkTestStep sinkTestStep : program.getSetupSinkTestSteps()) {
-                List<String> expectedResults = getExpectedResults(sinkTestStep, sinkTestStep.name);
-                assertThat(expectedResults)
+                List<String> actualResults = getActualResults(sinkTestStep, sinkTestStep.name);
+                assertThat(actualResults)
+                        .as("%s", program.id)
                         .containsExactlyInAnyOrder(
-                                Stream.concat(
-                                                sinkTestStep.getExpectedBeforeRestoreAsStrings()
-                                                        .stream(),
-                                                sinkTestStep.getExpectedAfterRestoreAsStrings()
-                                                        .stream())
-                                        .toArray(String[]::new));
+                                sinkTestStep.getExpectedAsStrings().toArray(new String[0]));
             }
         }
     }
@@ -350,21 +450,29 @@ public abstract class RestoreTestBase implements TableTestProgramRunner {
                 getTestResourceDirectory(program, metadata) + "/plan/" + program.id + ".json");
     }
 
-    private Path getSavepointPath(TableTestProgram program, ExecNodeMetadata metadata) {
-        return Paths.get(getTestResourceDirectory(program, metadata) + "/savepoint/");
-    }
-
     private String getTestResourceDirectory(TableTestProgram program, ExecNodeMetadata metadata) {
         return String.format(
                 "%s/src/test/resources/restore-tests/%s_%d/%s",
                 System.getProperty("user.dir"), metadata.name(), metadata.version(), program.id);
     }
 
-    private static List<String> getExpectedResults(SinkTestStep sinkTestStep, String tableName) {
+    private static List<String> getActualResults(SinkTestStep sinkTestStep, String tableName) {
         if (sinkTestStep.shouldTestChangelogData()) {
             return TestValuesTableFactory.getRawResultsAsStrings(tableName);
         } else {
             return TestValuesTableFactory.getResultsAsStrings(tableName);
+        }
+    }
+
+    private static void enablePerRecordWatermarks(
+            SourceTestStep sourceTestStep, Map<String, String> options) {
+        // This is in sync with SemanticTestBase and is a better default for time-based testing
+        // because processing-time watermark emission would otherwise lead to flaky tests.
+        // Restore tests that fail with this setting can override it in the test program.
+        if (sourceTestStep.schemaComponents.stream().anyMatch(c -> c.startsWith("WATERMARK FOR"))) {
+            options.put("disable-lookup", "true");
+            options.put("enable-watermark-push-down", "true");
+            options.put("scan.watermark.emit.strategy", "on-event");
         }
     }
 }

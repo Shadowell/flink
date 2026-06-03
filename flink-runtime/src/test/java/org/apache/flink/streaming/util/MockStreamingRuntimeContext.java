@@ -34,16 +34,14 @@ import java.util.HashMap;
 /** Mock {@link StreamingRuntimeContext} to use in tests. */
 public class MockStreamingRuntimeContext extends StreamingRuntimeContext {
 
-    private final boolean isCheckpointingEnabled;
-
     private final int numParallelSubtasks;
     private final int subtaskIndex;
 
-    public MockStreamingRuntimeContext(
-            boolean isCheckpointingEnabled, int numParallelSubtasks, int subtaskIndex) {
+    private final MockEnvironment environment;
+
+    public MockStreamingRuntimeContext(int numParallelSubtasks, int subtaskIndex) {
 
         this(
-                isCheckpointingEnabled,
                 numParallelSubtasks,
                 subtaskIndex,
                 new MockEnvironmentBuilder()
@@ -56,26 +54,22 @@ public class MockStreamingRuntimeContext extends StreamingRuntimeContext {
     }
 
     public MockStreamingRuntimeContext(
-            boolean isCheckpointingEnabled,
-            int numParallelSubtasks,
-            int subtaskIndex,
-            MockEnvironment environment) {
+            int numParallelSubtasks, int subtaskIndex, MockEnvironment environment) {
 
         super(new MockStreamOperator(), environment, new HashMap<>());
 
-        this.isCheckpointingEnabled = isCheckpointingEnabled;
         this.numParallelSubtasks = numParallelSubtasks;
         this.subtaskIndex = subtaskIndex;
+        this.environment = environment;
+    }
+
+    public ExecutionConfig getExecutionConfig() {
+        return environment.getExecutionConfig();
     }
 
     @Override
     public OperatorMetricGroup getMetricGroup() {
         return UnregisteredMetricsGroup.createOperatorMetricGroup();
-    }
-
-    @Override
-    public boolean isCheckpointingEnabled() {
-        return isCheckpointingEnabled;
     }
 
     private static class MockStreamOperator extends AbstractStreamOperator<Integer> {

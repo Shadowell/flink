@@ -20,31 +20,33 @@ package org.apache.flink.streaming.tests;
 
 import org.apache.flink.api.common.functions.RichFlatMapFunction;
 import org.apache.flink.api.common.functions.RuntimeContext;
-import org.apache.flink.api.common.restartstrategy.RestartStrategies;
 import org.apache.flink.api.common.state.CheckpointListener;
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.java.functions.KeySelector;
-import org.apache.flink.api.java.utils.ParameterTool;
+import org.apache.flink.configuration.CheckpointingOptions;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.ExternalizedCheckpointRetention;
-import org.apache.flink.contrib.streaming.state.EmbeddedRocksDBStateBackend;
+import org.apache.flink.configuration.RestartStrategyOptions;
+import org.apache.flink.configuration.StateBackendOptions;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
 import org.apache.flink.runtime.state.FunctionSnapshotContext;
-import org.apache.flink.runtime.state.hashmap.HashMapStateBackend;
 import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.sink.PrintSinkFunction;
-import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunction;
+import org.apache.flink.streaming.api.functions.sink.legacy.PrintSinkFunction;
+import org.apache.flink.streaming.api.functions.source.legacy.RichParallelSourceFunction;
 import org.apache.flink.streaming.api.operators.StreamingRuntimeContext;
 import org.apache.flink.util.Collector;
+import org.apache.flink.util.ParameterTool;
 import org.apache.flink.util.Preconditions;
 
 import org.apache.commons.lang3.RandomStringUtils;
 
 import java.io.IOException;
 import java.io.Serializable;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -88,26 +90,37 @@ public class StickyAllocationAndLocalRecoveryTestJob {
         env.setParallelism(pt.getInt("parallelism", 1));
         env.setMaxParallelism(pt.getInt("maxParallelism", pt.getInt("parallelism", 1)));
         env.enableCheckpointing(pt.getInt("checkpointInterval", 1000));
-        env.setRestartStrategy(
-                RestartStrategies.fixedDelayRestart(
-                        Integer.MAX_VALUE, pt.getInt("restartDelay", 0)));
+
+        Configuration configuration = new Configuration();
+        configuration.set(RestartStrategyOptions.RESTART_STRATEGY, "fixed-delay");
+        configuration.set(
+                RestartStrategyOptions.RESTART_STRATEGY_FIXED_DELAY_ATTEMPTS, Integer.MAX_VALUE);
+        configuration.set(
+                RestartStrategyOptions.RESTART_STRATEGY_FIXED_DELAY_DELAY,
+                Duration.ofMillis(pt.getInt("restartDelay", 0)));
+        String checkpointDir = pt.getRequired("checkpointDir");
+        configuration.set(CheckpointingOptions.CHECKPOINTS_DIRECTORY, checkpointDir);
+
+        env.configure(configuration);
         if (pt.getBoolean("externalizedCheckpoints", false)) {
             env.getCheckpointConfig()
                     .setExternalizedCheckpointRetention(
                             ExternalizedCheckpointRetention.RETAIN_ON_CANCELLATION);
         }
 
-        String checkpointDir = pt.getRequired("checkpointDir");
-        env.getCheckpointConfig().setCheckpointStorage(checkpointDir);
-
         boolean killJvmOnFail = pt.getBoolean("killJvmOnFail", false);
 
         String stateBackend = pt.get("stateBackend", "hashmap");
         if ("hashmap".equals(stateBackend)) {
-            env.setStateBackend(new HashMapStateBackend());
+            env.configure(new Configuration().set(StateBackendOptions.STATE_BACKEND, "hashmap"));
         } else if ("rocks".equals(stateBackend)) {
             boolean incrementalCheckpoints = pt.getBoolean("incrementalCheckpoints", false);
-            env.setStateBackend(new EmbeddedRocksDBStateBackend(incrementalCheckpoints));
+            env.configure(
+                    new Configuration()
+                            .set(StateBackendOptions.STATE_BACKEND, "rocksdb")
+                            .set(
+                                    CheckpointingOptions.INCREMENTAL_CHECKPOINTS,
+                                    incrementalCheckpoints));
         } else {
             throw new IllegalArgumentException("Unknown backend: " + stateBackend);
         }
@@ -132,14 +145,7 @@ public class StickyAllocationAndLocalRecoveryTestJob {
         env.execute("Sticky Allocation And Local Recovery Test");
     }
 
-    /**
-     * Source function that produces a long sequence.
-     *
-     * @deprecated This class is based on the {@link
-     *     org.apache.flink.streaming.api.functions.source.SourceFunction} API, which is due to be
-     *     removed. Use the new {@link org.apache.flink.api.connector.source.Source} API instead.
-     */
-    @Deprecated
+    /** Source function that produces a long sequence. */
     private static final class RandomLongSource extends RichParallelSourceFunction<Long>
             implements CheckpointedFunction {
 
@@ -413,13 +419,34 @@ public class StickyAllocationAndLocalRecoveryTestJob {
     private static int getJvmPid() throws Exception {
         java.lang.management.RuntimeMXBean runtime =
                 java.lang.management.ManagementFactory.getRuntimeMXBean();
-        java.lang.reflect.Field jvm = runtime.getClass().getDeclaredField("jvm");
-        jvm.setAccessible(true);
-        sun.management.VMManagement mgmt = (sun.management.VMManagement) jvm.get(runtime);
-        java.lang.reflect.Method pidMethod = mgmt.getClass().getDeclaredMethod("getProcessId");
-        pidMethod.setAccessible(true);
 
-        return (int) (Integer) pidMethod.invoke(mgmt);
+        // Try to use reflection to access sun.management.VMManagement
+        // This avoids compile-time dependency on internal JDK classes
+        try {
+            java.lang.reflect.Field jvm = runtime.getClass().getDeclaredField("jvm");
+            jvm.setAccessible(true);
+            Object mgmt = jvm.get(runtime);
+
+            // Check if the class exists (it may not in some JDK distributions like IBM Semeru)
+            if (mgmt != null) {
+                java.lang.reflect.Method pidMethod =
+                        mgmt.getClass().getDeclaredMethod("getProcessId");
+                pidMethod.setAccessible(true);
+                return (int) (Integer) pidMethod.invoke(mgmt);
+            }
+        } catch (NoSuchFieldException | NoSuchMethodException | ClassCastException e) {
+            // Fall through to alternative method
+        }
+
+        // Fallback: parse PID from RuntimeMXBean name (format: "pid@hostname")
+        String jvmName = runtime.getName();
+        int atIndex = jvmName.indexOf('@');
+        if (atIndex > 0) {
+            return Integer.parseInt(jvmName.substring(0, atIndex));
+        }
+
+        throw new UnsupportedOperationException(
+                "Unable to determine JVM PID. This JDK distribution may not support the required internal APIs.");
     }
 
     /** Records the information required to check sticky scheduling after a restart. */

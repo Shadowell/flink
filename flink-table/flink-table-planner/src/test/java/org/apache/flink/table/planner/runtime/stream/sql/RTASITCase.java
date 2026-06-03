@@ -32,7 +32,6 @@ import org.apache.flink.table.types.AbstractDataType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -189,6 +188,28 @@ class RTASITCase extends StreamingTestBase {
     }
 
     @Test
+    void testReplaceTableAsSelectWithColumnOrdering() throws Exception {
+        tEnv().executeSql(
+                        "REPLACE TABLE target"
+                                + " (c, a)"
+                                + " WITH ('connector' = 'values', 'bounded' = 'true')"
+                                + " AS SELECT a, c FROM source")
+                .await();
+
+        // verify written rows
+        assertThat(TestValuesTableFactory.getResultsAsStrings("target").toString())
+                .isEqualTo("[" + "+I[Hi, 1], " + "+I[Hello, 2], " + "+I[Hello world, 3]" + "]");
+
+        // verify the table after replacing
+        CatalogTable expectCatalogTable =
+                getExpectCatalogTable(
+                        new String[] {"c", "a"},
+                        new AbstractDataType[] {DataTypes.STRING(), DataTypes.INT()});
+
+        verifyCatalogTable(expectCatalogTable, getCatalogTable("target"));
+    }
+
+    @Test
     void testCreateOrReplaceTableASWithSortLimit() throws Exception {
         tEnv().executeSql(
                         "CREATE OR REPLACE TABLE target WITH ('connector' = 'values',"
@@ -239,11 +260,10 @@ class RTASITCase extends StreamingTestBase {
 
     private CatalogTable getExpectCatalogTable(
             String[] cols, AbstractDataType<?>[] fieldDataTypes, Map<String, String> tableOptions) {
-        return CatalogTable.of(
-                Schema.newBuilder().fromFields(cols, fieldDataTypes).build(),
-                null,
-                Collections.emptyList(),
-                tableOptions);
+        return CatalogTable.newBuilder()
+                .schema(Schema.newBuilder().fromFields(cols, fieldDataTypes).build())
+                .options(tableOptions)
+                .build();
     }
 
     private Map<String, String> getDefaultTargetTableOptions() {

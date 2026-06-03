@@ -54,12 +54,21 @@ Currently these systems are supported as part of the Apache Flink project:
  * [Apache Pulsar]({{< ref "docs/connectors/datastream/pulsar" >}}) (source)
  * [JDBC]({{< ref "docs/connectors/datastream/jdbc" >}}) (sink)
  * [MongoDB]({{< ref "docs/connectors/datastream/mongodb" >}}) (source/sink)
+ * [Prometheus]({{< ref "docs/connectors/datastream/prometheus" >}}) (sink)
 
 Keep in mind that to use one of these connectors in an application, additional third party
 components are usually required, e.g. servers for the data stores or message queues.
 Note also that while the streaming connectors listed in this section are part of the
 Flink project and are included in source releases, they are not included in the binary distributions. 
 Further instructions can be found in the corresponding subsections.
+
+{{< hint info >}}
+Because the flink-connector-base dependency has been bundled in flink-dist,
+these externalized connectors start to stop bundling the flink-connector-base dependency. See more
+in <a href="https://issues.apache.org/jira/browse/FLINK-30400">FLINK-30400</a>.
+If you need to run examples locally, make sure that the flink-connector-base dependency is
+provided and can be found in your own classpath.
+{{< /hint >}}
 
 ## Connectors in Apache Bahir
 

@@ -21,27 +21,26 @@ import org.apache.flink.annotation.Internal;
 import org.apache.flink.annotation.Public;
 import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.annotation.VisibleForTesting;
-import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.functions.CoGroupFunction;
 import org.apache.flink.api.common.functions.MapFunction;
+import org.apache.flink.api.common.functions.WrappingFunction;
 import org.apache.flink.api.common.serialization.SerializerConfig;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeutils.CompositeTypeSerializerSnapshot;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.TypeSerializerSnapshot;
 import org.apache.flink.api.java.functions.KeySelector;
-import org.apache.flink.api.java.operators.translation.WrappingFunction;
 import org.apache.flink.api.java.typeutils.TypeExtractor;
 import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataOutputView;
 import org.apache.flink.streaming.api.functions.windowing.WindowFunction;
 import org.apache.flink.streaming.api.windowing.assigners.WindowAssigner;
 import org.apache.flink.streaming.api.windowing.evictors.Evictor;
-import org.apache.flink.streaming.api.windowing.time.Time;
 import org.apache.flink.streaming.api.windowing.triggers.Trigger;
 import org.apache.flink.streaming.api.windowing.windows.Window;
 import org.apache.flink.util.Collector;
 import org.apache.flink.util.Preconditions;
+import org.apache.flink.util.TaggedUnion;
 
 import javax.annotation.Nullable;
 
@@ -49,7 +48,6 @@ import java.io.IOException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Objects;
 import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
@@ -206,7 +204,7 @@ public class CoGroupedStreams<T1, T2> {
                         assigner,
                         null,
                         null,
-                        (Duration) null);
+                        null);
             }
         }
     }
@@ -241,33 +239,6 @@ public class CoGroupedStreams<T1, T2> {
         @Nullable private final Duration allowedLateness;
 
         private WindowedStream<TaggedUnion<T1, T2>, KEY, W> windowedStream;
-
-        /**
-         * @deprecated Use {@link WithWindow#WithWindow(DataStream, DataStream, KeySelector,
-         *     KeySelector, TypeInformation, WindowAssigner, Trigger, Evictor, Duration)}
-         */
-        @Deprecated
-        protected WithWindow(
-                DataStream<T1> input1,
-                DataStream<T2> input2,
-                KeySelector<T1, KEY> keySelector1,
-                KeySelector<T2, KEY> keySelector2,
-                TypeInformation<KEY> keyType,
-                WindowAssigner<? super TaggedUnion<T1, T2>, W> windowAssigner,
-                Trigger<? super TaggedUnion<T1, T2>, ? super W> trigger,
-                Evictor<? super TaggedUnion<T1, T2>, ? super W> evictor,
-                @Nullable Time allowedLateness) {
-            this(
-                    input1,
-                    input2,
-                    keySelector1,
-                    keySelector2,
-                    keyType,
-                    windowAssigner,
-                    trigger,
-                    evictor,
-                    Time.toDuration(allowedLateness));
-        }
 
         protected WithWindow(
                 DataStream<T1> input1,
@@ -334,18 +305,6 @@ public class CoGroupedStreams<T1, T2> {
         /**
          * Sets the time by which elements are allowed to be late.
          *
-         * @see WindowedStream#allowedLateness(Time)
-         * @deprecated Use {@link #allowedLateness(Duration)}
-         */
-        @Deprecated
-        @PublicEvolving
-        public WithWindow<T1, T2, KEY, W> allowedLateness(@Nullable Time newLateness) {
-            return allowedLateness(Time.toDuration(newLateness));
-        }
-
-        /**
-         * Sets the time by which elements are allowed to be late.
-         *
          * @see WindowedStream#allowedLateness(Duration)
          */
         @PublicEvolving
@@ -365,12 +324,8 @@ public class CoGroupedStreams<T1, T2> {
         /**
          * Completes the co-group operation with the user function that is executed for windowed
          * groups.
-         *
-         * <p>Note: This method's return type does not support setting an operator-specific
-         * parallelism. Due to binary backwards compatibility, this cannot be altered. Use the
-         * {@link #with(CoGroupFunction)} method to set an operator-specific parallelism.
          */
-        public <T> DataStream<T> apply(CoGroupFunction<T1, T2, T> function) {
+        public <T> SingleOutputStreamOperator<T> apply(CoGroupFunction<T1, T2, T> function) {
 
             TypeInformation<T> resultType =
                     TypeExtractor.getCoGroupReturnTypes(
@@ -382,30 +337,8 @@ public class CoGroupedStreams<T1, T2> {
         /**
          * Completes the co-group operation with the user function that is executed for windowed
          * groups.
-         *
-         * <p><b>Note:</b> This is a temporary workaround while the {@link #apply(CoGroupFunction)}
-         * method has the wrong return type and hence does not allow one to set an operator-specific
-         * parallelism
-         *
-         * @deprecated This method will be removed once the {@link #apply(CoGroupFunction)} method
-         *     is fixed in the next major version of Flink (2.0).
          */
-        @PublicEvolving
-        @Deprecated
-        public <T> SingleOutputStreamOperator<T> with(CoGroupFunction<T1, T2, T> function) {
-            return (SingleOutputStreamOperator<T>) apply(function);
-        }
-
-        /**
-         * Completes the co-group operation with the user function that is executed for windowed
-         * groups.
-         *
-         * <p>Note: This method's return type does not support setting an operator-specific
-         * parallelism. Due to binary backwards compatibility, this cannot be altered. Use the
-         * {@link #with(CoGroupFunction, TypeInformation)} method to set an operator-specific
-         * parallelism.
-         */
-        public <T> DataStream<T> apply(
+        public <T> SingleOutputStreamOperator<T> apply(
                 CoGroupFunction<T1, T2, T> function, TypeInformation<T> resultType) {
             // clean the closure
             function = input1.getExecutionEnvironment().clean(function);
@@ -447,32 +380,6 @@ public class CoGroupedStreams<T1, T2> {
                     new CoGroupWindowFunction<T1, T2, T, KEY, W>(function), resultType);
         }
 
-        /**
-         * Completes the co-group operation with the user function that is executed for windowed
-         * groups.
-         *
-         * <p><b>Note:</b> This is a temporary workaround while the {@link #apply(CoGroupFunction,
-         * TypeInformation)} method has the wrong return type and hence does not allow one to set an
-         * operator-specific parallelism
-         *
-         * @deprecated This method will be removed once the {@link #apply(CoGroupFunction,
-         *     TypeInformation)} method is fixed in the next major version of Flink (2.0).
-         */
-        @PublicEvolving
-        @Deprecated
-        public <T> SingleOutputStreamOperator<T> with(
-                CoGroupFunction<T1, T2, T> function, TypeInformation<T> resultType) {
-            return (SingleOutputStreamOperator<T>) apply(function, resultType);
-        }
-
-        /** @deprecated Use {@link #getAllowedLatenessDuration()} */
-        @Deprecated
-        @VisibleForTesting
-        @Nullable
-        Time getAllowedLateness() {
-            return getAllowedLatenessDuration().map(Time::of).orElse(null);
-        }
-
         @VisibleForTesting
         Optional<Duration> getAllowedLatenessDuration() {
             return Optional.ofNullable(allowedLateness);
@@ -485,58 +392,8 @@ public class CoGroupedStreams<T1, T2> {
     }
 
     // ------------------------------------------------------------------------
-    //  Data type and type information for Tagged Union
+    //  Type information for Tagged Union
     // ------------------------------------------------------------------------
-
-    /** Internal class for implementing tagged union co-group. */
-    @Internal
-    public static class TaggedUnion<T1, T2> {
-        private final T1 one;
-        private final T2 two;
-
-        private TaggedUnion(T1 one, T2 two) {
-            this.one = one;
-            this.two = two;
-        }
-
-        public boolean isOne() {
-            return one != null;
-        }
-
-        public boolean isTwo() {
-            return two != null;
-        }
-
-        public T1 getOne() {
-            return one;
-        }
-
-        public T2 getTwo() {
-            return two;
-        }
-
-        public static <T1, T2> TaggedUnion<T1, T2> one(T1 one) {
-            return new TaggedUnion<>(one, null);
-        }
-
-        public static <T1, T2> TaggedUnion<T1, T2> two(T2 two) {
-            return new TaggedUnion<>(null, two);
-        }
-
-        @Override
-        public boolean equals(Object obj) {
-            if (obj == this) {
-                return true;
-            }
-
-            if (!(obj instanceof TaggedUnion)) {
-                return false;
-            }
-
-            TaggedUnion other = (TaggedUnion) obj;
-            return Objects.equals(one, other.one) && Objects.equals(two, other.two);
-        }
-    }
 
     private static class UnionTypeInfo<T1, T2> extends TypeInformation<TaggedUnion<T1, T2>> {
         private static final long serialVersionUID = 1L;
@@ -584,11 +441,6 @@ public class CoGroupedStreams<T1, T2> {
         public TypeSerializer<TaggedUnion<T1, T2>> createSerializer(SerializerConfig config) {
             return new UnionSerializer<>(
                     oneType.createSerializer(config), twoType.createSerializer(config));
-        }
-
-        @Override
-        public TypeSerializer<TaggedUnion<T1, T2>> createSerializer(ExecutionConfig config) {
-            return createSerializer(config.getSerializerConfig());
         }
 
         @Override

@@ -22,11 +22,12 @@ import org.apache.flink.configuration.ClusterOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.IllegalConfigurationException;
 import org.apache.flink.configuration.JobManagerOptions;
+import org.apache.flink.configuration.RestOptions;
 import org.apache.flink.configuration.SchedulerExecutionMode;
 import org.apache.flink.runtime.clusterframework.ApplicationStatus;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
-import org.apache.flink.runtime.dispatcher.ExecutionGraphInfoStore;
-import org.apache.flink.runtime.dispatcher.MemoryExecutionGraphInfoStore;
+import org.apache.flink.runtime.dispatcher.ArchivedApplicationStore;
+import org.apache.flink.runtime.dispatcher.MemoryArchivedApplicationStore;
 import org.apache.flink.runtime.dispatcher.PartialDispatcherServices;
 import org.apache.flink.runtime.dispatcher.runner.DispatcherRunner;
 import org.apache.flink.runtime.dispatcher.runner.DispatcherRunnerFactory;
@@ -35,7 +36,7 @@ import org.apache.flink.runtime.entrypoint.component.DefaultDispatcherResourceMa
 import org.apache.flink.runtime.entrypoint.component.DispatcherResourceManagerComponentFactory;
 import org.apache.flink.runtime.highavailability.HighAvailabilityServices;
 import org.apache.flink.runtime.highavailability.TestingHighAvailabilityServicesBuilder;
-import org.apache.flink.runtime.jobmanager.JobPersistenceComponentFactory;
+import org.apache.flink.runtime.jobmanager.PersistenceComponentFactory;
 import org.apache.flink.runtime.leaderelection.LeaderElection;
 import org.apache.flink.runtime.resourcemanager.ResourceManagerFactory;
 import org.apache.flink.runtime.resourcemanager.StandaloneResourceManagerFactory;
@@ -69,6 +70,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.Assert.assertFalse;
@@ -92,6 +94,8 @@ public class ClusterEntrypointTest extends TestLogger {
     @Before
     public void before() {
         flinkConfig = new Configuration();
+        flinkConfig.set(RestOptions.BIND_PORT, "0");
+        flinkConfig.set(JobManagerOptions.PORT, 0);
         ExceptionThrowingDelegationTokenProvider.reset();
         ExceptionThrowingDelegationTokenReceiver.reset();
     }
@@ -129,6 +133,13 @@ public class ClusterEntrypointTest extends TestLogger {
                 is(ApplicationStatus.UNKNOWN));
         assertThat(
                 ExceptionThrowingDelegationTokenReceiver.onNewTokensObtainedCallCount.get(), is(1));
+    }
+
+    @Test
+    public void testCloseAsyncDoesNotFailBeforeInitialization() {
+        TestingEntryPoint entryPoint = new TestingEntryPoint.Builder().build();
+
+        assertThatCode(() -> entryPoint.closeAsync().join()).doesNotThrowAnyException();
     }
 
     @Test
@@ -381,9 +392,9 @@ public class ClusterEntrypointTest extends TestLogger {
         }
 
         @Override
-        protected ExecutionGraphInfoStore createSerializableExecutionGraphStore(
+        protected ArchivedApplicationStore createArchivedApplicationStore(
                 Configuration configuration, ScheduledExecutor scheduledExecutor) {
-            return new MemoryExecutionGraphInfoStore();
+            return new MemoryArchivedApplicationStore();
         }
 
         @Override
@@ -451,7 +462,7 @@ public class ClusterEntrypointTest extends TestLogger {
         public DispatcherRunner createDispatcherRunner(
                 LeaderElection leaderElection,
                 FatalErrorHandler fatalErrorHandler,
-                JobPersistenceComponentFactory jobPersistenceComponentFactory,
+                PersistenceComponentFactory persistenceComponentFactory,
                 Executor ioExecutor,
                 RpcService rpcService,
                 PartialDispatcherServices partialDispatcherServices)

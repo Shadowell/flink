@@ -17,7 +17,6 @@
  */
 package org.apache.flink.table.planner.plan.stream.sql
 
-import org.apache.flink.api.scala._
 import org.apache.flink.table.api._
 import org.apache.flink.table.api.config.OptimizerConfigOptions
 import org.apache.flink.table.planner.utils.TableTestBase
@@ -843,14 +842,15 @@ class RankTest extends TableTestBase {
                                |CREATE VIEW v1 AS
                                |SELECT c, b, SUM(a) FILTER (WHERE a > 0) AS d FROM v0 GROUP BY c, b
                                |""".stripMargin)
-    util.verifyRelPlan("""
-                         |SELECT c, b, d
-                         |FROM (
-                         |    SELECT
-                         |       c, b, d,
-                         |       ROW_NUMBER() OVER (PARTITION BY c, b ORDER BY d DESC) AS rn FROM v1
-                         |) WHERE rn < 10
-                         |""".stripMargin)
+    util.verifyExecPlan(
+      """
+        |SELECT c, b, d
+        |FROM (
+        |    SELECT
+        |       c, b, d,
+        |       ROW_NUMBER() OVER (PARTITION BY c, b ORDER BY d DESC) AS rn FROM v1
+        |) WHERE rn < 10
+        |""".stripMargin)
   }
   @Test
   def testUpdatableRankAfterLookupJoin(): Unit = {
@@ -947,6 +947,7 @@ class RankTest extends TableTestBase {
         |  FROM MyTable
         |  )
         |WHERE rn <= 100
+        |ON CONFLICT DO DEDUPLICATE
         |""".stripMargin
     // verify UB should reserve and add upsertMaterialize if rank outputs' upsert keys differs from
     // sink's pks
@@ -976,6 +977,7 @@ class RankTest extends TableTestBase {
         |  FROM MyTable
         |  )
         |WHERE rn <= 100
+        |ON CONFLICT DO DEDUPLICATE
         |""".stripMargin
 
     // verify UB should reserve and no upsertMaterialize if rank outputs' upsert keys are subset of
@@ -1006,6 +1008,7 @@ class RankTest extends TableTestBase {
         |  FROM MyTable
         |  )
         |WHERE rn <= 100
+        |ON CONFLICT DO DEDUPLICATE
         |""".stripMargin
     // verify UB should reserve and add upsertMaterialize if rank outputs' lost upsert keys
     util.verifyExplainInsert(sql, ExplainDetail.CHANGELOG_MODE)

@@ -20,6 +20,7 @@ package org.apache.flink.configuration;
 
 import org.apache.flink.annotation.Experimental;
 import org.apache.flink.annotation.PublicEvolving;
+import org.apache.flink.annotation.docs.Documentation;
 import org.apache.flink.configuration.description.Description;
 import org.apache.flink.configuration.description.TextElement;
 
@@ -46,14 +47,9 @@ public class DeploymentOptions {
                                             text("remote"),
                                             text("local"),
                                             text("yarn-application"),
-                                            text("yarn-per-job (deprecated)"),
                                             text("yarn-session"),
                                             text("kubernetes-application"),
                                             text("kubernetes-session"))
-                                    .text(
-                                            "And one of the following values when calling %s (deprecated):",
-                                            TextElement.code("bin/flink run-application"))
-                                    .list(text("yarn-application"), text("kubernetes-application"))
                                     .build());
 
     public static final ConfigOption<Boolean> ATTACHED =
@@ -96,7 +92,11 @@ public class DeploymentOptions {
                             "Whether a Flink Application cluster should shut down automatically after its application finishes"
                                     + " (either successfully or as result of a failure). Has no effect for other deployment modes.");
 
-    @Experimental
+    /**
+     * @deprecated Check application exceptions instead.
+     */
+    @Deprecated
+    @Documentation.ExcludeFromDocumentation("Hidden for deprecated")
     public static final ConfigOption<Boolean> SUBMIT_FAILED_JOB_ON_APPLICATION_ERROR =
             ConfigOptions.key("execution.submit-failed-job-on-application-error")
                     .booleanType()
@@ -160,4 +160,13 @@ public class DeploymentOptions {
                                                     + "regardless of this setting.",
                                             TextElement.text(PROGRAM_CONFIG_WILDCARDS.key()))
                                     .build());
+
+    @Experimental
+    public static final ConfigOption<Boolean> TERMINATE_APPLICATION_ON_ANY_JOB_EXCEPTION =
+            ConfigOptions.key("execution.terminate-application-on-any-job-terminated-exceptionally")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription(
+                            "When it is set to true, the application will complete exceptionally if any job fails or is canceled."
+                                    + " When it is set to false, the application will finish after all jobs reach terminal states.");
 }

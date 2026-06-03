@@ -174,8 +174,9 @@ When reading a dynamic table, the content can either be considered as:
 - A continuously changing or very large external table whose content is usually never read entirely
   but queried for individual values when necessary. This is represented by the `LookupTableSource`
   interface.
+- A table that supports searching via vector. This is represented by the `VectorSearchTableSource` interface.
 
-A class can implement both of these interfaces at the same time. The planner decides about their usage depending
+A class can implement all of these interfaces at the same time. The planner decides about their usage depending
 on the specified query.
 
 #### Scan Table Source
@@ -222,6 +223,23 @@ for more information.
 
 The runtime implementation of a `LookupTableSource` is a `TableFunction` or `AsyncTableFunction`. The function
 will be called with values for the given lookup keys during runtime.
+
+#### Vector Search Table Source
+
+A `VectorSearchTableSource` searches an external storage system using an input vector and returns the most similar top-K rows during runtime. Users 
+can determine which algorithm to use to calculate the similarity between the input data and data stored in the external system. In general, most 
+vector databases support using Euclidean distance or Cosine distance to calculate similarity.
+
+Compared to `ScanTableSource`, the source does not have to read the entire table and can lazily fetch individual
+values from a (possibly continuously changing) external table when necessary.
+
+Compared to `ScanTableSource`, a `VectorSearchTableSource` currently only supports emitting insert-only changes.
+
+Compared to `LookupTableSource`, a `VectorSearchTableSource` does not use equality to determine whether a row matches.
+
+Further abilities are not supported. See the documentation of `org.apache.flink.table.connector.source.VectorSearchTableSource` for more information.
+
+The runtime implementation of a `VectorSearchTableSource` is a `TableFunction` or `AsyncTableFunction`. The function will be called with the given vector values during runtime.
 
 #### Source Abilities
 
@@ -282,7 +300,7 @@ will be called with values for the given lookup keys during runtime.
 </table>
 
 <span class="label label-danger">Attention</span> The interfaces above are currently only available for
-`ScanTableSource`, not for `LookupTableSource`.
+`ScanTableSource`, not for `LookupTableSource` or `VectorSearchTableSource`.
 
 ### Dynamic Table Sink
 
@@ -335,7 +353,7 @@ the `ParallelismProvider` interface.
         <td>Enables to write partitioned data in a <code>DynamicTableSink</code>.</td>
     </tr>
     <tr>
-        <td>{{< gh_link file="flink-table/flink-table-common/src/main/java/org/apache/flink/table/connector/source/abilities/SupportsBucketing.java" name="SupportsBucketing" >}}</td>
+        <td>{{< gh_link file="flink-table/flink-table-common/src/main/java/org/apache/flink/table/connector/sink/abilities/SupportsBucketing.java" name="SupportsBucketing" >}}</td>
         <td>Enables bucketing for a <code>DynamicTableSink</code>.</td>
     </tr>
     <tr>
@@ -472,6 +490,9 @@ import org.apache.flink.table.factories.DynamicTableSourceFactory;
 import org.apache.flink.table.factories.FactoryUtil;
 import org.apache.flink.table.types.DataType;
 
+import java.util.HashSet;
+import java.util.Set;
+
 public class SocketDynamicTableFactory implements DynamicTableSourceFactory {
 
   // define all options statically
@@ -557,6 +578,10 @@ import org.apache.flink.table.factories.FactoryUtil;
 import org.apache.flink.table.factories.DeserializationFormatFactory;
 import org.apache.flink.table.factories.DynamicTableFactory;
 
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
+
 public class ChangelogCsvFormatFactory implements DeserializationFormatFactory {
 
   // define all options statically
@@ -612,12 +637,12 @@ instances are parameterized to return internal data structures (i.e. `RowData`).
 
 ```java
 import org.apache.flink.api.common.serialization.DeserializationSchema;
+import org.apache.flink.legacy.table.connector.source.SourceFunctionProvider;
 import org.apache.flink.streaming.api.functions.source.SourceFunction;
 import org.apache.flink.table.connector.ChangelogMode;
 import org.apache.flink.table.connector.format.DecodingFormat;
 import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.connector.source.ScanTableSource;
-import org.apache.flink.table.connector.source.SourceFunctionProvider;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.types.DataType;
 
@@ -696,6 +721,8 @@ import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.types.RowKind;
 
+import java.util.List;
+
 public class ChangelogCsvFormat implements DecodingFormat<DeserializationSchema<RowData>> {
 
   private final String columnDelimiter;
@@ -710,8 +737,7 @@ public class ChangelogCsvFormat implements DecodingFormat<DeserializationSchema<
       DynamicTableSource.Context context,
       DataType producedDataType) {
     // create type information for the DeserializationSchema
-    final TypeInformation<RowData> producedTypeInfo = (TypeInformation<RowData>) context.createTypeInformation(
-      producedDataType);
+    final TypeInformation<RowData> producedTypeInfo = context.createTypeInformation(producedDataType);
 
     // most of the code in DeserializationSchema will not work on internal data structures
     // create a converter for conversion at the end
@@ -754,6 +780,9 @@ import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
 import org.apache.flink.types.Row;
 import org.apache.flink.types.RowKind;
+
+import java.util.List;
+import java.util.regex.Pattern;
 
 public class ChangelogCsvDeserializer implements DeserializationSchema<RowData> {
 
@@ -826,9 +855,13 @@ source function can only work with a parallelism of 1.
 import org.apache.flink.api.common.serialization.DeserializationSchema;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.java.typeutils.ResultTypeQueryable;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.source.RichSourceFunction;
 import org.apache.flink.table.data.RowData;
+
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 
 public class SocketSourceFunction extends RichSourceFunction<RowData> implements ResultTypeQueryable<RowData> {
 
@@ -850,11 +883,6 @@ public class SocketSourceFunction extends RichSourceFunction<RowData> implements
   @Override
   public TypeInformation<RowData> getProducedType() {
     return deserializer.getProducedType();
-  }
-
-  @Override
-  public void open(OpenContext openContext) throws Exception {
-    deserializer.open(() -> getRuntimeContext().getMetricGroup());
   }
 
   @Override

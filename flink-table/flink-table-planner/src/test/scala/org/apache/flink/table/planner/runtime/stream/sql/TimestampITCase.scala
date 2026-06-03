@@ -17,13 +17,12 @@
  */
 package org.apache.flink.table.planner.runtime.stream.sql
 
-import org.apache.flink.api.scala._
 import org.apache.flink.table.api._
 import org.apache.flink.table.api.bridge.scala._
+import org.apache.flink.table.planner.factories.TestValuesTableFactory
 import org.apache.flink.table.planner.runtime.utils.{StreamingTestBase, TestingRetractSink}
 import org.apache.flink.table.planner.runtime.utils.BatchTestBase.row
 import org.apache.flink.table.planner.utils.DateTimeTestUtil.localDateTime
-import org.apache.flink.table.planner.utils.TestDataTypeTableSourceWithTime
 import org.apache.flink.types.Row
 
 import org.assertj.core.api.Assertions.assertThat
@@ -39,23 +38,6 @@ class TimestampITCase extends StreamingTestBase {
   @BeforeEach
   override def before(): Unit = {
     super.before()
-
-    val tableSchema = TableSchema
-      .builder()
-      .fields(
-        Array("a", "b", "c", "d", "e"),
-        Array(
-          DataTypes.INT(),
-          DataTypes.BIGINT(),
-          DataTypes.TIMESTAMP(9),
-          // TODO: support high precision TIMESTAMP as timeAttributes
-          //  LegacyTypeInfoDataTypeConverter does not support TIMESTAMP(p) where p > 3
-          //  see TableSourceValidation::validateTimestampExtractorArguments
-          DataTypes.TIMESTAMP(3),
-          DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(9)
-        )
-      )
-      .build()
 
     val ints = List(1, 2, 3, 4, null)
 
@@ -77,7 +59,7 @@ class TimestampITCase extends StreamingTestBase {
       Timestamp.valueOf("1973-01-01 00:00:00").toLocalDateTime
     )
 
-    val instants = new mutable.MutableList[Instant]
+    val instants = new mutable.ListBuffer[Instant]
     for (i <- datetimes.indices) {
       if (datetimes(i) == null) {
         instants += null
@@ -88,13 +70,30 @@ class TimestampITCase extends StreamingTestBase {
       }
     }
 
-    val data = new mutable.MutableList[Row]
+    val data = new mutable.ListBuffer[Row]
 
     for (i <- ints.indices) {
       data += row(ints(i), longs(i), datetimes(i), timestamps(i), instants(i))
     }
 
-    TestDataTypeTableSourceWithTime.createTemporaryTable(tEnv, tableSchema, "T", data.seq, "d")
+    val dataId = TestValuesTableFactory.registerData(data.seq)
+    // TODO: support high precision TIMESTAMP as timeAttributes
+    //  LegacyTypeInfoDataTypeConverter does not support TIMESTAMP(p) where p > 3
+    //  see TableSourceValidation::validateTimestampExtractorArguments
+    tEnv.executeSql(s"""
+                       |create table T (
+                       |  a int,
+                       |  b bigint,
+                       |  c timestamp(9),
+                       |  d timestamp(3),
+                       |  e timestamp_ltz(9),
+                       |  watermark for d as d
+                       |) with (
+                       |  'connector' = 'values',
+                       |  'bounded' = 'true',
+                       |  'data-id' = '$dataId'
+                       |)
+                       |""".stripMargin)
   }
 
   @Test

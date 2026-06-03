@@ -17,8 +17,8 @@
 
 package org.apache.flink.runtime.taskexecutor;
 
+import org.apache.flink.api.common.ApplicationID;
 import org.apache.flink.api.common.JobID;
-import org.apache.flink.api.common.time.Time;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.testutils.AllCallbackWrapper;
 import org.apache.flink.core.testutils.BlockerSync;
@@ -75,6 +75,7 @@ import java.io.File;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.Collections;
 import java.util.Optional;
 import java.util.Set;
@@ -90,7 +91,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** Tests for the execution deployment-reconciliation logic in the {@link TaskExecutor}. */
 class TaskExecutorExecutionDeploymentReconciliationTest {
 
-    private static final Time timeout = Time.seconds(10L);
+    private static final Duration timeout = Duration.ofSeconds(10L);
 
     private final TestingHighAvailabilityServices haServices =
             new TestingHighAvailabilityServices();
@@ -99,6 +100,7 @@ class TaskExecutorExecutionDeploymentReconciliationTest {
     private final SettableLeaderRetrievalService resourceManagerLeaderRetriever =
             new SettableLeaderRetrievalService();
     private final JobID jobId = new JobID();
+    private final ApplicationID applicationId = new ApplicationID();
 
     @RegisterExtension
     static final TestExecutorExtension<ScheduledExecutorService> EXECUTOR_EXTENSION =
@@ -346,6 +348,7 @@ class TaskExecutorExecutionDeploymentReconciliationTest {
                 .requestSlot(
                         slotStatusOptional.get().getSlotID(),
                         jobId,
+                        applicationId,
                         allocationId,
                         ResourceProfile.ZERO,
                         jobMasterAddress,

@@ -20,7 +20,7 @@ package org.apache.flink.runtime.checkpoint;
 
 import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.core.execution.RestoreMode;
+import org.apache.flink.core.execution.RecoveryClaimMode;
 import org.apache.flink.core.execution.SavepointFormatType;
 import org.apache.flink.runtime.OperatorIDPair;
 import org.apache.flink.runtime.checkpoint.CheckpointCoordinatorTestingUtils.CheckpointCoordinatorBuilder;
@@ -47,7 +47,7 @@ import org.apache.flink.types.BooleanValue;
 import org.apache.flink.util.concurrent.Executors;
 import org.apache.flink.util.concurrent.ManuallyTriggeredScheduledExecutor;
 
-import org.apache.flink.shaded.guava32.com.google.common.collect.Iterables;
+import org.apache.flink.shaded.guava33.com.google.common.collect.Iterables;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -238,7 +238,9 @@ class CheckpointCoordinatorRestoringTest {
         final ExecutionGraph executionGraph = createExecutionGraph(vertices);
         final EmbeddedCompletedCheckpointStore store =
                 new EmbeddedCompletedCheckpointStore(
-                        completedCheckpoints.size(), completedCheckpoints, RestoreMode.DEFAULT);
+                        completedCheckpoints.size(),
+                        completedCheckpoints,
+                        RecoveryClaimMode.DEFAULT);
 
         // set up the coordinator and validate the initial state
         final CheckpointCoordinator coordinator =
@@ -659,7 +661,8 @@ class CheckpointCoordinatorRestoringTest {
 
         // prepare vertex1 state
         for (Tuple2<JobVertexID, OperatorID> id : Arrays.asList(id1, id2)) {
-            OperatorState taskState = new OperatorState(id.f1, parallelism1, maxParallelism1);
+            OperatorState taskState =
+                    new OperatorState(null, null, id.f1, parallelism1, maxParallelism1);
             operatorStates.put(id.f1, taskState);
             for (int index = 0; index < taskState.getParallelism(); index++) {
                 OperatorSubtaskState subtaskState =
@@ -679,7 +682,8 @@ class CheckpointCoordinatorRestoringTest {
                 new ArrayList<>();
         // prepare vertex2 state
         for (Tuple2<JobVertexID, OperatorID> id : Arrays.asList(id3, id4)) {
-            OperatorState operatorState = new OperatorState(id.f1, parallelism2, maxParallelism2);
+            OperatorState operatorState =
+                    new OperatorState(null, null, id.f1, parallelism2, maxParallelism2);
             operatorStates.put(id.f1, operatorState);
             List<ChainedStateHandle<OperatorStateHandle>> expectedManagedOperatorState =
                     new ArrayList<>();
@@ -780,7 +784,7 @@ class CheckpointCoordinatorRestoringTest {
         // set up the coordinator and validate the initial state
         SharedStateRegistry sharedStateRegistry =
                 SharedStateRegistry.DEFAULT_FACTORY.create(
-                        Executors.directExecutor(), emptyList(), RestoreMode.DEFAULT);
+                        Executors.directExecutor(), emptyList(), RecoveryClaimMode.DEFAULT);
         CheckpointCoordinator coord =
                 new CheckpointCoordinatorBuilder()
                         .setCompletedCheckpointStore(
@@ -1083,7 +1087,7 @@ class CheckpointCoordinatorRestoringTest {
         Map<OperatorID, OperatorState> operatorStates = new HashMap<>();
         operatorStates.put(
                 op1.getGeneratedOperatorID(),
-                new FullyFinishedOperatorState(op1.getGeneratedOperatorID(), 1, 1));
+                new FullyFinishedOperatorState(null, null, op1.getGeneratedOperatorID(), 1, 1));
         CompletedCheckpoint completedCheckpoint =
                 new CompletedCheckpoint(
                         graph.getJobID(),
@@ -1109,7 +1113,7 @@ class CheckpointCoordinatorRestoringTest {
                         .build(graph);
 
         ExecutionJobVertex vertex = graph.getJobVertex(jobVertexID);
-        coord.restoreInitialCheckpointIfPresent(Collections.singleton(vertex));
+        coord.restoreInitialCheckpointIfPresent(Collections.singleton(vertex), false);
         TaskStateSnapshot restoredState =
                 vertex.getTaskVertices()[0]
                         .getCurrentExecutionAttempt()
@@ -1155,10 +1159,70 @@ class CheckpointCoordinatorRestoringTest {
                                         })
                         .build(graph);
         restoreCoordinator.restoreInitialCheckpointIfPresent(
-                new HashSet<>(graph.getAllVertices().values()));
+                new HashSet<>(graph.getAllVertices().values()), false);
         assertThat(checked.get())
                 .as("The finished states should be checked when job is restored on startup")
                 .isTrue();
+    }
+
+    @Test
+    void testRestoreInitialCheckpointAllowsNonRestoredStateWhenTrue() throws Exception {
+        Tuple2<CheckpointCoordinator, ExecutionJobVertex> fixture = buildNonRestoredStateFixture();
+
+        assertThat(
+                        fixture.f0.restoreInitialCheckpointIfPresent(
+                                Collections.singleton(fixture.f1), true))
+                .isTrue();
+    }
+
+    @Test
+    void testRestoreInitialCheckpointRejectsNonRestoredStateWhenFalse() throws Exception {
+        Tuple2<CheckpointCoordinator, ExecutionJobVertex> fixture = buildNonRestoredStateFixture();
+
+        assertThatThrownBy(
+                        () ->
+                                fixture.f0.restoreInitialCheckpointIfPresent(
+                                        Collections.singleton(fixture.f1), false))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("There is no operator for the state");
+    }
+
+    private Tuple2<CheckpointCoordinator, ExecutionJobVertex> buildNonRestoredStateFixture()
+            throws Exception {
+        final JobVertexID jobVertexID = new JobVertexID();
+        ExecutionGraph graph =
+                new CheckpointCoordinatorTestingUtils.CheckpointExecutionGraphBuilder()
+                        .addJobVertex(jobVertexID, 1, 1)
+                        .build(EXECUTOR_RESOURCE.getExecutor());
+
+        OperatorID orphanedOperatorID = new OperatorID();
+        Map<OperatorID, OperatorState> operatorStates = new HashMap<>();
+        operatorStates.put(
+                orphanedOperatorID, new OperatorState(null, null, orphanedOperatorID, 1, 1));
+
+        CompletedCheckpoint completedCheckpoint =
+                new CompletedCheckpoint(
+                        graph.getJobID(),
+                        1,
+                        System.currentTimeMillis(),
+                        System.currentTimeMillis() + 3000,
+                        operatorStates,
+                        Collections.emptyList(),
+                        CheckpointProperties.forCheckpoint(
+                                CheckpointRetentionPolicy.NEVER_RETAIN_AFTER_TERMINATION),
+                        new TestCompletedCheckpointStorageLocation(),
+                        null);
+
+        CompletedCheckpointStore completedCheckpointStore = new EmbeddedCompletedCheckpointStore();
+        completedCheckpointStore.addCheckpointAndSubsumeOldestOne(
+                completedCheckpoint, new CheckpointsCleaner(), () -> {});
+
+        CheckpointCoordinator coord =
+                new CheckpointCoordinatorBuilder()
+                        .setCompletedCheckpointStore(completedCheckpointStore)
+                        .build(graph);
+
+        return Tuple2.of(coord, graph.getJobVertex(jobVertexID));
     }
 
     @Test

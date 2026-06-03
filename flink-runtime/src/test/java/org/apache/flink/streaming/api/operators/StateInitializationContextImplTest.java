@@ -37,7 +37,6 @@ import org.apache.flink.runtime.checkpoint.TaskStateSnapshot;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.metrics.groups.TaskIOMetricGroup;
 import org.apache.flink.runtime.operators.testutils.DummyEnvironment;
-import org.apache.flink.runtime.state.CheckpointableKeyedStateBackend;
 import org.apache.flink.runtime.state.DefaultOperatorStateBackend;
 import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.state.KeyGroupRangeOffsets;
@@ -46,6 +45,7 @@ import org.apache.flink.runtime.state.KeyGroupsStateHandle;
 import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.OperatorStateHandle;
 import org.apache.flink.runtime.state.OperatorStreamStateHandle;
+import org.apache.flink.runtime.state.PriorityQueueSetFactory;
 import org.apache.flink.runtime.state.StateBackend;
 import org.apache.flink.runtime.state.StateInitializationContextImpl;
 import org.apache.flink.runtime.state.StatePartitionStreamProvider;
@@ -54,8 +54,8 @@ import org.apache.flink.runtime.state.TaskStateManager;
 import org.apache.flink.runtime.state.TaskStateManagerImpl;
 import org.apache.flink.runtime.state.TestTaskLocalStateStore;
 import org.apache.flink.runtime.state.changelog.inmemory.InMemoryStateChangelogStorage;
+import org.apache.flink.runtime.state.hashmap.HashMapStateBackend;
 import org.apache.flink.runtime.state.memory.ByteStreamStateHandle;
-import org.apache.flink.runtime.state.memory.MemoryStateBackend;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.runtime.taskmanager.CheckpointResponder;
 import org.apache.flink.runtime.util.LongArrayList;
@@ -184,7 +184,7 @@ class StateInitializationContextImplTest {
 
         environment.setTaskStateManager(manager);
 
-        StateBackend stateBackend = new MemoryStateBackend(1024);
+        StateBackend stateBackend = new HashMapStateBackend();
         StreamTaskStateInitializer streamTaskStateManager =
                 new StreamTaskStateInitializerImpl(
                         environment,
@@ -196,7 +196,8 @@ class StateInitializationContextImplTest {
                             @Override
                             public <K> InternalTimeServiceManager<K> create(
                                     TaskIOMetricGroup taskIOMetricGroup,
-                                    CheckpointableKeyedStateBackend<K> keyedStatedBackend,
+                                    PriorityQueueSetFactory factory,
+                                    KeyGroupRange keyGroupRange,
                                     ClassLoader userClassloader,
                                     KeyContext keyContext,
                                     ProcessingTimeService processingTimeService,
@@ -229,6 +230,7 @@ class StateInitializationContextImplTest {
                         closableRegistry,
                         new UnregisteredMetricsGroup(),
                         1.0,
+                        false,
                         false);
 
         OptionalLong restoredCheckpointId = stateContext.getRestoredCheckpointId();

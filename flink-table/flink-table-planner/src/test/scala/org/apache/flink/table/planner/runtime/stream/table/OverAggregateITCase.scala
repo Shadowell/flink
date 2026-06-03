@@ -17,7 +17,7 @@
  */
 package org.apache.flink.table.planner.runtime.stream.table
 
-import org.apache.flink.api.scala._
+import org.apache.flink.api.common.typeinfo.TypeInformation
 import org.apache.flink.table.api._
 import org.apache.flink.table.api.Expressions.$
 import org.apache.flink.table.api.bridge.scala._
@@ -28,7 +28,6 @@ import org.apache.flink.table.planner.runtime.utils.StreamingWithStateTestBase.S
 import org.apache.flink.table.planner.runtime.utils.TimeTestUtil.EventTimeProcessOperator
 import org.apache.flink.table.planner.utils.CountAggFunction
 import org.apache.flink.testutils.junit.extensions.parameterized.ParameterizedTestExtension
-import org.apache.flink.types.Row
 
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.{BeforeEach, TestTemplate}
@@ -162,8 +161,11 @@ class OverAggregateITCase(mode: StateBackendMode) extends StreamingWithStateTest
 
     val source = failingDataSource(data)
     val table = source
-      .transform("TimeAssigner", new EventTimeProcessOperator[(Int, Long, String)])
-      .setParallelism(source.parallelism)
+      .transform(
+        "TimeAssigner",
+        implicitly[TypeInformation[(Int, Long, String)]],
+        new EventTimeProcessOperator[(Int, Long, String)])
+      .setParallelism(source.getParallelism)
       .toTable(tEnv, 'a, 'b, 'c, 'rowtime.rowtime)
     val countFun = new CountAggFunction
     val weightAvgFun = new WeightedAvg
@@ -200,7 +202,7 @@ class OverAggregateITCase(mode: StateBackendMode) extends StreamingWithStateTest
     windowedTable.toDataStream.addSink(sink)
     env.execute()
 
-    val expected = mutable.MutableList(
+    val expected = mutable.ListBuffer(
       "1,1,Hello,6,SUM:6,3,4,4,[2, 3],2,3,1,1,2,2",
       "1,2,Hello,6,SUM:6,3,4,4,[2, 3],2,3,1,1,2,2",
       "1,3,Hello world,6,SUM:6,3,4,4,[2, 3],2,3,1,1,2,2",
@@ -241,8 +243,11 @@ class OverAggregateITCase(mode: StateBackendMode) extends StreamingWithStateTest
 
     val source = failingDataSource(data)
     val table = source
-      .transform("TimeAssigner", new EventTimeProcessOperator[(Int, Long, String)])
-      .setParallelism(source.parallelism)
+      .transform(
+        "TimeAssigner",
+        implicitly[TypeInformation[(Int, Long, String)]],
+        new EventTimeProcessOperator[(Int, Long, String)])
+      .setParallelism(source.getParallelism)
       .toTable(tEnv, 'a, 'b, 'c, 'rowtime.rowtime)
 
     val windowedTable = table
@@ -302,8 +307,11 @@ class OverAggregateITCase(mode: StateBackendMode) extends StreamingWithStateTest
 
     val source = failingDataSource(data)
     val table = source
-      .transform("TimeAssigner", new EventTimeProcessOperator[(Int, Long, String)])
-      .setParallelism(source.parallelism)
+      .transform(
+        "TimeAssigner",
+        implicitly[TypeInformation[(Int, Long, String)]],
+        new EventTimeProcessOperator[(Int, Long, String)])
+      .setParallelism(source.getParallelism)
       .toTable(tEnv, 'a, 'b, 'c, 'rowtime.rowtime)
 
     val windowedTable = table
@@ -358,8 +366,11 @@ class OverAggregateITCase(mode: StateBackendMode) extends StreamingWithStateTest
 
     val source = failingDataSource(data)
     val table = source
-      .transform("TimeAssigner", new EventTimeProcessOperator[(Int, Long, String)])
-      .setParallelism(source.parallelism)
+      .transform(
+        "TimeAssigner",
+        implicitly[TypeInformation[(Int, Long, String)]],
+        new EventTimeProcessOperator[(Int, Long, String)])
+      .setParallelism(source.getParallelism)
       .toTable(tEnv, 'a, 'b, 'c, 'rowtime.rowtime)
 
     val windowedTable = table
@@ -414,8 +425,11 @@ class OverAggregateITCase(mode: StateBackendMode) extends StreamingWithStateTest
 
     val source = failingDataSource(data)
     val table = source
-      .transform("TimeAssigner", new EventTimeProcessOperator[(Int, Long, String)])
-      .setParallelism(source.parallelism)
+      .transform(
+        "TimeAssigner",
+        implicitly[TypeInformation[(Int, Long, String)]],
+        new EventTimeProcessOperator[(Int, Long, String)])
+      .setParallelism(source.getParallelism)
       .toTable(tEnv, 'a, 'b, 'c, 'rowtime.rowtime)
 
     val windowedTable = table
@@ -488,7 +502,7 @@ class OverAggregateITCase(mode: StateBackendMode) extends StreamingWithStateTest
     windowedTable.toDataStream.addSink(sink)
     env.execute()
 
-    val expected = mutable.MutableList(
+    val expected = mutable.ListBuffer(
       "1,0,0,1",
       "2,1,1,1",
       "2,3,1,2",
@@ -549,7 +563,7 @@ class OverAggregateITCase(mode: StateBackendMode) extends StreamingWithStateTest
     windowedTable.toDataStream.addSink(sink)
     env.execute()
 
-    val expected = mutable.MutableList(
+    val expected = mutable.ListBuffer(
       "1,0,0,1",
       "2,1,1,1",
       "2,3,1,2",
@@ -597,8 +611,11 @@ class OverAggregateITCase(mode: StateBackendMode) extends StreamingWithStateTest
     val countDist = new CountDistinctWithRetractAndReset
     val source = failingDataSource(data)
     val table = source
-      .transform("TimeAssigner", new EventTimeProcessOperator[(Long, Int, String)])
-      .setParallelism(source.parallelism)
+      .transform(
+        "TimeAssigner",
+        implicitly[TypeInformation[(Long, Int, String)]],
+        new EventTimeProcessOperator[(Long, Int, String)])
+      .setParallelism(source.getParallelism)
       .toTable(tEnv, 'a, 'b, 'c, 'rowtime.rowtime)
 
     val windowedTable = table
@@ -610,7 +627,7 @@ class OverAggregateITCase(mode: StateBackendMode) extends StreamingWithStateTest
     windowedTable.toDataStream.addSink(sink)
     env.execute()
 
-    val expected = mutable.MutableList(
+    val expected = mutable.ListBuffer(
       "Hello,1,1,1,1",
       "Hello,1,2,2,1",
       "Hello,1,3,3,1",
@@ -670,8 +687,11 @@ class OverAggregateITCase(mode: StateBackendMode) extends StreamingWithStateTest
     val countDist = new CountDistinctWithRetractAndReset
     val source = failingDataSource(data)
     val table = source
-      .transform("TimeAssigner", new EventTimeProcessOperator[(Long, Int, String)])
-      .setParallelism(source.parallelism)
+      .transform(
+        "TimeAssigner",
+        implicitly[TypeInformation[(Long, Int, String)]],
+        new EventTimeProcessOperator[(Long, Int, String)])
+      .setParallelism(source.getParallelism)
       .toTable(tEnv, 'a, 'b, 'c, 'rowtime.rowtime)
 
     val windowedTable = table
@@ -683,7 +703,7 @@ class OverAggregateITCase(mode: StateBackendMode) extends StreamingWithStateTest
     windowedTable.toDataStream.addSink(sink)
     env.execute()
 
-    val expected = mutable.MutableList(
+    val expected = mutable.ListBuffer(
       "Hello,1,1,1,1",
       "Hello,15,2,2,1",
       "Hello,16,3,3,1",
@@ -722,8 +742,11 @@ class OverAggregateITCase(mode: StateBackendMode) extends StreamingWithStateTest
 
     val source = failingDataSource(data)
     val table = source
-      .transform("TimeAssigner", new EventTimeProcessOperator[(Long, Int, String)])
-      .setParallelism(source.parallelism)
+      .transform(
+        "TimeAssigner",
+        implicitly[TypeInformation[(Long, Int, String)]],
+        new EventTimeProcessOperator[(Long, Int, String)])
+      .setParallelism(source.getParallelism)
       .toTable(tEnv, 'a, 'b, 'c, 'rowtime.rowtime)
 
     val windowedTable = table
@@ -735,7 +758,7 @@ class OverAggregateITCase(mode: StateBackendMode) extends StreamingWithStateTest
     windowedTable.toDataStream.addSink(sink)
     env.execute()
 
-    val expected = mutable.MutableList(
+    val expected = mutable.ListBuffer(
       "Hello World,20,2,2",
       "Hello World,7,1,1",
       "Hello,1,1,1",

@@ -25,24 +25,23 @@ import org.apache.flink.api.common.serialization.SerializerConfigImpl;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.connector.source.Boundedness;
-import org.apache.flink.api.java.io.CollectionInputFormat;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.connector.source.DynamicFilteringValuesSource;
 import org.apache.flink.connector.source.TerminatingLogic;
 import org.apache.flink.connector.source.ValuesSource;
+import org.apache.flink.legacy.table.connector.source.SourceFunctionProvider;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSink;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.sink.SinkFunction;
-import org.apache.flink.streaming.api.functions.source.FromElementsFunction;
-import org.apache.flink.streaming.api.functions.source.SourceFunction;
+import org.apache.flink.streaming.api.functions.sink.legacy.SinkFunction;
+import org.apache.flink.streaming.api.functions.source.legacy.FromElementsFunction;
+import org.apache.flink.streaming.api.functions.source.legacy.SourceFunction;
+import org.apache.flink.streaming.api.legacy.io.CollectionInputFormat;
 import org.apache.flink.table.api.TableException;
-import org.apache.flink.table.api.TableSchema;
 import org.apache.flink.table.api.ValidationException;
-import org.apache.flink.table.api.WatermarkSpec;
 import org.apache.flink.table.catalog.CatalogTable;
 import org.apache.flink.table.catalog.TableDistribution;
 import org.apache.flink.table.connector.ChangelogMode;
@@ -51,24 +50,24 @@ import org.apache.flink.table.connector.RuntimeConverter;
 import org.apache.flink.table.connector.sink.DataStreamSinkProvider;
 import org.apache.flink.table.connector.sink.DynamicTableSink;
 import org.apache.flink.table.connector.sink.OutputFormatProvider;
-import org.apache.flink.table.connector.sink.SinkFunctionProvider;
 import org.apache.flink.table.connector.sink.abilities.SupportsBucketing;
 import org.apache.flink.table.connector.sink.abilities.SupportsOverwrite;
 import org.apache.flink.table.connector.sink.abilities.SupportsPartitioning;
+import org.apache.flink.table.connector.sink.abilities.SupportsTargetColumnWriting;
 import org.apache.flink.table.connector.sink.abilities.SupportsWritingMetadata;
-import org.apache.flink.table.connector.source.AsyncTableFunctionProvider;
+import org.apache.flink.table.connector.sink.legacy.SinkFunctionProvider;
 import org.apache.flink.table.connector.source.DataStreamScanProvider;
 import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.connector.source.InputFormatProvider;
 import org.apache.flink.table.connector.source.LookupTableSource;
 import org.apache.flink.table.connector.source.ScanTableSource;
-import org.apache.flink.table.connector.source.SourceFunctionProvider;
 import org.apache.flink.table.connector.source.SourceProvider;
-import org.apache.flink.table.connector.source.TableFunctionProvider;
+import org.apache.flink.table.connector.source.VectorSearchTableSource;
 import org.apache.flink.table.connector.source.abilities.SupportsAggregatePushDown;
 import org.apache.flink.table.connector.source.abilities.SupportsDynamicFiltering;
 import org.apache.flink.table.connector.source.abilities.SupportsFilterPushDown;
 import org.apache.flink.table.connector.source.abilities.SupportsLimitPushDown;
+import org.apache.flink.table.connector.source.abilities.SupportsLookupCustomShuffle;
 import org.apache.flink.table.connector.source.abilities.SupportsPartitionPushDown;
 import org.apache.flink.table.connector.source.abilities.SupportsProjectionPushDown;
 import org.apache.flink.table.connector.source.abilities.SupportsReadingMetadata;
@@ -84,6 +83,8 @@ import org.apache.flink.table.connector.source.lookup.cache.DefaultLookupCache;
 import org.apache.flink.table.connector.source.lookup.cache.LookupCache;
 import org.apache.flink.table.connector.source.lookup.cache.trigger.CacheReloadTrigger;
 import org.apache.flink.table.connector.source.lookup.cache.trigger.PeriodicCacheReloadTrigger;
+import org.apache.flink.table.connector.source.search.AsyncVectorSearchFunctionProvider;
+import org.apache.flink.table.connector.source.search.VectorSearchFunctionProvider;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.util.DataFormatConverters;
@@ -95,9 +96,15 @@ import org.apache.flink.table.factories.DynamicTableSourceFactory;
 import org.apache.flink.table.factories.FactoryUtil;
 import org.apache.flink.table.functions.AsyncLookupFunction;
 import org.apache.flink.table.functions.AsyncTableFunction;
+import org.apache.flink.table.functions.AsyncVectorSearchFunction;
 import org.apache.flink.table.functions.FunctionDefinition;
 import org.apache.flink.table.functions.LookupFunction;
 import org.apache.flink.table.functions.TableFunction;
+import org.apache.flink.table.functions.VectorSearchFunction;
+import org.apache.flink.table.legacy.api.TableSchema;
+import org.apache.flink.table.legacy.api.WatermarkSpec;
+import org.apache.flink.table.legacy.connector.source.AsyncTableFunctionProvider;
+import org.apache.flink.table.legacy.connector.source.TableFunctionProvider;
 import org.apache.flink.table.planner.codegen.CodeGeneratorContext;
 import org.apache.flink.table.planner.codegen.ProjectionCodeGenerator;
 import org.apache.flink.table.planner.factories.TestValuesRuntimeFunctions.AppendingOutputFormat;
@@ -131,6 +138,7 @@ import org.apache.flink.types.Row;
 import org.apache.flink.types.RowKind;
 import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.InstantiationUtil;
+import org.apache.flink.util.Preconditions;
 
 import javax.annotation.Nullable;
 
@@ -187,6 +195,10 @@ public final class TestValuesTableFactory
     private static final AtomicInteger idCounter = new AtomicInteger(0);
     private static final Map<String, Collection<Row>> registeredData = new HashMap<>();
     private static final Map<String, Collection<RowData>> registeredRowData = new HashMap<>();
+    // The difference between registeredConsumedData and `registeredData` is that
+    // `registeredData` is used for data delivered from the source to downstream, while the rows in
+    // `registeredConsumedData` will not be sent to downstream and are only used for lookup.
+    private static final Map<String, Collection<Row>> registeredConsumedData = new HashMap<>();
 
     /**
      * Register the given data into the data factory context and return the data id. The data id can
@@ -222,6 +234,20 @@ public final class TestValuesTableFactory
      */
     public static String registerRowData(Seq<RowData> data) {
         return registerRowData(JavaScalaConversionUtil.toJava(data));
+    }
+
+    /**
+     * Register the given data into the data factory context with the specified id. The data id can
+     * be generated by {@link #registerData}.
+     *
+     * <p>Different with {@link #registerData}, the consumed data registered by this function will
+     * not be re-consumed by the source to be sent to downstream operators.
+     */
+    public static void registerConsumedData(Collection<Row> data, String id) {
+        if (registeredConsumedData.containsKey(id)) {
+            throw new IllegalArgumentException("Consumed data already exists");
+        }
+        registeredConsumedData.put(id, data);
     }
 
     /**
@@ -291,6 +317,7 @@ public final class TestValuesTableFactory
     public static void clearAllData() {
         registeredData.clear();
         registeredRowData.clear();
+        registeredConsumedData.clear();
         TestValuesRuntimeFunctions.clearResults();
     }
 
@@ -386,6 +413,9 @@ public final class TestValuesTableFactory
     private static final ConfigOption<Boolean> DISABLE_LOOKUP =
             ConfigOptions.key("disable-lookup").booleanType().defaultValue(false);
 
+    private static final ConfigOption<Boolean> ENABLE_VECTOR_SEARCH =
+            ConfigOptions.key("enable-vector-search").booleanType().defaultValue(false);
+
     private static final ConfigOption<Boolean> SINK_INSERT_ONLY =
             ConfigOptions.key("sink-insert-only").booleanType().defaultValue(true);
 
@@ -394,6 +424,9 @@ public final class TestValuesTableFactory
 
     private static final ConfigOption<Boolean> ENABLE_PROJECTION_PUSH_DOWN =
             ConfigOptions.key("enable-projection-push-down").booleanType().defaultValue(true);
+
+    private static final ConfigOption<Boolean> ENABLE_AGGREGATE_PUSH_DOWN =
+            ConfigOptions.key("enable-aggregate-push-down").booleanType().defaultValue(true);
 
     private static final ConfigOption<Boolean> NESTED_PROJECTION_SUPPORTED =
             ConfigOptions.key("nested-projection-supported").booleanType().defaultValue(false);
@@ -406,6 +439,18 @@ public final class TestValuesTableFactory
 
     private static final ConfigOption<Boolean> ENABLE_WATERMARK_PUSH_DOWN =
             ConfigOptions.key("enable-watermark-push-down").booleanType().defaultValue(false);
+
+    private static final ConfigOption<Boolean> ENABLE_METADATA_FILTER_PUSH_DOWN =
+            ConfigOptions.key("enable-metadata-filter-push-down").booleanType().defaultValue(false);
+
+    private static final ConfigOption<Boolean> ENABLE_CUSTOM_SHUFFLE =
+            ConfigOptions.key("enable-custom-shuffle").booleanType().defaultValue(false);
+
+    private static final ConfigOption<Boolean> CUSTOM_SHUFFLE_DETERMINISTIC =
+            ConfigOptions.key("custom-shuffle-deterministic").booleanType().defaultValue(true);
+
+    private static final ConfigOption<Boolean> CUSTOM_SHUFFLE_EMPTY_PARTITIONER =
+            ConfigOptions.key("custom-shuffle-empty-partitioner").booleanType().defaultValue(false);
 
     private static final ConfigOption<Boolean> INTERNAL_DATA =
             ConfigOptions.key("register-internal-data")
@@ -444,6 +489,22 @@ public final class TestValuesTableFactory
                     .withDescription(
                             "Option to determine whether or not to require the distribution bucket count");
 
+    private static final ConfigOption<Boolean> SINK_SUPPORTS_DELETE_BY_KEY =
+            ConfigOptions.key("sink.supports-delete-by-key")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Option to determine whether or not to require deletes to have the"
+                                    + " entire row or is a delete by key sufficient.");
+
+    private static final ConfigOption<Boolean> SOURCE_PRODUCES_DELETE_BY_KEY =
+            ConfigOptions.key("source.produces-delete-by-key")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Option to determine whether or not to require deletes to have the"
+                                    + " entire row or is a delete by key sufficient.");
+
     private static final ConfigOption<Integer> SOURCE_NUM_ELEMENT_TO_SKIP =
             ConfigOptions.key("source.num-element-to-skip")
                     .intType()
@@ -465,6 +526,14 @@ public final class TestValuesTableFactory
                     .withDescription(
                             "Option to specify the amount of time to sleep after processing every N elements. "
                                     + "The default value is 0, which means that no sleep is performed");
+
+    public static final ConfigOption<Integer> LATENCY =
+            ConfigOptions.key("latency")
+                    .intType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "Latency in milliseconds for async vector search call for each row. "
+                                    + "If not set, the default is random between 0ms and 1000ms.");
 
     /**
      * Parse partition list from Options with the format as
@@ -491,7 +560,10 @@ public final class TestValuesTableFactory
 
         helper.validate();
 
-        ChangelogMode changelogMode = parseChangelogMode(helper.getOptions().get(CHANGELOG_MODE));
+        ChangelogMode changelogMode =
+                parseChangelogMode(
+                        helper.getOptions().get(CHANGELOG_MODE),
+                        helper.getOptions().get(SOURCE_PRODUCES_DELETE_BY_KEY));
         String runtimeSource = helper.getOptions().get(RUNTIME_SOURCE);
         boolean isBounded = helper.getOptions().get(BOUNDED);
         boolean isFinite = helper.getOptions().get(TERMINATING);
@@ -500,15 +572,24 @@ public final class TestValuesTableFactory
         boolean isAsync = helper.getOptions().get(ASYNC_ENABLED);
         String lookupFunctionClass = helper.getOptions().get(LOOKUP_FUNCTION_CLASS);
         boolean disableLookup = helper.getOptions().get(DISABLE_LOOKUP);
+        boolean enableVectorSearch = helper.getOptions().get(ENABLE_VECTOR_SEARCH);
         boolean enableProjectionPushDown = helper.getOptions().get(ENABLE_PROJECTION_PUSH_DOWN);
+        boolean enableAggregatePushDown = helper.getOptions().get(ENABLE_AGGREGATE_PUSH_DOWN);
         boolean nestedProjectionSupported = helper.getOptions().get(NESTED_PROJECTION_SUPPORTED);
         boolean enableWatermarkPushDown = helper.getOptions().get(ENABLE_WATERMARK_PUSH_DOWN);
+        boolean enableMetadataFilterPushDown =
+                helper.getOptions().get(ENABLE_METADATA_FILTER_PUSH_DOWN);
         boolean failingSource = helper.getOptions().get(FAILING_SOURCE);
         int numElementToSkip = helper.getOptions().get(SOURCE_NUM_ELEMENT_TO_SKIP);
         boolean internalData = helper.getOptions().get(INTERNAL_DATA);
         int lookupThreshold = helper.getOptions().get(LOOKUP_THRESHOLD);
         int sleepAfterElements = helper.getOptions().get(SOURCE_SLEEP_AFTER_ELEMENTS);
         long sleepTimeMillis = helper.getOptions().get(SOURCE_SLEEP_TIME).toMillis();
+        boolean enableCustomShuffle = helper.getOptions().get(ENABLE_CUSTOM_SHUFFLE);
+        boolean customShuffleIsDeterministic =
+                helper.getOptions().get(CUSTOM_SHUFFLE_DETERMINISTIC);
+        boolean customShuffleEmptyPartitioner =
+                helper.getOptions().get(CUSTOM_SHUFFLE_EMPTY_PARTITIONER);
         Integer parallelism = helper.getOptions().get(SOURCE_PARALLELISM);
         DefaultLookupCache cache = null;
         if (helper.getOptions().get(CACHE_TYPE).equals(LookupOptions.LookupCacheType.PARTIAL)) {
@@ -585,52 +666,12 @@ public final class TestValuesTableFactory
                         partitions,
                         readableMetadata,
                         null,
-                        parallelism);
+                        parallelism,
+                        enableAggregatePushDown);
             }
 
-            if (disableLookup) {
-                if (enableWatermarkPushDown) {
-                    return new TestValuesScanTableSourceWithWatermarkPushDown(
-                            producedDataType,
-                            changelogMode,
-                            terminating,
-                            runtimeSource,
-                            failingSource,
-                            partition2Rows,
-                            context.getObjectIdentifier().getObjectName(),
-                            nestedProjectionSupported,
-                            null,
-                            Collections.emptyList(),
-                            filterableFieldsSet,
-                            dynamicFilteringFieldsSet,
-                            numElementToSkip,
-                            Long.MAX_VALUE,
-                            partitions,
-                            readableMetadata,
-                            null);
-                } else {
-                    return new TestValuesScanTableSource(
-                            producedDataType,
-                            changelogMode,
-                            boundedness,
-                            terminating,
-                            runtimeSource,
-                            failingSource,
-                            partition2Rows,
-                            nestedProjectionSupported,
-                            null,
-                            Collections.emptyList(),
-                            filterableFieldsSet,
-                            dynamicFilteringFieldsSet,
-                            numElementToSkip,
-                            Long.MAX_VALUE,
-                            partitions,
-                            readableMetadata,
-                            null);
-                }
-            } else {
-                return new TestValuesScanLookupTableSource(
-                        context.getCatalogTable().getResolvedSchema().toPhysicalRowDataType(),
+            if (enableVectorSearch) {
+                return new TestValuesVectorSearchTableSourceWithoutProjectionPushDown(
                         producedDataType,
                         changelogMode,
                         boundedness,
@@ -638,8 +679,6 @@ public final class TestValuesTableFactory
                         runtimeSource,
                         failingSource,
                         partition2Rows,
-                        isAsync,
-                        lookupFunctionClass,
                         nestedProjectionSupported,
                         null,
                         Collections.emptyList(),
@@ -650,9 +689,122 @@ public final class TestValuesTableFactory
                         partitions,
                         readableMetadata,
                         null,
-                        cache,
-                        reloadTrigger,
-                        lookupThreshold);
+                        parallelism,
+                        enableAggregatePushDown,
+                        isAsync,
+                        helper.getOptions().get(LATENCY));
+            }
+
+            if (disableLookup) {
+                if (enableWatermarkPushDown) {
+                    TestValuesScanTableSourceWithWatermarkPushDown source =
+                            new TestValuesScanTableSourceWithWatermarkPushDown(
+                                    producedDataType,
+                                    changelogMode,
+                                    terminating,
+                                    runtimeSource,
+                                    failingSource,
+                                    partition2Rows,
+                                    context.getObjectIdentifier().getObjectName(),
+                                    nestedProjectionSupported,
+                                    null,
+                                    Collections.emptyList(),
+                                    filterableFieldsSet,
+                                    dynamicFilteringFieldsSet,
+                                    numElementToSkip,
+                                    Long.MAX_VALUE,
+                                    partitions,
+                                    readableMetadata,
+                                    null,
+                                    enableAggregatePushDown);
+                    source.setEnableMetadataFilterPushDown(enableMetadataFilterPushDown);
+                    return source;
+                } else {
+                    TestValuesScanTableSource source =
+                            new TestValuesScanTableSource(
+                                    producedDataType,
+                                    changelogMode,
+                                    boundedness,
+                                    terminating,
+                                    runtimeSource,
+                                    failingSource,
+                                    partition2Rows,
+                                    nestedProjectionSupported,
+                                    null,
+                                    Collections.emptyList(),
+                                    filterableFieldsSet,
+                                    dynamicFilteringFieldsSet,
+                                    numElementToSkip,
+                                    Long.MAX_VALUE,
+                                    partitions,
+                                    readableMetadata,
+                                    null,
+                                    enableAggregatePushDown);
+                    source.setEnableMetadataFilterPushDown(enableMetadataFilterPushDown);
+                    return source;
+                }
+            } else {
+                Collection<Row> consumedData =
+                        registeredConsumedData.getOrDefault(dataId, Collections.emptyList());
+                if (enableCustomShuffle) {
+                    return new TestValuesScanLookupTableSourceWithCustomShuffle(
+                            context.getCatalogTable().getResolvedSchema().toPhysicalRowDataType(),
+                            producedDataType,
+                            changelogMode,
+                            boundedness,
+                            terminating,
+                            runtimeSource,
+                            failingSource,
+                            partition2Rows,
+                            consumedData,
+                            isAsync,
+                            lookupFunctionClass,
+                            nestedProjectionSupported,
+                            null,
+                            Collections.emptyList(),
+                            filterableFieldsSet,
+                            dynamicFilteringFieldsSet,
+                            numElementToSkip,
+                            Long.MAX_VALUE,
+                            partitions,
+                            readableMetadata,
+                            null,
+                            cache,
+                            reloadTrigger,
+                            lookupThreshold,
+                            enableAggregatePushDown,
+                            customShuffleIsDeterministic,
+                            customShuffleEmptyPartitioner,
+                            context.getPrimaryKeyIndexes());
+                } else {
+                    return new TestValuesScanLookupTableSource(
+                            context.getCatalogTable().getResolvedSchema().toPhysicalRowDataType(),
+                            producedDataType,
+                            changelogMode,
+                            boundedness,
+                            terminating,
+                            runtimeSource,
+                            failingSource,
+                            partition2Rows,
+                            consumedData,
+                            isAsync,
+                            lookupFunctionClass,
+                            nestedProjectionSupported,
+                            null,
+                            Collections.emptyList(),
+                            filterableFieldsSet,
+                            dynamicFilteringFieldsSet,
+                            numElementToSkip,
+                            Long.MAX_VALUE,
+                            partitions,
+                            readableMetadata,
+                            null,
+                            cache,
+                            reloadTrigger,
+                            lookupThreshold,
+                            enableAggregatePushDown,
+                            context.getPrimaryKeyIndexes());
+                }
             }
         } else {
             try {
@@ -694,6 +846,7 @@ public final class TestValuesTableFactory
                 TableSchemaUtils.getPhysicalSchema(context.getCatalogTable().getSchema());
 
         boolean requireBucketCount = helper.getOptions().get(SINK_BUCKET_COUNT_REQUIRED);
+        boolean supportsDeleteByKey = helper.getOptions().get(SINK_SUPPORTS_DELETE_BY_KEY);
         if (sinkClass.equals("DEFAULT")) {
             int rowTimeIndex =
                     validateAndExtractRowtimeIndex(
@@ -710,7 +863,9 @@ public final class TestValuesTableFactory
                     changelogMode,
                     rowTimeIndex,
                     tableSchema,
-                    requireBucketCount);
+                    requireBucketCount,
+                    supportsDeleteByKey,
+                    null);
         } else {
             try {
                 return InstantiationUtil.instantiate(
@@ -743,12 +898,14 @@ public final class TestValuesTableFactory
                         LOOKUP_THRESHOLD,
                         ASYNC_ENABLED,
                         DISABLE_LOOKUP,
+                        ENABLE_VECTOR_SEARCH,
                         TABLE_SOURCE_CLASS,
                         TABLE_SINK_CLASS,
                         SINK_INSERT_ONLY,
                         RUNTIME_SINK,
                         SINK_EXPECTED_MESSAGES_NUM,
                         ENABLE_PROJECTION_PUSH_DOWN,
+                        ENABLE_AGGREGATE_PUSH_DOWN,
                         NESTED_PROJECTION_SUPPORTED,
                         FILTERABLE_FIELDS,
                         DYNAMIC_FILTERING_FIELDS,
@@ -758,12 +915,18 @@ public final class TestValuesTableFactory
                         SINK_CHANGELOG_MODE_ENFORCED,
                         WRITABLE_METADATA,
                         ENABLE_WATERMARK_PUSH_DOWN,
+                        ENABLE_METADATA_FILTER_PUSH_DOWN,
                         SINK_DROP_LATE_EVENT,
                         SINK_BUCKET_COUNT_REQUIRED,
+                        SINK_SUPPORTS_DELETE_BY_KEY,
+                        SOURCE_PRODUCES_DELETE_BY_KEY,
                         SOURCE_NUM_ELEMENT_TO_SKIP,
                         SOURCE_SLEEP_AFTER_ELEMENTS,
                         SOURCE_SLEEP_TIME,
                         SOURCE_PARALLELISM,
+                        ENABLE_CUSTOM_SHUFFLE,
+                        CUSTOM_SHUFFLE_DETERMINISTIC,
+                        CUSTOM_SHUFFLE_EMPTY_PARTITIONER,
                         INTERNAL_DATA,
                         CACHE_TYPE,
                         PARTIAL_CACHE_EXPIRE_AFTER_ACCESS,
@@ -774,7 +937,8 @@ public final class TestValuesTableFactory
                         FULL_CACHE_PERIODIC_RELOAD_INTERVAL,
                         FULL_CACHE_PERIODIC_RELOAD_SCHEDULE_MODE,
                         FULL_CACHE_TIMED_RELOAD_ISO_TIME,
-                        FULL_CACHE_TIMED_RELOAD_INTERVAL_IN_DAYS));
+                        FULL_CACHE_TIMED_RELOAD_INTERVAL_IN_DAYS,
+                        LATENCY));
     }
 
     private static int validateAndExtractRowtimeIndex(
@@ -857,6 +1021,10 @@ public final class TestValuesTableFactory
     }
 
     private ChangelogMode parseChangelogMode(String string) {
+        return parseChangelogMode(string, false);
+    }
+
+    private ChangelogMode parseChangelogMode(String string, boolean producesDeleteByKey) {
         ChangelogMode.Builder builder = ChangelogMode.newBuilder();
         for (String split : string.split(",")) {
             switch (split.trim()) {
@@ -876,6 +1044,7 @@ public final class TestValuesTableFactory
                     throw new IllegalArgumentException("Invalid ChangelogMode string: " + string);
             }
         }
+        builder.keyOnlyDeletes(producesDeleteByKey);
         return builder.build();
     }
 
@@ -930,11 +1099,13 @@ public final class TestValuesTableFactory
         protected List<Map<String, String>> allPartitions;
         protected final Map<String, DataType> readableMetadata;
         protected @Nullable int[] projectedMetadataFields;
+        protected final boolean enableAggregatePushDown;
+        protected boolean enableMetadataFilterPushDown;
 
         private @Nullable int[] groupingSet;
         private List<AggregateExpression> aggregateExpressions;
         private List<String> acceptedPartitionFilterFields;
-        private final Integer parallelism;
+        protected final Integer parallelism;
 
         private TestValuesScanTableSourceWithoutProjectionPushDown(
                 DataType producedDataType,
@@ -954,7 +1125,8 @@ public final class TestValuesTableFactory
                 List<Map<String, String>> allPartitions,
                 Map<String, DataType> readableMetadata,
                 @Nullable int[] projectedMetadataFields,
-                @Nullable Integer parallelism) {
+                @Nullable Integer parallelism,
+                boolean enableAggregatePushDown) {
             this.producedDataType = producedDataType;
             this.changelogMode = changelogMode;
             this.boundedness = boundedness;
@@ -975,6 +1147,7 @@ public final class TestValuesTableFactory
             this.groupingSet = null;
             this.aggregateExpressions = Collections.emptyList();
             this.parallelism = parallelism;
+            this.enableAggregatePushDown = enableAggregatePushDown;
         }
 
         @Override
@@ -1143,7 +1316,8 @@ public final class TestValuesTableFactory
                     allPartitions,
                     readableMetadata,
                     projectedMetadataFields,
-                    parallelism);
+                    parallelism,
+                    enableAggregatePushDown);
         }
 
         @Override
@@ -1395,6 +1569,9 @@ public final class TestValuesTableFactory
                 List<int[]> groupingSets,
                 List<AggregateExpression> aggregateExpressions,
                 DataType producedDataType) {
+            if (!enableAggregatePushDown) {
+                return false;
+            }
             // This TestValuesScanTableSource only supports single group aggregate ar present.
             if (groupingSets.size() > 1) {
                 return false;
@@ -1456,6 +1633,22 @@ public final class TestValuesTableFactory
         }
 
         @Override
+        public boolean supportsMetadataFilterPushDown() {
+            return enableMetadataFilterPushDown;
+        }
+
+        @Override
+        public SupportsReadingMetadata.MetadataFilterResult applyMetadataFilters(
+                List<ResolvedExpression> metadataFilters) {
+            return SupportsReadingMetadata.MetadataFilterResult.of(
+                    metadataFilters, Collections.emptyList());
+        }
+
+        void setEnableMetadataFilterPushDown(boolean enable) {
+            this.enableMetadataFilterPushDown = enable;
+        }
+
+        @Override
         public List<String> listAcceptedFilterFields() {
             return new ArrayList<>(dynamicFilteringFields);
         }
@@ -1488,7 +1681,8 @@ public final class TestValuesTableFactory
                 long limit,
                 List<Map<String, String>> allPartitions,
                 Map<String, DataType> readableMetadata,
-                @Nullable int[] projectedMetadataFields) {
+                @Nullable int[] projectedMetadataFields,
+                boolean enableAggregatePushDown) {
             super(
                     producedDataType,
                     changelogMode,
@@ -1507,29 +1701,34 @@ public final class TestValuesTableFactory
                     allPartitions,
                     readableMetadata,
                     projectedMetadataFields,
-                    null);
+                    null,
+                    enableAggregatePushDown);
         }
 
         @Override
         public DynamicTableSource copy() {
-            return new TestValuesScanTableSource(
-                    producedDataType,
-                    changelogMode,
-                    boundedness,
-                    terminating,
-                    runtimeSource,
-                    failingSource,
-                    data,
-                    nestedProjectionSupported,
-                    projectedPhysicalFields,
-                    filterPredicates,
-                    filterableFields,
-                    dynamicFilteringFields,
-                    numElementToSkip,
-                    limit,
-                    allPartitions,
-                    readableMetadata,
-                    projectedMetadataFields);
+            TestValuesScanTableSource copy =
+                    new TestValuesScanTableSource(
+                            producedDataType,
+                            changelogMode,
+                            boundedness,
+                            terminating,
+                            runtimeSource,
+                            failingSource,
+                            data,
+                            nestedProjectionSupported,
+                            projectedPhysicalFields,
+                            filterPredicates,
+                            filterableFields,
+                            dynamicFilteringFields,
+                            numElementToSkip,
+                            limit,
+                            allPartitions,
+                            readableMetadata,
+                            projectedMetadataFields,
+                            enableAggregatePushDown);
+            copy.setEnableMetadataFilterPushDown(enableMetadataFilterPushDown);
+            return copy;
         }
 
         @Override
@@ -1552,7 +1751,7 @@ public final class TestValuesTableFactory
             implements SupportsWatermarkPushDown, SupportsSourceWatermark {
         private final String tableName;
 
-        private WatermarkStrategy<RowData> watermarkStrategy;
+        private WatermarkStrategy<RowData> watermarkStrategy = WatermarkStrategy.noWatermarks();
 
         private TestValuesScanTableSourceWithWatermarkPushDown(
                 DataType producedDataType,
@@ -1571,7 +1770,8 @@ public final class TestValuesTableFactory
                 long limit,
                 List<Map<String, String>> allPartitions,
                 Map<String, DataType> readableMetadata,
-                @Nullable int[] projectedMetadataFields) {
+                @Nullable int[] projectedMetadataFields,
+                boolean enableAggregatePushDown) {
             super(
                     producedDataType,
                     changelogMode,
@@ -1589,7 +1789,8 @@ public final class TestValuesTableFactory
                     limit,
                     allPartitions,
                     readableMetadata,
-                    projectedMetadataFields);
+                    projectedMetadataFields,
+                    enableAggregatePushDown);
             this.tableName = tableName;
         }
 
@@ -1616,7 +1817,7 @@ public final class TestValuesTableFactory
             try {
                 return SourceFunctionProvider.of(
                         new TestValuesRuntimeFunctions.FromElementSourceFunctionWithWatermark(
-                                tableName, serializer, values, watermarkStrategy),
+                                tableName, serializer, values, watermarkStrategy, terminating),
                         false);
             } catch (IOException e) {
                 throw new TableException("Fail to init source function", e);
@@ -1643,7 +1844,8 @@ public final class TestValuesTableFactory
                             limit,
                             allPartitions,
                             readableMetadata,
-                            projectedMetadataFields);
+                            projectedMetadataFields,
+                            enableAggregatePushDown);
             newSource.watermarkStrategy = watermarkStrategy;
             return newSource;
         }
@@ -1658,13 +1860,16 @@ public final class TestValuesTableFactory
     private static class TestValuesScanLookupTableSource extends TestValuesScanTableSource
             implements LookupTableSource, SupportsDynamicFiltering {
 
-        private final @Nullable String lookupFunctionClass;
-        private final @Nullable LookupCache cache;
-        private final @Nullable CacheReloadTrigger reloadTrigger;
-        private final boolean isAsync;
-        private final int lookupThreshold;
+        protected final @Nullable String lookupFunctionClass;
+        protected final @Nullable LookupCache cache;
+        protected final @Nullable CacheReloadTrigger reloadTrigger;
+        protected final boolean isAsync;
+        protected final int lookupThreshold;
 
-        private final DataType originType;
+        protected final DataType originType;
+
+        protected final int[] primaryKeyIndices;
+        protected final Collection<Row> consumedData;
 
         private TestValuesScanLookupTableSource(
                 DataType originType,
@@ -1675,6 +1880,7 @@ public final class TestValuesTableFactory
                 String runtimeSource,
                 boolean failingSource,
                 Map<Map<String, String>, Collection<Row>> data,
+                Collection<Row> consumedData,
                 boolean isAsync,
                 @Nullable String lookupFunctionClass,
                 boolean nestedProjectionSupported,
@@ -1689,7 +1895,9 @@ public final class TestValuesTableFactory
                 @Nullable int[] projectedMetadataFields,
                 @Nullable LookupCache cache,
                 @Nullable CacheReloadTrigger reloadTrigger,
-                int lookupThreshold) {
+                int lookupThreshold,
+                boolean enableAggregatePushDown,
+                int[] primaryKeyIndices) {
             super(
                     producedDataType,
                     changelogMode,
@@ -1707,13 +1915,16 @@ public final class TestValuesTableFactory
                     limit,
                     allPartitions,
                     readableMetadata,
-                    projectedMetadataFields);
+                    projectedMetadataFields,
+                    enableAggregatePushDown);
             this.originType = originType;
             this.lookupFunctionClass = lookupFunctionClass;
             this.isAsync = isAsync;
             this.cache = cache;
             this.reloadTrigger = reloadTrigger;
             this.lookupThreshold = lookupThreshold;
+            this.primaryKeyIndices = primaryKeyIndices;
+            this.consumedData = consumedData;
         }
 
         @SuppressWarnings({"unchecked", "rawtypes"})
@@ -1749,7 +1960,8 @@ public final class TestValuesTableFactory
                         key -> rows.addAll(data.getOrDefault(key, new ArrayList<>())));
             }
 
-            List<Row> data = new ArrayList<>(rows);
+            List<Row> data = new ArrayList<>(consumedData);
+            data.addAll(rows);
             if (numElementToSkip > 0) {
                 if (numElementToSkip >= data.size()) {
                     data = Collections.EMPTY_LIST;
@@ -1761,6 +1973,9 @@ public final class TestValuesTableFactory
                 throw new UnsupportedOperationException(
                         "nestedProjectionSupported is unsupported for lookup source currently.");
             }
+
+            data = deduplicateDataByPk(data);
+
             DataStructureConverter converter = context.createDataStructureConverter(originType);
             RowType originRowType =
                     RowType.of(
@@ -1809,6 +2024,42 @@ public final class TestValuesTableFactory
                     return LookupFunctionProvider.of(lookupFunction);
                 }
             }
+        }
+
+        private List<Row> deduplicateDataByPk(List<Row> data) {
+            if (primaryKeyIndices.length == 0) {
+                return data;
+            }
+            // <pk, data>
+            LinkedHashMap<Row, Row> pkMap = new LinkedHashMap<>();
+            for (Row row : data) {
+                Row pk = extractPk(row);
+                RowKind originalRowKind = row.getKind();
+                if (originalRowKind == RowKind.INSERT || originalRowKind == RowKind.UPDATE_AFTER) {
+                    Row copiedRow = copyRow(row);
+                    copiedRow.setKind(RowKind.INSERT);
+                    pkMap.put(pk, copiedRow);
+                } else {
+                    pkMap.remove(pk);
+                }
+            }
+            return new ArrayList<>(pkMap.values());
+        }
+
+        private Row copyRow(Row oldRow) {
+            Row newRow = new Row(oldRow.getKind(), oldRow.getArity());
+            for (int i = 0; i < newRow.getArity(); i++) {
+                newRow.setField(i, oldRow.getField(i));
+            }
+            return newRow;
+        }
+
+        private Row extractPk(Row row) {
+            Object[] pk = new Object[primaryKeyIndices.length];
+            for (int i = 0; i < primaryKeyIndices.length; i++) {
+                pk[i] = row.getField(primaryKeyIndices[i]);
+            }
+            return Row.of(pk);
         }
 
         /** Does not support nested projection. */
@@ -1883,6 +2134,7 @@ public final class TestValuesTableFactory
                     runtimeSource,
                     failingSource,
                     data,
+                    consumedData,
                     isAsync,
                     lookupFunctionClass,
                     nestedProjectionSupported,
@@ -1897,7 +2149,123 @@ public final class TestValuesTableFactory
                     projectedMetadataFields,
                     cache,
                     reloadTrigger,
-                    lookupThreshold);
+                    lookupThreshold,
+                    enableAggregatePushDown,
+                    primaryKeyIndices);
+        }
+    }
+
+    /**
+     * Values {@link LookupTableSource} and {@link ScanTableSource} supporting custom shuffle for
+     * testing.
+     */
+    private static class TestValuesScanLookupTableSourceWithCustomShuffle
+            extends TestValuesScanLookupTableSource implements SupportsLookupCustomShuffle {
+
+        private final boolean customShuffleIsDeterministic;
+
+        private final boolean customShuffleEmptyPartitioner;
+
+        private TestValuesScanLookupTableSourceWithCustomShuffle(
+                DataType originType,
+                DataType producedDataType,
+                ChangelogMode changelogMode,
+                Boundedness boundedness,
+                TerminatingLogic terminating,
+                String runtimeSource,
+                boolean failingSource,
+                Map<Map<String, String>, Collection<Row>> data,
+                Collection<Row> consumedData,
+                boolean isAsync,
+                @Nullable String lookupFunctionClass,
+                boolean nestedProjectionSupported,
+                int[][] projectedFields,
+                List<ResolvedExpression> filterPredicates,
+                Set<String> filterableFields,
+                Set<String> dynamicFilteringFields,
+                int numElementToSkip,
+                long limit,
+                List<Map<String, String>> allPartitions,
+                Map<String, DataType> readableMetadata,
+                @Nullable int[] projectedMetadataFields,
+                @Nullable LookupCache cache,
+                @Nullable CacheReloadTrigger reloadTrigger,
+                int lookupThreshold,
+                boolean enableAggregatePushDown,
+                boolean customShuffleIsDeterministic,
+                boolean customShuffleEmptyPartitioner,
+                int[] primaryKeyIndices) {
+            super(
+                    originType,
+                    producedDataType,
+                    changelogMode,
+                    boundedness,
+                    terminating,
+                    runtimeSource,
+                    failingSource,
+                    data,
+                    consumedData,
+                    isAsync,
+                    lookupFunctionClass,
+                    nestedProjectionSupported,
+                    projectedFields,
+                    filterPredicates,
+                    filterableFields,
+                    dynamicFilteringFields,
+                    numElementToSkip,
+                    limit,
+                    allPartitions,
+                    readableMetadata,
+                    projectedMetadataFields,
+                    cache,
+                    reloadTrigger,
+                    lookupThreshold,
+                    enableAggregatePushDown,
+                    primaryKeyIndices);
+            this.customShuffleIsDeterministic = customShuffleIsDeterministic;
+            this.customShuffleEmptyPartitioner = customShuffleEmptyPartitioner;
+        }
+
+        @Override
+        public DynamicTableSource copy() {
+            return new TestValuesScanLookupTableSourceWithCustomShuffle(
+                    originType,
+                    producedDataType,
+                    changelogMode,
+                    boundedness,
+                    terminating,
+                    runtimeSource,
+                    failingSource,
+                    data,
+                    consumedData,
+                    isAsync,
+                    lookupFunctionClass,
+                    nestedProjectionSupported,
+                    projectedPhysicalFields,
+                    filterPredicates,
+                    filterableFields,
+                    dynamicFilteringFields,
+                    numElementToSkip,
+                    limit,
+                    allPartitions,
+                    readableMetadata,
+                    projectedMetadataFields,
+                    cache,
+                    reloadTrigger,
+                    lookupThreshold,
+                    enableAggregatePushDown,
+                    customShuffleIsDeterministic,
+                    customShuffleEmptyPartitioner,
+                    primaryKeyIndices);
+        }
+
+        @Override
+        public Optional<InputDataPartitioner> getPartitioner() {
+            if (customShuffleEmptyPartitioner) {
+                return Optional.empty();
+            } else {
+                return Optional.of(new TestCustomPartitioner(customShuffleIsDeterministic));
+            }
         }
     }
 
@@ -1917,6 +2285,30 @@ public final class TestValuesTableFactory
         @Override
         public String asSummaryString() {
             return null;
+        }
+    }
+
+    /** A mocked {@link VectorSearchTableSource} for validation test. */
+    public static class MockedVectorSearchTableSource implements VectorSearchTableSource {
+        @Override
+        public VectorSearchRuntimeProvider getSearchRuntimeProvider(VectorSearchContext context) {
+            return VectorSearchFunctionProvider.of(
+                    new VectorSearchFunction() {
+                        @Override
+                        public Collection<RowData> vectorSearch(int topK, RowData queryData) {
+                            return Collections.emptyList();
+                        }
+                    });
+        }
+
+        @Override
+        public DynamicTableSource copy() {
+            throw new UnsupportedOperationException("Not implemented.");
+        }
+
+        @Override
+        public String asSummaryString() {
+            return "MockedVectorSearchSource";
         }
     }
 
@@ -1962,6 +2354,138 @@ public final class TestValuesTableFactory
         }
     }
 
+    private static class TestValuesVectorSearchTableSourceWithoutProjectionPushDown
+            extends TestValuesScanTableSourceWithoutProjectionPushDown
+            implements VectorSearchTableSource {
+
+        private final boolean isAsync;
+        @Nullable private final Integer latency;
+
+        private TestValuesVectorSearchTableSourceWithoutProjectionPushDown(
+                DataType producedDataType,
+                ChangelogMode changelogMode,
+                Boundedness boundedness,
+                TerminatingLogic terminating,
+                String runtimeSource,
+                boolean failingSource,
+                Map<Map<String, String>, Collection<Row>> data,
+                boolean nestedProjectionSupported,
+                @Nullable int[][] projectedPhysicalFields,
+                List<ResolvedExpression> filterPredicates,
+                Set<String> filterableFields,
+                Set<String> dynamicFilteringFields,
+                int numElementToSkip,
+                long limit,
+                List<Map<String, String>> allPartitions,
+                Map<String, DataType> readableMetadata,
+                @Nullable int[] projectedMetadataFields,
+                @Nullable Integer parallelism,
+                boolean enableAggregatePushDown,
+                boolean isAsync,
+                @Nullable Integer latency) {
+            super(
+                    producedDataType,
+                    changelogMode,
+                    boundedness,
+                    terminating,
+                    runtimeSource,
+                    failingSource,
+                    data,
+                    nestedProjectionSupported,
+                    projectedPhysicalFields,
+                    filterPredicates,
+                    filterableFields,
+                    dynamicFilteringFields,
+                    numElementToSkip,
+                    limit,
+                    allPartitions,
+                    readableMetadata,
+                    projectedMetadataFields,
+                    parallelism,
+                    enableAggregatePushDown);
+            this.isAsync = isAsync;
+            this.latency = latency;
+        }
+
+        @Override
+        public VectorSearchRuntimeProvider getSearchRuntimeProvider(VectorSearchContext context) {
+            if (context.runtimeConfig()
+                    .getOptional(TestValuesTableFactory.ENABLE_VECTOR_SEARCH)
+                    .isPresent()) {
+                Preconditions.checkArgument(
+                        context.runtimeConfig().get(TestValuesTableFactory.ENABLE_VECTOR_SEARCH),
+                        String.format(
+                                "Require option %s true.",
+                                TestValuesTableFactory.ENABLE_VECTOR_SEARCH.key()));
+            }
+            int[] searchColumns =
+                    Arrays.stream(context.getSearchColumns()).mapToInt(k -> k[0]).toArray();
+            Collection<Row> rows =
+                    data.getOrDefault(Collections.emptyMap(), Collections.emptyList());
+            TestValuesRuntimeFunctions.TestValueVectorSearchFunction searchFunction =
+                    new TestValuesRuntimeFunctions.TestValueVectorSearchFunction(
+                            new ArrayList<>(rows), searchColumns, producedDataType);
+
+            if (isAsync) {
+                return new VectorFunctionProvider(
+                        new TestValuesRuntimeFunctions.TestValueAsyncVectorSearchFunction(
+                                new ArrayList<>(rows), searchColumns, producedDataType, latency),
+                        searchFunction);
+            } else {
+                return VectorSearchFunctionProvider.of(searchFunction);
+            }
+        }
+
+        @Override
+        public DynamicTableSource copy() {
+            return new TestValuesVectorSearchTableSourceWithoutProjectionPushDown(
+                    producedDataType,
+                    changelogMode,
+                    boundedness,
+                    terminating,
+                    runtimeSource,
+                    failingSource,
+                    data,
+                    nestedProjectionSupported,
+                    projectedPhysicalFields,
+                    filterPredicates,
+                    filterableFields,
+                    dynamicFilteringFields,
+                    numElementToSkip,
+                    limit,
+                    allPartitions,
+                    readableMetadata,
+                    projectedMetadataFields,
+                    parallelism,
+                    enableAggregatePushDown,
+                    isAsync,
+                    latency);
+        }
+
+        private static class VectorFunctionProvider
+                implements AsyncVectorSearchFunctionProvider, VectorSearchFunctionProvider {
+
+            private final AsyncVectorSearchFunction asyncFunction;
+            private final VectorSearchFunction syncFunction;
+
+            public VectorFunctionProvider(
+                    AsyncVectorSearchFunction asyncFunction, VectorSearchFunction syncFunction) {
+                this.asyncFunction = asyncFunction;
+                this.syncFunction = syncFunction;
+            }
+
+            @Override
+            public AsyncVectorSearchFunction createAsyncVectorSearchFunction() {
+                return asyncFunction;
+            }
+
+            @Override
+            public VectorSearchFunction createVectorSearchFunction() {
+                return syncFunction;
+            }
+        }
+    }
+
     // --------------------------------------------------------------------------------------------
     // Table sinks
     // --------------------------------------------------------------------------------------------
@@ -1972,9 +2496,11 @@ public final class TestValuesTableFactory
                     SupportsWritingMetadata,
                     SupportsPartitioning,
                     SupportsOverwrite,
-                    SupportsBucketing {
+                    SupportsBucketing,
+                    SupportsTargetColumnWriting {
 
         private DataType consumedDataType;
+        private int[][] targetColumns;
         private int[] primaryKeyIndices;
         private final String tableName;
         private final boolean isInsertOnly;
@@ -1986,6 +2512,7 @@ public final class TestValuesTableFactory
         private final int rowtimeIndex;
         private final TableSchema tableSchema;
         private final boolean requireBucketCount;
+        private final boolean supportsDeleteByKey;
 
         private TestValuesTableSink(
                 DataType consumedDataType,
@@ -1999,7 +2526,9 @@ public final class TestValuesTableFactory
                 @Nullable ChangelogMode changelogModeEnforced,
                 int rowtimeIndex,
                 TableSchema tableSchema,
-                boolean requireBucketCount) {
+                boolean requireBucketCount,
+                boolean supportsDeleteByKey,
+                int[][] targetColumns) {
             this.consumedDataType = consumedDataType;
             this.primaryKeyIndices = primaryKeyIndices;
             this.tableName = tableName;
@@ -2012,10 +2541,20 @@ public final class TestValuesTableFactory
             this.rowtimeIndex = rowtimeIndex;
             this.tableSchema = tableSchema;
             this.requireBucketCount = requireBucketCount;
+            this.supportsDeleteByKey = supportsDeleteByKey;
+            this.targetColumns = targetColumns;
         }
 
         @Override
         public ChangelogMode getChangelogMode(ChangelogMode requestedMode) {
+            final ChangelogMode mode = getMode(requestedMode);
+            final ChangelogMode.Builder builder = ChangelogMode.newBuilder();
+            mode.getContainedKinds().forEach(builder::addContainedKind);
+            builder.keyOnlyDeletes(supportsDeleteByKey);
+            return builder.build();
+        }
+
+        private ChangelogMode getMode(ChangelogMode requestedMode) {
             // if param [changelogModeEnforced] is passed in, return it directly
             if (changelogModeEnforced != null) {
                 return changelogModeEnforced;
@@ -2105,16 +2644,15 @@ public final class TestValuesTableFactory
             } else {
                 // we don't support OutputFormat for updating query in the TestValues connector
                 assertThat(runtimeSink.equals("SinkFunction")).isTrue();
-                // check the contract of the context.getTargetColumns method returns the expected
-                // empty Option or non-empty Option with a non-empty array
-                assertThat(
-                                !context.getTargetColumns().isPresent()
-                                        || context.getTargetColumns().get().length > 0)
-                        .isTrue();
+                // check the contract that targetColumns should be null for empty array and should
+                // only be applied with a non-empty array
+                assertThat(this.targetColumns == null || this.targetColumns.length > 0).isTrue();
                 SinkFunction<RowData> sinkFunction;
                 if (primaryKeyIndices.length > 0) {
                     // TODO FLINK-31301 currently partial-insert composite columns are not supported
-                    int[][] targetColumns = context.getTargetColumns().orElse(new int[0][]);
+                    int[][] targetColumns =
+                            this.targetColumns != null ? this.targetColumns : new int[0][];
+
                     checkArgument(
                             Arrays.stream(targetColumns).allMatch(subArr -> subArr.length <= 1),
                             "partial-insert composite columns are not supported yet!");
@@ -2155,7 +2693,9 @@ public final class TestValuesTableFactory
                     changelogModeEnforced,
                     rowtimeIndex,
                     tableSchema,
-                    requireBucketCount);
+                    requireBucketCount,
+                    supportsDeleteByKey,
+                    targetColumns);
         }
 
         @Override
@@ -2192,6 +2732,12 @@ public final class TestValuesTableFactory
         @Override
         public boolean requiresBucketCount() {
             return requireBucketCount;
+        }
+
+        @Override
+        public boolean applyTargetColumns(int[][] targetColumns) {
+            this.targetColumns = targetColumns;
+            return true;
         }
     }
 

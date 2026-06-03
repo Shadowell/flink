@@ -23,11 +23,13 @@ import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.TaskInfo;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.functions.KeySelector;
+import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.memory.ManagedMemoryUseCase;
 import org.apache.flink.metrics.Counter;
 import org.apache.flink.metrics.SimpleCounter;
 import org.apache.flink.runtime.checkpoint.InflightDataRescalingDescriptor;
+import org.apache.flink.runtime.event.WatermarkEvent;
 import org.apache.flink.runtime.io.disk.iomanager.IOManager;
 import org.apache.flink.runtime.jobgraph.tasks.TaskInvokable;
 import org.apache.flink.runtime.memory.MemoryManager;
@@ -102,6 +104,10 @@ public class StreamMultipleInputProcessorFactory {
                 "Number of configured inputs in StreamConfig [%s] doesn't match the main operator's number of inputs [%s]",
                 configuredInputs.length,
                 inputsCount);
+
+        boolean checkpointingDuringRecoveryEnabled =
+                CheckpointingOptions.isCheckpointingDuringRecoveryEnabled(jobConfig);
+
         StreamTaskInput[] inputs = new StreamTaskInput[inputsCount];
         for (int i = 0; i < inputsCount; i++) {
             StreamConfig.InputConfig configuredInput = configuredInputs[i];
@@ -119,7 +125,9 @@ public class StreamMultipleInputProcessorFactory {
                                 inflightDataRescalingDescriptor,
                                 gatePartitioners,
                                 taskInfo,
-                                canEmitBatchOfRecords);
+                                canEmitBatchOfRecords,
+                                streamConfig.getWatermarkDeclarations(userClassloader),
+                                checkpointingDuringRecoveryEnabled);
             } else if (configuredInput instanceof StreamConfig.SourceInputConfig) {
                 StreamConfig.SourceInputConfig sourceInput =
                         (StreamConfig.SourceInputConfig) configuredInput;
@@ -294,6 +302,11 @@ public class StreamMultipleInputProcessorFactory {
         @Override
         public void emitRecordAttributes(RecordAttributes recordAttributes) throws Exception {
             input.processRecordAttributes(recordAttributes);
+        }
+
+        @Override
+        public void emitWatermark(WatermarkEvent watermark) throws Exception {
+            input.processWatermark(watermark);
         }
     }
 

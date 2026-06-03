@@ -40,14 +40,12 @@ import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.v2.DiscardingSink;
-import org.apache.flink.test.util.MiniClusterWithClientResource;
-import org.apache.flink.testutils.junit.SharedObjects;
+import org.apache.flink.test.junit5.MiniClusterExtension;
+import org.apache.flink.testutils.junit.SharedObjectsExtension;
 import org.apache.flink.testutils.junit.SharedReference;
-import org.apache.flink.util.TestLogger;
 
-import org.junit.ClassRule;
-import org.junit.Rule;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.time.Duration;
 import java.util.List;
@@ -57,9 +55,10 @@ import java.util.concurrent.CyclicBarrier;
 import static org.apache.flink.metrics.testutils.MetricAssertions.assertThatCounter;
 import static org.apache.flink.metrics.testutils.MetricAssertions.assertThatGauge;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.entry;
 
 /** Tests whether all provided metrics of a {@link Source} are of the expected values (FLIP-33). */
-public class SourceMetricsITCase extends TestLogger {
+class SourceMetricsITCase {
     private static final int DEFAULT_PARALLELISM = 4;
     // since integration tests depend on wall clock time, use huge lags
     private static final long EVENTTIME_LAG = Duration.ofDays(100).toMillis();
@@ -67,12 +66,12 @@ public class SourceMetricsITCase extends TestLogger {
     private static final long EVENTTIME_EPSILON = Duration.ofDays(20).toMillis();
     // this basically is the time a build is allowed to be frozen before the test fails
     private static final long WATERMARK_EPSILON = Duration.ofHours(6).toMillis();
-    @Rule public final SharedObjects sharedObjects = SharedObjects.create();
+    @RegisterExtension SharedObjectsExtension sharedObjects = SharedObjectsExtension.create();
     private static final InMemoryReporter reporter = InMemoryReporter.createWithRetainedMetrics();
 
-    @ClassRule
-    public static final MiniClusterWithClientResource MINI_CLUSTER_RESOURCE =
-            new MiniClusterWithClientResource(
+    @RegisterExtension
+    private static final MiniClusterExtension MINI_CLUSTER_RESOURCE =
+            new MiniClusterExtension(
                     new MiniClusterResourceConfiguration.Builder()
                             .setNumberTaskManagers(1)
                             .setNumberSlotsPerTaskManager(DEFAULT_PARALLELISM)
@@ -80,7 +79,7 @@ public class SourceMetricsITCase extends TestLogger {
                             .build());
 
     @Test
-    public void testMetricsWithTimestamp() throws Exception {
+    void testMetricsWithTimestamp() throws Exception {
         long baseTime = System.currentTimeMillis() - EVENTTIME_LAG;
         WatermarkStrategy<Integer> strategy =
                 WatermarkStrategy.forGenerator(
@@ -91,7 +90,7 @@ public class SourceMetricsITCase extends TestLogger {
     }
 
     @Test
-    public void testMetricsWithoutTimestamp() throws Exception {
+    void testMetricsWithoutTimestamp() throws Exception {
         testMetrics(WatermarkStrategy.noWatermarks(), false);
     }
 
@@ -115,6 +114,7 @@ public class SourceMetricsITCase extends TestLogger {
         int stopAtRecord2 = numRecordsPerSplit - 1;
         DataStream<Integer> stream =
                 env.fromSource(source, strategy, "MetricTestingSource")
+                        .addMetricVariable("foo", "42")
                         .map(
                                 i -> {
                                     if (i % numRecordsPerSplit == stopAtRecord1
@@ -167,6 +167,8 @@ public class SourceMetricsITCase extends TestLogger {
 
         int subtaskWithMetrics = 0;
         for (OperatorMetricGroup group : groups) {
+            assertThat(group.getAllVariables()).contains(entry("foo", "42"));
+
             Map<String, Metric> metrics = reporter.getMetricsByGroup(group);
             // there are only 2 splits assigned; so two groups will not update metrics
             if (group.getIOMetricGroup().getNumRecordsInCounter().getCount() == 0) {

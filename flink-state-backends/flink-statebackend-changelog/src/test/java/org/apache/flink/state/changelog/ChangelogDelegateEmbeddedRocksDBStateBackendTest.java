@@ -19,12 +19,9 @@
 package org.apache.flink.state.changelog;
 
 import org.apache.flink.api.common.state.StateTtlConfig;
-import org.apache.flink.api.common.time.Time;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.StateLatencyTrackOptions;
-import org.apache.flink.contrib.streaming.state.EmbeddedRocksDBStateBackend;
-import org.apache.flink.contrib.streaming.state.EmbeddedRocksDBStateBackendTest;
 import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.state.CheckpointStreamFactory;
 import org.apache.flink.runtime.state.CheckpointableKeyedStateBackend;
@@ -32,20 +29,35 @@ import org.apache.flink.runtime.state.ConfigurableStateBackend;
 import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.state.StateBackend;
 import org.apache.flink.runtime.state.TestTaskStateManager;
+import org.apache.flink.state.rocksdb.EmbeddedRocksDBStateBackend;
+import org.apache.flink.state.rocksdb.EmbeddedRocksDBStateBackendTest;
 import org.apache.flink.testutils.junit.utils.TempDirUtils;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.TestTemplate;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.time.Duration;
+
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 /** Tests for {@link ChangelogStateBackend} delegating {@link EmbeddedRocksDBStateBackend}. */
 public class ChangelogDelegateEmbeddedRocksDBStateBackendTest
         extends EmbeddedRocksDBStateBackendTest {
 
     @TempDir private Path temp;
+
+    @BeforeEach
+    public void setup() throws IOException {
+        assumeFalse(
+                useHeapTimer,
+                "The combination RocksDB state backend with heap-based timers currently "
+                        + "does NOT support asynchronous snapshots for the timers state. "
+                        + "Thus we disable the changelog test for now.");
+    }
 
     @Override
     protected TestTaskStateManager getTestTaskStateManager() throws IOException {
@@ -60,11 +72,6 @@ public class ChangelogDelegateEmbeddedRocksDBStateBackendTest
     @Override
     protected boolean supportsMetaInfoVerification() {
         return false;
-    }
-
-    @Override
-    protected boolean isSafeToReuseKVState() {
-        return true;
     }
 
     @TestTemplate
@@ -111,7 +118,7 @@ public class ChangelogDelegateEmbeddedRocksDBStateBackendTest
                         .configure(configuration, Thread.currentThread().getContextClassLoader());
         ChangelogStateBackendTestUtils.testMaterializedRestore(
                 stateBackend,
-                StateTtlConfig.newBuilder(Time.minutes(1)).build(),
+                StateTtlConfig.newBuilder(Duration.ofMinutes(1)).build(),
                 env,
                 streamFactory);
     }
@@ -127,5 +134,13 @@ public class ChangelogDelegateEmbeddedRocksDBStateBackendTest
     @Override
     protected boolean checkMetrics() {
         return false;
+    }
+
+    // Follow https://issues.apache.org/jira/browse/FLINK-38144
+    @Override
+    @TestTemplate
+    @Disabled("Currently, ChangelogStateBackend does not support null values for map state")
+    public void testMapStateWithNullValue() throws Exception {
+        super.testMapStateWithNullValue();
     }
 }

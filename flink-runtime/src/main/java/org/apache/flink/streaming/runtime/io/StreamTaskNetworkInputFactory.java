@@ -25,8 +25,10 @@ import org.apache.flink.streaming.runtime.io.checkpointing.CheckpointedInputGate
 import org.apache.flink.streaming.runtime.io.recovery.RescalingStreamTaskNetworkInput;
 import org.apache.flink.streaming.runtime.partitioner.StreamPartitioner;
 import org.apache.flink.streaming.runtime.tasks.StreamTask.CanEmitBatchOfRecordsChecker;
+import org.apache.flink.streaming.runtime.watermark.AbstractInternalWatermarkDeclaration;
 import org.apache.flink.streaming.runtime.watermarkstatus.StatusWatermarkValve;
 
+import java.util.Set;
 import java.util.function.Function;
 
 /** Factory for {@link StreamTaskNetworkInput} and {@link RescalingStreamTaskNetworkInput}. */
@@ -44,16 +46,23 @@ public class StreamTaskNetworkInputFactory {
             InflightDataRescalingDescriptor rescalingDescriptorinflightDataRescalingDescriptor,
             Function<Integer, StreamPartitioner<?>> gatePartitioners,
             TaskInfo taskInfo,
-            CanEmitBatchOfRecordsChecker canEmitBatchOfRecords) {
+            CanEmitBatchOfRecordsChecker canEmitBatchOfRecords,
+            Set<AbstractInternalWatermarkDeclaration<?>> watermarkDeclarationSet,
+            boolean checkpointingDuringRecoveryEnabled) {
         return rescalingDescriptorinflightDataRescalingDescriptor.equals(
-                        InflightDataRescalingDescriptor.NO_RESCALE)
+                                InflightDataRescalingDescriptor.NO_RESCALE)
+                        // When filter during recovery is enabled, records are already filtered in
+                        // the channel-state-unspilling thread. Use StreamTaskNetworkInput to avoid
+                        // redundant demultiplexing/filtering in the Task thread.
+                        || checkpointingDuringRecoveryEnabled
                 ? new StreamTaskNetworkInput<>(
                         checkpointedInputGate,
                         inputSerializer,
                         ioManager,
                         statusWatermarkValve,
                         inputIndex,
-                        canEmitBatchOfRecords)
+                        canEmitBatchOfRecords,
+                        watermarkDeclarationSet)
                 : new RescalingStreamTaskNetworkInput<>(
                         checkpointedInputGate,
                         inputSerializer,

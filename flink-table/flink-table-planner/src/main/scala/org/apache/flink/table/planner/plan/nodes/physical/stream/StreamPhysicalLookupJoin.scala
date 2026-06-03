@@ -24,7 +24,6 @@ import org.apache.flink.table.planner.plan.nodes.exec.spec.TemporalTableSourceSp
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecLookupJoin
 import org.apache.flink.table.planner.plan.nodes.physical.common.CommonPhysicalLookupJoin
 import org.apache.flink.table.planner.plan.utils.{FlinkRexUtil, JoinTypeUtil, UpsertKeyUtil}
-import org.apache.flink.table.planner.utils.JavaScalaConversionUtil
 
 import org.apache.calcite.plan.{RelOptCluster, RelOptTable, RelTraitSet}
 import org.apache.calcite.rel.{RelNode, RelWriter}
@@ -47,7 +46,9 @@ class StreamPhysicalLookupJoin(
     joinInfo: JoinInfo,
     joinType: JoinRelType,
     lookupHint: Option[RelHint],
-    upsertMaterialize: Boolean)
+    upsertMaterialize: Boolean,
+    enableLookupShuffle: Boolean = false,
+    preferCustomShuffle: Boolean = false)
   extends CommonPhysicalLookupJoin(
     cluster,
     traitSet,
@@ -57,7 +58,9 @@ class StreamPhysicalLookupJoin(
     joinInfo,
     joinType,
     lookupHint,
-    upsertMaterialize)
+    upsertMaterialize,
+    enableLookupShuffle,
+    preferCustomShuffle)
   with StreamPhysicalRel {
 
   override def requireWatermark: Boolean = false
@@ -72,7 +75,9 @@ class StreamPhysicalLookupJoin(
       joinInfo,
       joinType,
       lookupHint,
-      upsertMaterialize
+      upsertMaterialize,
+      enableLookupShuffle,
+      preferCustomShuffle
     )
   }
 
@@ -86,7 +91,9 @@ class StreamPhysicalLookupJoin(
       joinInfo,
       joinType,
       lookupHint,
-      upsertMaterialize
+      upsertMaterialize,
+      enableLookupShuffle,
+      preferCustomShuffle
     )
   }
 
@@ -94,7 +101,7 @@ class StreamPhysicalLookupJoin(
     val (projectionOnTemporalTable, filterOnTemporalTable) = calcOnTemporalTable match {
       case Some(program) =>
         val (projection, filter) = FlinkRexUtil.expandRexProgram(program)
-        (JavaScalaConversionUtil.toJava(projection), filter.orNull)
+        (projection, filter.orNull)
       case _ =>
         (null, null)
     }
@@ -116,7 +123,8 @@ class StreamPhysicalLookupJoin(
       getUpsertKey.orElse(null),
       InputProperty.DEFAULT,
       FlinkTypeFactory.toLogicalRowType(getRowType),
-      getRelDetailedDescription)
+      getRelDetailedDescription,
+      preferCustomShuffle)
   }
 
   override def explainTerms(pw: RelWriter): RelWriter = {

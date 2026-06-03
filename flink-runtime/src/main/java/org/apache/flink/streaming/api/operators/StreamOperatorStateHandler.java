@@ -54,12 +54,10 @@ import org.apache.flink.runtime.state.StateInitializationContextImpl;
 import org.apache.flink.runtime.state.StatePartitionStreamProvider;
 import org.apache.flink.runtime.state.StateSnapshotContext;
 import org.apache.flink.runtime.state.StateSnapshotContextSynchronousImpl;
-import org.apache.flink.runtime.state.v2.DefaultKeyedStateStoreV2;
-import org.apache.flink.runtime.state.v2.KeyedStateStoreV2;
 import org.apache.flink.util.CloseableIterable;
 import org.apache.flink.util.IOUtils;
 
-import org.apache.flink.shaded.guava32.com.google.common.io.Closer;
+import org.apache.flink.shaded.guava33.com.google.common.io.Closer;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -83,9 +81,9 @@ public class StreamOperatorStateHandler {
 
     protected static final Logger LOG = LoggerFactory.getLogger(StreamOperatorStateHandler.class);
 
-    @Nullable private final AsyncKeyedStateBackend asyncKeyedStateBackend;
+    @Nullable private final TypeSerializer<?> keySerializer;
 
-    @Nullable private final KeyedStateStoreV2 keyedStateStoreV2;
+    @Nullable private final AsyncKeyedStateBackend<?> asyncKeyedStateBackend;
 
     /** Backend for keyed state. This might be empty if we're not on a keyed stream. */
     @Nullable private final CheckpointableKeyedStateBackend<?> keyedStateBackend;
@@ -100,14 +98,17 @@ public class StreamOperatorStateHandler {
             ExecutionConfig executionConfig,
             CloseableRegistry closeableRegistry) {
         this.context = context;
-        operatorStateBackend = context.operatorStateBackend();
-        keyedStateBackend = context.keyedStateBackend();
+        this.keySerializer = context.keySerializer();
+        this.operatorStateBackend = context.operatorStateBackend();
+        this.keyedStateBackend = context.keyedStateBackend();
+        this.asyncKeyedStateBackend = context.asyncKeyedStateBackend();
         this.closeableRegistry = closeableRegistry;
 
-        if (keyedStateBackend != null) {
+        if (keyedStateBackend != null || asyncKeyedStateBackend != null) {
             keyedStateStore =
                     new DefaultKeyedStateStore(
                             keyedStateBackend,
+                            asyncKeyedStateBackend,
                             new SerializerFactory() {
                                 @Override
                                 public <T> TypeSerializer<T> createSerializer(
@@ -119,12 +120,6 @@ public class StreamOperatorStateHandler {
         } else {
             keyedStateStore = null;
         }
-
-        this.asyncKeyedStateBackend = context.asyncKeyedStateBackend();
-        this.keyedStateStoreV2 =
-                asyncKeyedStateBackend != null
-                        ? new DefaultKeyedStateStoreV2(asyncKeyedStateBackend)
-                        : null;
     }
 
     public void initializeOperatorState(CheckpointedStreamOperator streamOperator)
@@ -188,12 +183,15 @@ public class StreamOperatorStateHandler {
             long timestamp,
             CheckpointOptions checkpointOptions,
             CheckpointStreamFactory factory,
-            boolean isUsingCustomRawKeyedState)
+            boolean isUsingCustomRawKeyedState,
+            boolean useAsyncState)
             throws CheckpointException {
-        KeyGroupRange keyGroupRange =
-                null != keyedStateBackend
-                        ? keyedStateBackend.getKeyGroupRange()
-                        : KeyGroupRange.EMPTY_KEY_GROUP_RANGE;
+        KeyGroupRange keyGroupRange = KeyGroupRange.EMPTY_KEY_GROUP_RANGE;
+        if (keyedStateBackend != null) {
+            keyGroupRange = keyedStateBackend.getKeyGroupRange();
+        } else if (asyncKeyedStateBackend != null) {
+            keyGroupRange = asyncKeyedStateBackend.getKeyGroupRange();
+        }
 
         OperatorSnapshotFutures snapshotInProgress = new OperatorSnapshotFutures();
 
@@ -211,7 +209,8 @@ public class StreamOperatorStateHandler {
                 factory,
                 snapshotInProgress,
                 snapshotContext,
-                isUsingCustomRawKeyedState);
+                isUsingCustomRawKeyedState,
+                useAsyncState);
 
         return snapshotInProgress;
     }
@@ -227,25 +226,34 @@ public class StreamOperatorStateHandler {
             CheckpointStreamFactory factory,
             OperatorSnapshotFutures snapshotInProgress,
             StateSnapshotContextSynchronousImpl snapshotContext,
-            boolean isUsingCustomRawKeyedState)
+            boolean isUsingCustomRawKeyedState,
+            boolean useAsyncState)
             throws CheckpointException {
         try {
             if (timeServiceManager.isPresent()) {
-                checkState(
-                        keyedStateBackend != null,
-                        "keyedStateBackend should be available with timeServiceManager");
-                final InternalTimeServiceManager<?> manager = timeServiceManager.get();
-
-                boolean requiresLegacyRawKeyedStateSnapshots =
-                        keyedStateBackend instanceof AbstractKeyedStateBackend
-                                && ((AbstractKeyedStateBackend<?>) keyedStateBackend)
-                                        .requiresLegacySynchronousTimerSnapshots(
-                                                checkpointOptions.getCheckpointType());
-
+                boolean requiresLegacyRawKeyedStateSnapshots;
+                if (useAsyncState) {
+                    checkState(
+                            asyncKeyedStateBackend != null,
+                            "asyncKeyedStateBackend should be available with timeServiceManager");
+                    requiresLegacyRawKeyedStateSnapshots =
+                            asyncKeyedStateBackend.requiresLegacySynchronousTimerSnapshots(
+                                    checkpointOptions.getCheckpointType());
+                } else {
+                    checkState(
+                            keyedStateBackend != null,
+                            "keyedStateBackend should be available with timeServiceManager");
+                    requiresLegacyRawKeyedStateSnapshots =
+                            keyedStateBackend instanceof AbstractKeyedStateBackend
+                                    && ((AbstractKeyedStateBackend<?>) keyedStateBackend)
+                                            .requiresLegacySynchronousTimerSnapshots(
+                                                    checkpointOptions.getCheckpointType());
+                }
                 if (requiresLegacyRawKeyedStateSnapshots) {
                     checkState(
                             !isUsingCustomRawKeyedState,
                             "Attempting to snapshot timers to raw keyed state, but this operator has custom raw keyed state to write.");
+                    final InternalTimeServiceManager<?> manager = timeServiceManager.get();
                     manager.snapshotToRawKeyedState(
                             snapshotContext.getRawKeyedOperatorStateOutput(), operatorName);
                 }
@@ -262,7 +270,17 @@ public class StreamOperatorStateHandler {
                                 checkpointId, timestamp, factory, checkpointOptions));
             }
 
-            if (null != keyedStateBackend) {
+            if (useAsyncState && null != asyncKeyedStateBackend) {
+                if (isCanonicalSavepoint(checkpointOptions.getCheckpointType())) {
+                    throw new UnsupportedOperationException("Not supported yet.");
+                } else {
+                    snapshotInProgress.setKeyedStateManagedFuture(
+                            asyncKeyedStateBackend.snapshot(
+                                    checkpointId, timestamp, factory, checkpointOptions));
+                }
+            }
+
+            if (!useAsyncState && null != keyedStateBackend) {
                 if (isCanonicalSavepoint(checkpointOptions.getCheckpointType())) {
                     SnapshotStrategyRunner<KeyedStateHandle, ? extends FullSnapshotResources<?>>
                             snapshotRunner =
@@ -331,12 +349,25 @@ public class StreamOperatorStateHandler {
         if (keyedStateBackend instanceof CheckpointListener) {
             ((CheckpointListener) keyedStateBackend).notifyCheckpointComplete(checkpointId);
         }
+
+        if (asyncKeyedStateBackend != null) {
+            asyncKeyedStateBackend.notifyCheckpointComplete(checkpointId);
+        }
     }
 
     public void notifyCheckpointAborted(long checkpointId) throws Exception {
         if (keyedStateBackend instanceof CheckpointListener) {
             ((CheckpointListener) keyedStateBackend).notifyCheckpointAborted(checkpointId);
         }
+
+        if (asyncKeyedStateBackend != null) {
+            asyncKeyedStateBackend.notifyCheckpointAborted(checkpointId);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    public <K> TypeSerializer<K> getKeySerializer() {
+        return (TypeSerializer<K>) keySerializer;
     }
 
     @SuppressWarnings("unchecked")
@@ -345,8 +376,9 @@ public class StreamOperatorStateHandler {
     }
 
     @Nullable
-    public AsyncKeyedStateBackend getAsyncKeyedStateBackend() {
-        return asyncKeyedStateBackend;
+    @SuppressWarnings("unchecked")
+    public <K> AsyncKeyedStateBackend<K> getAsyncKeyedStateBackend() {
+        return (AsyncKeyedStateBackend<K>) asyncKeyedStateBackend;
     }
 
     public OperatorStateBackend getOperatorStateBackend() {
@@ -371,11 +403,11 @@ public class StreamOperatorStateHandler {
     public <N, S extends org.apache.flink.api.common.state.v2.State, T> S getOrCreateKeyedState(
             N defaultNamespace,
             TypeSerializer<N> namespaceSerializer,
-            org.apache.flink.runtime.state.v2.StateDescriptor<T> stateDescriptor)
+            org.apache.flink.api.common.state.v2.StateDescriptor<T> stateDescriptor)
             throws Exception {
 
         if (asyncKeyedStateBackend != null) {
-            return asyncKeyedStateBackend.createState(
+            return asyncKeyedStateBackend.getOrCreateKeyedState(
                     defaultNamespace, namespaceSerializer, stateDescriptor);
         } else {
             throw new IllegalStateException(
@@ -438,12 +470,12 @@ public class StreamOperatorStateHandler {
         }
     }
 
-    public Optional<KeyedStateStore> getKeyedStateStore() {
-        return Optional.ofNullable(keyedStateStore);
+    public InternalTimeServiceManager<?> getAsyncInternalTimerServiceManager() {
+        return context.asyncInternalTimerServiceManager();
     }
 
-    public Optional<KeyedStateStoreV2> getKeyedStateStoreV2() {
-        return Optional.ofNullable(keyedStateStoreV2);
+    public Optional<KeyedStateStore> getKeyedStateStore() {
+        return Optional.ofNullable(keyedStateStore);
     }
 
     /** Custom state handling hooks to be invoked by {@link StreamOperatorStateHandler}. */

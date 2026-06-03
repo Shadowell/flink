@@ -18,12 +18,11 @@
 package org.apache.flink.table.planner.codegen
 
 import org.apache.flink.api.common.functions._
-import org.apache.flink.configuration.Configuration
 import org.apache.flink.streaming.api.functions.ProcessFunction
 import org.apache.flink.streaming.api.functions.async.{AsyncFunction, RichAsyncFunction}
 import org.apache.flink.table.planner.codegen.CodeGenUtils._
 import org.apache.flink.table.planner.codegen.Indenter.toISC
-import org.apache.flink.table.runtime.generated.{FilterCondition, GeneratedFilterCondition, GeneratedFunction, GeneratedJoinCondition, JoinCondition}
+import org.apache.flink.table.runtime.generated._
 import org.apache.flink.table.types.logical.LogicalType
 
 /**
@@ -154,7 +153,7 @@ object FunctionCodeGenerator {
         ${ctx.reuseConstructorCode(funcName)}
 
         @Override
-        public void open(${classOf[Configuration].getCanonicalName} parameters) throws Exception {
+        public void open(${classOf[OpenContext].getCanonicalName} openContext) throws Exception {
           ${ctx.reuseOpenCode()}
         }
 
@@ -195,6 +194,8 @@ object FunctionCodeGenerator {
    *   the first input term
    * @param input2Term
    *   the second input term.
+   * @param contextTerm
+   *   the term used for a context for retrieving time service
    * @return
    *   the generated condition function name and code
    */
@@ -204,14 +205,15 @@ object FunctionCodeGenerator {
       clazz: Class[F],
       bodyCode: String,
       input1Term: String = CodeGenUtils.DEFAULT_INPUT1_TERM,
-      input2Term: String = CodeGenUtils.DEFAULT_INPUT2_TERM): (String, String) = {
+      input2Term: String = CodeGenUtils.DEFAULT_INPUT2_TERM,
+      contextTerm: String = CodeGenUtils.DEFAULT_CONTEXT_TERM): (String, String) = {
     val funcName = newName(ctx, name)
 
     val methodHeader = {
       if (clazz == classOf[JoinCondition]) {
         s"apply($ROW_DATA $input1Term, $ROW_DATA $input2Term)"
       } else if (clazz == classOf[FilterCondition]) {
-        s"apply($ROW_DATA $input1Term)"
+        s"apply($FILTER_CONTEXT $contextTerm, $ROW_DATA $input1Term)"
       } else {
         throw new CodeGenException(s"Unsupported Condition Function $clazz.")
       }
@@ -230,7 +232,7 @@ object FunctionCodeGenerator {
         ${ctx.reuseConstructorCode(funcName)}
 
         @Override
-        public void open(${className[Configuration]} parameters) throws Exception {
+        public void open(${className[OpenContext]} openContext) throws Exception {
           ${ctx.reuseOpenCode()}
         }
 

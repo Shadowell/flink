@@ -17,20 +17,19 @@
  */
 package org.apache.flink.table.planner.runtime.harness
 
-import org.apache.flink.api.scala._
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord
 import org.apache.flink.streaming.util.KeyedOneInputStreamOperatorTestHarness
 import org.apache.flink.table.api._
 import org.apache.flink.table.api.bridge.scala._
 import org.apache.flink.table.api.bridge.scala.internal.StreamTableEnvironmentImpl
 import org.apache.flink.table.data.RowData
+import org.apache.flink.table.planner.runtime.utils.StreamingEnvUtil
 import org.apache.flink.table.planner.runtime.utils.StreamingWithStateTestBase.StateBackendMode
 import org.apache.flink.table.runtime.typeutils.RowDataSerializer
 import org.apache.flink.table.runtime.util.RowDataHarnessAssertor
 import org.apache.flink.table.runtime.util.StreamRecordUtils.{binaryrow, row}
 import org.apache.flink.table.types.logical.LogicalType
 import org.apache.flink.testutils.junit.extensions.parameterized.ParameterizedTestExtension
-import org.apache.flink.types.Row
 
 import org.junit.jupiter.api.{BeforeEach, TestTemplate}
 import org.junit.jupiter.api.extension.ExtendWith
@@ -124,8 +123,10 @@ class OverAggregateHarnessTest(mode: StateBackendMode) extends HarnessTestBase(m
 
   private def createProcTimeBoundedRowsOver()
       : (KeyedOneInputStreamOperatorTestHarness[RowData, RowData, RowData], Array[LogicalType]) = {
-    val data = new mutable.MutableList[(Long, String, Long)]
-    val t = env.fromCollection(data).toTable(tEnv, 'currtime, 'b, 'c, 'proctime.proctime)
+    val data = new mutable.ListBuffer[(Long, String, Long)]
+    val t = StreamingEnvUtil
+      .fromCollection(env, data)
+      .toTable(tEnv, 'currtime, 'b, 'c, 'proctime.proctime)
     tEnv.createTemporaryView("T", t)
 
     val sql =
@@ -157,8 +158,10 @@ class OverAggregateHarnessTest(mode: StateBackendMode) extends HarnessTestBase(m
   @TestTemplate
   def testProcTimeBoundedRangeOver(): Unit = {
 
-    val data = new mutable.MutableList[(Long, String, Long)]
-    val t = env.fromCollection(data).toTable(tEnv, 'currtime, 'b, 'c, 'proctime.proctime)
+    val data = new mutable.ListBuffer[(Long, String, Long)]
+    val t = StreamingEnvUtil
+      .fromCollection(env, data)
+      .toTable(tEnv, 'currtime, 'b, 'c, 'proctime.proctime)
     tEnv.createTemporaryView("T", t)
 
     val sql =
@@ -261,8 +264,10 @@ class OverAggregateHarnessTest(mode: StateBackendMode) extends HarnessTestBase(m
   @TestTemplate
   def testProcTimeUnboundedOver(): Unit = {
 
-    val data = new mutable.MutableList[(Long, String, Long)]
-    val t = env.fromCollection(data).toTable(tEnv, 'currtime, 'b, 'c, 'proctime.proctime)
+    val data = new mutable.ListBuffer[(Long, String, Long)]
+    val t = StreamingEnvUtil
+      .fromCollection(env, data)
+      .toTable(tEnv, 'currtime, 'b, 'c, 'proctime.proctime)
     tEnv.createTemporaryView("T", t)
 
     val sql =
@@ -350,8 +355,8 @@ class OverAggregateHarnessTest(mode: StateBackendMode) extends HarnessTestBase(m
   @TestTemplate
   def testRowTimeBoundedRangeOver(): Unit = {
 
-    val data = new mutable.MutableList[(Long, String, Long)]
-    val t = env.fromCollection(data).toTable(tEnv, 'rowtime.rowtime, 'b, 'c)
+    val data = new mutable.ListBuffer[(Long, String, Long)]
+    val t = StreamingEnvUtil.fromCollection(env, data).toTable(tEnv, 'rowtime.rowtime, 'b, 'c)
     tEnv.createTemporaryView("T", t)
 
     val sql =
@@ -447,8 +452,8 @@ class OverAggregateHarnessTest(mode: StateBackendMode) extends HarnessTestBase(m
   @TestTemplate
   def testRowTimeBoundedRowsOver(): Unit = {
 
-    val data = new mutable.MutableList[(Long, String, Long)]
-    val t = env.fromCollection(data).toTable(tEnv, 'rowtime.rowtime, 'b, 'c)
+    val data = new mutable.ListBuffer[(Long, String, Long)]
+    val t = StreamingEnvUtil.fromCollection(env, data).toTable(tEnv, 'rowtime.rowtime, 'b, 'c)
     tEnv.createTemporaryView("T", t)
 
     val sql =
@@ -574,8 +579,8 @@ class OverAggregateHarnessTest(mode: StateBackendMode) extends HarnessTestBase(m
   @TestTemplate
   def testRowTimeUnboundedRangeOver(): Unit = {
 
-    val data = new mutable.MutableList[(Long, String, Long)]
-    val t = env.fromCollection(data).toTable(tEnv, 'rowtime.rowtime, 'b, 'c)
+    val data = new mutable.ListBuffer[(Long, String, Long)]
+    val t = StreamingEnvUtil.fromCollection(env, data).toTable(tEnv, 'rowtime.rowtime, 'b, 'c)
     tEnv.createTemporaryView("T", t)
 
     val sql =
@@ -696,8 +701,8 @@ class OverAggregateHarnessTest(mode: StateBackendMode) extends HarnessTestBase(m
   @TestTemplate
   def testRowTimeUnboundedRowsOver(): Unit = {
 
-    val data = new mutable.MutableList[(Long, String, Long)]
-    val t = env.fromCollection(data).toTable(tEnv, 'rowtime.rowtime, 'b, 'c)
+    val data = new mutable.ListBuffer[(Long, String, Long)]
+    val t = StreamingEnvUtil.fromCollection(env, data).toTable(tEnv, 'rowtime.rowtime, 'b, 'c)
     tEnv.createTemporaryView("T", t)
 
     val sql =

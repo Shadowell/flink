@@ -20,6 +20,7 @@ package org.apache.flink.table.types.logical.utils;
 
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.common.typeutils.CompositeType;
+import org.apache.flink.table.legacy.types.logical.TypeInformationRawType;
 import org.apache.flink.table.types.logical.BigIntType;
 import org.apache.flink.table.types.logical.BinaryType;
 import org.apache.flink.table.types.logical.CharType;
@@ -44,7 +45,6 @@ import org.apache.flink.table.types.logical.TimeType;
 import org.apache.flink.table.types.logical.TimestampKind;
 import org.apache.flink.table.types.logical.TimestampType;
 import org.apache.flink.table.types.logical.TinyIntType;
-import org.apache.flink.table.types.logical.TypeInformationRawType;
 import org.apache.flink.table.types.logical.VarBinaryType;
 import org.apache.flink.table.types.logical.VarCharType;
 import org.apache.flink.table.types.logical.YearMonthIntervalType;
@@ -149,6 +149,10 @@ public final class LogicalTypeChecks {
 
     public static boolean hasLength(LogicalType logicalType, int length) {
         return getLength(logicalType) == length;
+    }
+
+    public static boolean hasMaxLength(LogicalType logicalType) {
+        return getLength(logicalType) == Integer.MAX_VALUE;
     }
 
     /** Returns the precision of all types that define a precision implicitly or explicitly. */

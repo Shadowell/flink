@@ -21,7 +21,6 @@ package org.apache.flink.runtime.state.ttl;
 import org.apache.flink.api.common.state.State;
 import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.state.StateTtlConfig;
-import org.apache.flink.api.common.time.Time;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.SnapshotResult;
@@ -32,13 +31,13 @@ import org.apache.flink.testutils.junit.extensions.parameterized.Parameter;
 import org.apache.flink.testutils.junit.extensions.parameterized.ParameterizedTestExtension;
 import org.apache.flink.testutils.junit.extensions.parameterized.Parameters;
 import org.apache.flink.util.Preconditions;
-import org.apache.flink.util.StateMigrationException;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.TestTemplate;
 import org.junit.jupiter.api.extension.ExtendWith;
 
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.RunnableFuture;
@@ -46,7 +45,6 @@ import java.util.function.Consumer;
 
 import static org.apache.flink.runtime.state.ttl.StateBackendTestContext.NUMBER_OF_KEY_GROUPS;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assumptions.assumeThat;
 
 /** State TTL base test suite. */
@@ -87,6 +85,7 @@ public abstract class TtlStateTestBase {
                 new TtlValueStateTestContext(),
                 new TtlFixedLenElemListStateTestContext(),
                 new TtlNonFixedLenElemListStateTestContext(),
+                new TtlListStateWithKryoTestContext(),
                 new TtlMapStateAllEntriesTestContext(),
                 new TtlMapStatePerElementTestContext(),
                 new TtlMapStatePerNullElementTestContext(),
@@ -109,7 +108,7 @@ public abstract class TtlStateTestBase {
         return (TtlMergingStateTestContext<?, UV, ?>) ctx;
     }
 
-    private void initTest() throws Exception {
+    protected void initTest() throws Exception {
         initTest(
                 StateTtlConfig.UpdateType.OnCreateAndWrite,
                 StateTtlConfig.StateVisibility.NeverReturnExpired);
@@ -135,7 +134,7 @@ public abstract class TtlStateTestBase {
     }
 
     protected static StateTtlConfig.Builder getConfBuilder(long ttl) {
-        return StateTtlConfig.newBuilder(Time.milliseconds(ttl));
+        return StateTtlConfig.newBuilder(Duration.ofMillis(ttl));
     }
 
     protected <S extends State> StateDescriptor<S, Object> initTest(StateTtlConfig ttlConfig)
@@ -496,7 +495,7 @@ public abstract class TtlStateTestBase {
     }
 
     @TestTemplate
-    void testRestoreTtlAndRegisterNonTtlStateCompatFailure() throws Exception {
+    protected void testRestoreTtlAndRegisterNonTtlStateCompatFailure() throws Exception {
         assumeThat(this).isNotInstanceOf(MockTtlStateTest.class);
 
         initTest();
@@ -508,8 +507,7 @@ public abstract class TtlStateTestBase {
         sbetc.createAndRestoreKeyedStateBackend(snapshot);
 
         sbetc.setCurrentKey("defaultKey");
-        assertThatThrownBy(() -> sbetc.createState(ctx().createStateDescriptor(), ""))
-                .isInstanceOf(StateMigrationException.class);
+        sbetc.createState(ctx().createStateDescriptor(), "");
     }
 
     @TestTemplate

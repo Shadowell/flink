@@ -17,13 +17,13 @@
  */
 package org.apache.flink.table.planner.codegen.calls
 
-import org.apache.flink.table.api.ValidationException
+import org.apache.flink.table.api.{TableRuntimeException, ValidationException}
 import org.apache.flink.table.api.config.ExecutionConfigOptions
 import org.apache.flink.table.data.binary.BinaryArrayData
 import org.apache.flink.table.data.util.MapDataUtil
 import org.apache.flink.table.data.utils.CastExecutor
 import org.apache.flink.table.data.writer.{BinaryArrayWriter, BinaryRowWriter}
-import org.apache.flink.table.planner.codegen.{CodeGeneratorContext, CodeGenException, GeneratedExpression}
+import org.apache.flink.table.planner.codegen.{CodeGeneratorContext, CodeGenException, EqualiserCodeGenerator, GeneratedExpression}
 import org.apache.flink.table.planner.codegen.CodeGenUtils._
 import org.apache.flink.table.planner.codegen.GeneratedExpression.{ALWAYS_NULL, NEVER_NULL, NO_CODE}
 import org.apache.flink.table.planner.codegen.GenerateUtils._
@@ -38,9 +38,11 @@ import org.apache.flink.table.types.logical._
 import org.apache.flink.table.types.logical.LogicalTypeFamily.DATETIME
 import org.apache.flink.table.types.logical.LogicalTypeRoot._
 import org.apache.flink.table.types.logical.utils.LogicalTypeChecks
-import org.apache.flink.table.types.logical.utils.LogicalTypeChecks.getFieldTypes
+import org.apache.flink.table.types.logical.utils.LogicalTypeChecks.{getFieldTypes, getPrecision, getScale}
 import org.apache.flink.table.types.logical.utils.LogicalTypeMerging.findCommonType
 import org.apache.flink.table.utils.DateTimeUtils.MILLIS_PER_DAY
+import org.apache.flink.table.utils.EncodingUtils
+import org.apache.flink.types.ColumnList
 import org.apache.flink.util.Preconditions.checkArgument
 
 import java.time.ZoneId
@@ -107,6 +109,8 @@ object ScalarOperatorGens {
     // use it as is during calculation.
     def castToDec(t: LogicalType): String => String = t match {
       case _: DecimalType => (operandTerm: String) => s"$operandTerm"
+      case _: TinyIntType | _: SmallIntType | _: IntType | _: BigIntType =>
+        numericCasting(ctx, t, new DecimalType(getPrecision(t), getScale(t)))
       case _ => numericCasting(ctx, t, resultType)
     }
     val methods =
@@ -178,14 +182,22 @@ object ScalarOperatorGens {
         }
 
       case (TIME_WITHOUT_TIME_ZONE, INTERVAL_DAY_TIME) =>
-        generateOperatorIfNotNull(ctx, new TimeType(), left, right) {
+        generateOperatorIfNotNull(
+          ctx,
+          new TimeType(LogicalTypeChecks.getPrecision(left.resultType)),
+          left,
+          right) {
           (l, r) =>
             s"java.lang.Math.toIntExact((($l + ${MILLIS_PER_DAY}L) $op (" +
               s"java.lang.Math.toIntExact($r % ${MILLIS_PER_DAY}L))) % ${MILLIS_PER_DAY}L)"
         }
 
       case (TIME_WITHOUT_TIME_ZONE, INTERVAL_YEAR_MONTH) =>
-        generateOperatorIfNotNull(ctx, new TimeType(), left, right)((l, r) => s"$l")
+        generateOperatorIfNotNull(
+          ctx,
+          new TimeType(LogicalTypeChecks.getPrecision(left.resultType)),
+          left,
+          right)((l, r) => s"$l")
 
       case (TIMESTAMP_WITHOUT_TIME_ZONE | TIMESTAMP_WITH_LOCAL_TIME_ZONE, INTERVAL_DAY_TIME) =>
         generateOperatorIfNotNull(ctx, left.resultType, left, right) {
@@ -259,6 +271,8 @@ object ScalarOperatorGens {
                   case (DATE, TIMESTAMP_WITHOUT_TIME_ZONE) =>
                     val rightTerm = s"$rr.getMillisecond()"
                     s"($ll * ${MILLIS_PER_DAY}L) $op $rightTerm"
+                  case (TIME_WITHOUT_TIME_ZONE, TIME_WITHOUT_TIME_ZONE) =>
+                    s"($ll $op $rr)"
                 }
             }
         }
@@ -412,6 +426,30 @@ object ScalarOperatorGens {
           mapType.getValueType,
           resultType),
         resultType)
+    }
+    // row types
+    else if (isRow(left.resultType) && canEqual) {
+      wrapExpressionIfNonEq(nonEq, generateRowComparison(ctx, left, right, resultType), resultType)
+    }
+    // structured types
+    else if (isStructuredType(left.resultType)) {
+      if (canEqual) {
+        val supportsEquality = left.resultType.asInstanceOf[StructuredType].getComparison.isEquality
+        if (!supportsEquality) {
+          throw new ValidationException(
+            s"Equality is not supported on structured type ${left.resultType}.")
+        }
+        wrapExpressionIfNonEq(
+          nonEq,
+          generateRowComparison(ctx, left, right, resultType),
+          resultType)
+      } else if (isStructuredType(right.resultType)) {
+        throw new ValidationException(
+          s"Incompatible structured types: ${left.resultType} and ${right.resultType}.")
+      } else {
+        throw new ValidationException(
+          s"Incompatible types: ${left.resultType} and ${right.resultType}.")
+      }
     }
     // multiset types
     else if (isMultiset(left.resultType) && canEqual) {
@@ -582,9 +620,11 @@ object ScalarOperatorGens {
           }
       }
       // both sides are numeric
-      else if (isNumeric(left.resultType) && isNumeric(right.resultType)) {
-        (leftTerm, rightTerm) => s"$leftTerm $operator $rightTerm"
-      }
+      else if (
+        isNumeric(left.resultType) && isNumeric(right.resultType)
+        || isTime(left.resultType) &&
+        isTime(right.resultType)
+      ) { (leftTerm, rightTerm) => s"$leftTerm $operator $rightTerm" }
 
       // both sides are timestamp
       else if (isTimestamp(left.resultType) && isTimestamp(right.resultType)) {
@@ -994,6 +1034,47 @@ object ScalarOperatorGens {
     }
   }
 
+  def generateCoalesce(
+      ctx: CodeGeneratorContext,
+      operands: Seq[GeneratedExpression],
+      resultType: LogicalType): GeneratedExpression = {
+    if (operands.size == 1) {
+      generateCast(ctx, operands.head, resultType, nullOnFailure = false)
+    } else {
+      val condition =
+        if (operands.head.resultType.equals(resultType)) {
+          operands.head
+        } else {
+          generateCast(ctx, operands.head, resultType, nullOnFailure = false)
+        }
+      val falseAction = generateCoalesce(ctx, operands.tail, resultType)
+
+      val Seq(resultTerm, nullTerm) = newNames(ctx, "result", "isNull")
+      val resultTypeTerm = primitiveTypeTermForType(resultType)
+      val defaultValue = primitiveDefaultValue(resultType)
+
+      val operatorCode =
+        s"""
+           |$resultTypeTerm $resultTerm = $defaultValue;
+           |// coalesce
+           |${condition.code}
+           |boolean $nullTerm = ${condition.nullTerm};
+           |if (!$nullTerm) {
+           |   $resultTerm = ${condition.resultTerm};
+           |} else {
+           |  ${falseAction.code}
+           |  $nullTerm = ${falseAction.nullTerm};
+           |  if (!$nullTerm) {
+           |    $resultTerm = ${falseAction.resultTerm};
+           |  }
+           |}
+           |// end coalesce
+           |""".stripMargin.trim
+
+      GeneratedExpression(resultTerm, nullTerm, operatorCode, resultType)
+    }
+  }
+
   def generateIfElse(
       ctx: CodeGeneratorContext,
       operands: Seq[GeneratedExpression],
@@ -1094,6 +1175,20 @@ object ScalarOperatorGens {
   // value construction and accessing generate utils
   // ----------------------------------------------------------------------------------------
 
+  def generateDescriptor(
+      ctx: CodeGeneratorContext,
+      operands: Seq[GeneratedExpression],
+      resultType: LogicalType): GeneratedExpression = {
+    val columnNames = operands
+      .map(_.literalValue)
+      .map(
+        _.getOrElse(throw new CodeGenException("String literals expected for DESCRIPTOR operands")))
+      .map(_.toString)
+    val columnList = ColumnList.of(columnNames.toList)
+    val columnListTerm = ctx.addReusableObject(columnList, "columnList", className[ColumnList])
+    GeneratedExpression(columnListTerm, NEVER_NULL, NO_CODE, resultType)
+  }
+
   def generateRow(
       ctx: CodeGeneratorContext,
       rowType: LogicalType,
@@ -1114,8 +1209,14 @@ object ScalarOperatorGens {
               element
             } else {
               val tpe = fieldTypes(idx)
-              val resultTerm = primitiveDefaultValue(tpe)
-              GeneratedExpression(resultTerm, ALWAYS_NULL, NO_CODE, tpe, Some(null))
+              val defaultValue = primitiveDefaultValue(tpe)
+              val resultTypeTerm = primitiveTypeTermForType(tpe)
+              GeneratedExpression(
+                s"(($resultTypeTerm) $defaultValue)",
+                ALWAYS_NULL,
+                NO_CODE,
+                tpe,
+                Some(null))
             }
         }
         val row = generateLiteralRow(ctx, rowType, mapped)
@@ -1382,7 +1483,7 @@ object ScalarOperatorGens {
          |    $resultTerm = $nullTerm ? $defaultValue : $arrayGet;
          |    break;
          |  default:
-         |    throw new RuntimeException("Array has more than one element.");
+         |    throw new org.apache.flink.table.api.TableRuntimeException("Array has more than one element.");
          |}
          |""".stripMargin
 
@@ -1463,28 +1564,23 @@ object ScalarOperatorGens {
     val mapType = resultType.asInstanceOf[MapType]
     val baseMap = newName(ctx, "map")
 
-    // prepare map key array
-    val keyElements = elements
+    val keyValues = elements
       .grouped(2)
       .map { case Seq(key, value) => (key, value) }
       .toSeq
-      .groupBy(_._1)
-      .map(_._2.last)
-      .keys
-      .toSeq
+
+    val deduplicatedKeyValues = groupByOrdered(keyValues)(_._1).map {
+      case (_, pairs) =>
+        pairs.last // Take the last occurrence
+    }
+    // prepare map key array
+    val keyElements = deduplicatedKeyValues.map(_._1)
     val keyType = mapType.getKeyType
     val keyExpr = generateArray(ctx, new ArrayType(keyType), keyElements)
     val isKeyFixLength = isPrimitive(keyType)
 
     // prepare map value array
-    val valueElements = elements
-      .grouped(2)
-      .map { case Seq(key, value) => (key, value) }
-      .toSeq
-      .groupBy(_._1)
-      .map(_._2.last)
-      .values
-      .toSeq
+    val valueElements = deduplicatedKeyValues.map(_._2)
     val valueType = mapType.getValueType
     val valueExpr = generateArray(ctx, new ArrayType(valueType), valueElements)
     val isValueFixLength = isPrimitive(valueType)
@@ -1626,6 +1722,101 @@ object ScalarOperatorGens {
     generateUnaryOperatorIfNotNull(ctx, resultType, map)(_ => s"${map.resultTerm}.size()")
   }
 
+  def generateVariantGet(
+      ctx: CodeGeneratorContext,
+      variant: GeneratedExpression,
+      key: GeneratedExpression): GeneratedExpression = {
+    val Seq(resultTerm, nullTerm) = newNames(ctx, "result", "isNull")
+    val tmpValue = newName(ctx, "tmpValue")
+
+    val variantType = variant.resultType.asInstanceOf[VariantType]
+    val variantTerm = variant.resultTerm
+    val variantTypeTerm = primitiveTypeTermForType(variantType)
+    val variantDefaultTerm = primitiveDefaultValue(variantType)
+
+    val keyTerm = key.resultTerm
+    val keyType = key.resultType
+
+    val accessCode = if (isIntegerNumeric(keyType)) {
+      generateIntegerKeyAccess(
+        variantTerm,
+        variantTypeTerm,
+        keyTerm,
+        resultTerm,
+        nullTerm,
+        tmpValue
+      )
+    } else if (isCharacterString(keyType)) {
+      val fieldName = key.literalValue.get.toString
+      generateCharacterStringKeyAccess(
+        variantTerm,
+        variantTypeTerm,
+        fieldName,
+        resultTerm,
+        nullTerm,
+        tmpValue
+      )
+    } else {
+      throw new CodeGenException(s"Unsupported key type for variant: $keyType")
+    }
+
+    val finalCode =
+      s"""
+         |${variant.code}
+         |${key.code}
+         |boolean $nullTerm = (${variant.nullTerm} || ${key.nullTerm});
+         |$variantTypeTerm $resultTerm = $variantDefaultTerm;
+         |if (!$nullTerm) {
+         |  $accessCode
+         |}
+      """.stripMargin
+
+    GeneratedExpression(resultTerm, nullTerm, finalCode, variantType)
+  }
+
+  private def generateCharacterStringKeyAccess(
+      variantTerm: String,
+      variantTypeTerm: String,
+      fieldName: String,
+      resultTerm: String,
+      nullTerm: String,
+      tmpValue: String): String = {
+    val escapedFieldName = EncodingUtils.escapeJava(fieldName)
+    s"""
+       |  if ($variantTerm.isObject()){
+       |    $variantTypeTerm $tmpValue = $variantTerm.getField("$escapedFieldName");
+       |    if ($tmpValue == null) {
+       |      $nullTerm = true;
+       |    } else {
+       |      $resultTerm = $tmpValue;
+       |    }
+       |  } else {
+       |    throw new ${className[TableRuntimeException]}("String key access on variant requires an object variant, but a non-object variant was provided.");
+       |  }
+    """.stripMargin
+  }
+
+  private def generateIntegerKeyAccess(
+      variantTerm: String,
+      variantTypeTerm: String,
+      keyTerm: String,
+      resultTerm: String,
+      nullTerm: String,
+      tmpValue: String): String = {
+    s"""
+       |  if ($variantTerm.isArray()){
+       |    $variantTypeTerm $tmpValue = $variantTerm.getElement((int) $keyTerm - 1);
+       |    if ($tmpValue == null) {
+       |      $nullTerm = true;
+       |    } else {
+       |      $resultTerm = $tmpValue;
+       |    }
+       |  } else {
+       |    throw new org.apache.flink.table.api.TableRuntimeException("Integer index access on variant requires an array variant, but a non-array variant was provided.");
+       |  }
+    """.stripMargin
+  }
+
   // ----------------------------------------------------------------------------------------
   // private generate utils
   // ----------------------------------------------------------------------------------------
@@ -1657,6 +1848,7 @@ object ScalarOperatorGens {
     }
 
     try {
+      // No escaping here as it will be done in the primitiveLiteralForType according to the type of the literal value.
       val result = castExecutor.cast(literalExpr.literalValue.get)
       val resultTerm = newName(ctx, "stringToTime")
 
@@ -1817,6 +2009,26 @@ object ScalarOperatorGens {
              """.stripMargin
         (stmt, resultTerm)
     }
+
+  private def generateRowComparison(
+      ctx: CodeGeneratorContext,
+      left: GeneratedExpression,
+      right: GeneratedExpression,
+      resultType: LogicalType): GeneratedExpression = {
+    generateCallWithStmtIfArgsNotNull(ctx, resultType, Seq(left, right)) {
+      args =>
+        val leftTerm = args.head
+        val rightTerm = args(1)
+
+        EqualiserCodeGenerator.generateRecordEqualiserCode(
+          ctx,
+          left.resultType,
+          right.resultType,
+          leftTerm,
+          rightTerm,
+          "rowGeneratedEqualiser")
+    }
+  }
 
   // ------------------------------------------------------------------------------------------
 

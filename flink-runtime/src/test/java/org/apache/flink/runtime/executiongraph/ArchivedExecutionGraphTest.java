@@ -22,12 +22,10 @@ import org.apache.flink.api.common.ArchivedExecutionConfig;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
-import org.apache.flink.api.common.restartstrategy.RestartStrategies;
 import org.apache.flink.core.testutils.CommonTestUtils;
 import org.apache.flink.runtime.checkpoint.CheckpointRetentionPolicy;
 import org.apache.flink.runtime.checkpoint.CheckpointStatsSnapshot;
 import org.apache.flink.runtime.checkpoint.CompletedCheckpointStatsSummarySnapshot;
-import org.apache.flink.runtime.checkpoint.StatsSummarySnapshot;
 import org.apache.flink.runtime.concurrent.ComponentMainThreadExecutorServiceAdapter;
 import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.jobgraph.JobGraph;
@@ -43,6 +41,8 @@ import org.apache.flink.runtime.scheduler.DefaultVertexParallelismStore;
 import org.apache.flink.runtime.scheduler.SchedulerBase;
 import org.apache.flink.runtime.scheduler.SchedulerTestingUtils;
 import org.apache.flink.runtime.taskmanager.TaskExecutionState;
+import org.apache.flink.runtime.util.stats.StatsSummarySnapshot;
+import org.apache.flink.streaming.util.RestartStrategyUtils;
 import org.apache.flink.testutils.TestingUtils;
 import org.apache.flink.testutils.executor.TestExecutorExtension;
 
@@ -92,7 +92,6 @@ public class ArchivedExecutionGraphTest {
 
         ExecutionConfig config = new ExecutionConfig();
 
-        config.setRestartStrategy(new RestartStrategies.NoRestartStrategyConfiguration());
         config.setParallelism(4);
         config.enableObjectReuse();
         config.setGlobalJobParameters(new TestJobParameters());
@@ -117,6 +116,8 @@ public class ArchivedExecutionGraphTest {
                         .setJobCheckpointingSettings(checkpointingSettings)
                         .setExecutionConfig(config)
                         .build();
+
+        RestartStrategyUtils.configureNoRestartStrategy(jobGraph);
 
         SchedulerBase scheduler =
                 SchedulerTestingUtils.createScheduler(
@@ -253,7 +254,7 @@ public class ArchivedExecutionGraphTest {
         // -------------------------------------------------------------------------------------------------------------
         // ExecutionGraph
         // -------------------------------------------------------------------------------------------------------------
-        assertThat(runtimeGraph.getJsonPlan()).isEqualTo(archivedGraph.getJsonPlan());
+        assertThat(runtimeGraph.getPlan()).isEqualTo(archivedGraph.getPlan());
         assertThat(runtimeGraph.getJobID()).isEqualTo(archivedGraph.getJobID());
         assertThat(runtimeGraph.getJobName()).isEqualTo(archivedGraph.getJobName());
         assertThat(runtimeGraph.getState()).isEqualTo(archivedGraph.getState());
@@ -326,7 +327,6 @@ public class ArchivedExecutionGraphTest {
         ArchivedExecutionConfig runtimeConfig = runtimeGraph.getArchivedExecutionConfig();
         ArchivedExecutionConfig archivedConfig = archivedGraph.getArchivedExecutionConfig();
 
-        assertThat(runtimeConfig.getExecutionMode()).isEqualTo(archivedConfig.getExecutionMode());
         assertThat(runtimeConfig.getParallelism()).isEqualTo(archivedConfig.getParallelism());
         assertThat(runtimeConfig.getObjectReuseEnabled())
                 .isEqualTo(archivedConfig.getObjectReuseEnabled());

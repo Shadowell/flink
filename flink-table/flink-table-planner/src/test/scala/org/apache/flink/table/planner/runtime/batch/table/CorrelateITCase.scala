@@ -17,7 +17,6 @@
  */
 package org.apache.flink.table.planner.runtime.batch.table
 
-import org.apache.flink.api.scala._
 import org.apache.flink.core.testutils.EachCallbackWrapper
 import org.apache.flink.table.api._
 import org.apache.flink.table.planner.expressions.utils.{Func1, Func18, FuncWithOpen, RichFunc2}
@@ -379,7 +378,7 @@ class CorrelateITCase extends BatchTestBase {
 
   private def testData: Table = {
 
-    val data = new mutable.MutableList[(Int, Long, String)]
+    val data = new mutable.ListBuffer[(Int, Long, String)]
     data.+=((1, 1L, "Jack#22"))
     data.+=((2, 2L, "John#19"))
     data.+=((3, 2L, "Anna#44"))

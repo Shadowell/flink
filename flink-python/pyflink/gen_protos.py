@@ -30,9 +30,11 @@ import sys
 import time
 import warnings
 
-import pkg_resources
+from importlib import metadata as importlib_metadata
+from importlib import resources as importlib_resources
+from packaging.version import parse as parse_version
 
-GRPC_TOOLS = 'grpcio-tools>=1.29.0,<=1.50.0'
+GRPC_TOOLS = 'grpcio-tools>=1.29.0,<=1.71.0'
 PROTO_PATHS = ['proto']
 PYFLINK_ROOT_PATH = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_PYTHON_OUTPUT_PATH = os.path.join(PYFLINK_ROOT_PATH, 'fn_execution')
@@ -73,7 +75,7 @@ def generate_proto_files(force=True, output_dir=DEFAULT_PYTHON_OUTPUT_PATH):
                 raise RuntimeError(
                     'Cannot generate protos for Windows since grpcio-tools package is '
                     'not installed. Please install this package manually '
-                    'using \'pip install "grpcio-tools>=1.29.0,<=1.50.0"\'.')
+                    'using \'pip install "grpcio-tools>=1.29.0,<=1.71.0"\'.')
 
             # Use a subprocess to avoid messing with this process' path and imports.
             # Note that this requires a separate module from setup.py for Windows:
@@ -87,7 +89,9 @@ def generate_proto_files(force=True, output_dir=DEFAULT_PYTHON_OUTPUT_PATH):
         else:
             _check_grpcio_tools_version()
             logging.info('Regenerating out-of-date Python proto definitions.')
-            builtin_protos = pkg_resources.resource_filename('grpc_tools', '_proto')
+            # Get the grpc_tools _proto directory path
+            grpc_tools_files = importlib_resources.files('grpc_tools')
+            builtin_protos = str(grpc_tools_files.joinpath('_proto'))
             args = (
                 [sys.executable] +  # expecting to be called from command line
                 ['--proto_path=%s' % builtin_protos] +
@@ -122,8 +126,7 @@ def _install_grpcio_tools_and_generate_proto_files(force, output_dir):
         start = time.time()
         # since '--prefix' option is only supported for pip 8.0+, so here we fallback to
         # use '--install-option' when the pip version is lower than 8.0.0.
-        pip_version = pkg_resources.get_distribution("pip").version
-        from pkg_resources import parse_version
+        pip_version = importlib_metadata.version("pip")
         if parse_version(pip_version) >= parse_version('8.0.0'):
             subprocess.check_call(
                 [sys.executable, '-m', 'pip', 'install',
@@ -144,10 +147,8 @@ def _install_grpcio_tools_and_generate_proto_files(force, output_dir):
         sys.stderr.flush()
         shutil.rmtree(build_path, ignore_errors=True)
     sys.path.append(install_obj.install_purelib)
-    pkg_resources.working_set.add_entry(install_obj.install_purelib)
     if install_obj.install_purelib != install_obj.install_platlib:
         sys.path.append(install_obj.install_platlib)
-        pkg_resources.working_set.add_entry(install_obj.install_platlib)
     try:
         generate_proto_files(force, output_dir)
     finally:
@@ -185,11 +186,11 @@ def _add_license_header(dir, file_name):
 
 
 def _check_grpcio_tools_version():
-    version = pkg_resources.get_distribution("grpcio-tools").parsed_version
-    from pkg_resources import parse_version
-    if version < parse_version('1.29.0') or version > parse_version('1.50.0'):
+    version_str = importlib_metadata.version("grpcio-tools")
+    version = parse_version(version_str)
+    if version < parse_version('1.29.0') or version > parse_version('1.71.0'):
         raise RuntimeError(
-            "Version of grpcio-tools must be between 1.29.0 and 1.50.0, got %s" % version)
+            "Version of grpcio-tools must be between 1.29.0 and 1.71.0, got %s" % version_str)
 
 
 if __name__ == '__main__':

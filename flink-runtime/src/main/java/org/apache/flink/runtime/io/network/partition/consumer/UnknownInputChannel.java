@@ -35,6 +35,7 @@ import org.apache.flink.util.Preconditions;
 import javax.annotation.Nullable;
 
 import java.io.IOException;
+import java.util.ArrayDeque;
 import java.util.Optional;
 
 import static org.apache.flink.runtime.checkpoint.CheckpointFailureReason.CHECKPOINT_DECLINED_TASK_NOT_READY;
@@ -183,7 +184,8 @@ class UnknownInputChannel extends InputChannel implements ChannelStateHolder {
                 networkBuffersPerChannel,
                 metrics.getNumBytesInRemoteCounter(),
                 metrics.getNumBuffersInRemoteCounter(),
-                channelStateWriter == null ? ChannelStateWriter.NO_OP : channelStateWriter);
+                channelStateWriter == null ? ChannelStateWriter.NO_OP : channelStateWriter,
+                new ArrayDeque<>());
     }
 
     public LocalInputChannel toLocalInputChannel(ResultPartitionID resultPartitionID) {
@@ -196,9 +198,10 @@ class UnknownInputChannel extends InputChannel implements ChannelStateHolder {
                 taskEventPublisher,
                 initialBackoff,
                 maxBackoff,
-                metrics.getNumBytesInRemoteCounter(),
-                metrics.getNumBuffersInRemoteCounter(),
-                channelStateWriter == null ? ChannelStateWriter.NO_OP : channelStateWriter);
+                metrics.getNumBytesInLocalCounter(),
+                metrics.getNumBuffersInLocalCounter(),
+                channelStateWriter == null ? ChannelStateWriter.NO_OP : channelStateWriter,
+                new ArrayDeque<>());
     }
 
     @Override

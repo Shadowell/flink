@@ -23,6 +23,7 @@ import org.apache.flink.configuration.CoreOptions;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.core.testutils.CommonTestUtils;
+import org.apache.flink.table.api.FunctionDescriptor;
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.catalog.CatalogFunctionImpl;
 import org.apache.flink.table.catalog.FunctionCatalog;
@@ -54,6 +55,7 @@ import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -83,6 +85,8 @@ public class ResourceManagerTest {
     @TempDir private static File tempFolder;
     private static File udfJar;
 
+    private static File udfArtifact;
+
     private static File file;
 
     private ResourceManager resourceManager;
@@ -92,7 +96,13 @@ public class ResourceManagerTest {
         udfJar =
                 UserClassLoaderJarTestUtils.createJarFile(
                         tempFolder,
-                        "test-classloader-udf.jar",
+                        "test-classloader-udf-jar.jar",
+                        GENERATED_LOWER_UDF_CLASS,
+                        String.format(GENERATED_LOWER_UDF_CODE, GENERATED_LOWER_UDF_CLASS));
+        udfArtifact =
+                UserClassLoaderJarTestUtils.createJarFile(
+                        tempFolder,
+                        "test-classloader-udf-artifact.jar",
                         GENERATED_LOWER_UDF_CLASS,
                         String.format(GENERATED_LOWER_UDF_CODE, GENERATED_LOWER_UDF_CLASS));
         file = File.createTempFile("ResourceManagerTest", ".txt", tempFolder);
@@ -113,7 +123,7 @@ public class ResourceManagerTest {
     }
 
     @Test
-    public void testRegisterJarResource() throws Exception {
+    public void testRegisterResources() throws Exception {
         URLClassLoader userClassLoader = resourceManager.getUserClassLoader();
 
         // test class loading before register resource
@@ -122,14 +132,20 @@ public class ResourceManagerTest {
                 ClassNotFoundException.class,
                 () -> Class.forName(GENERATED_LOWER_UDF_CLASS, false, userClassLoader));
 
-        ResourceUri resourceUri = new ResourceUri(ResourceType.JAR, udfJar.getPath());
-        // register the same jar repeatedly
-        resourceManager.registerJarResources(Arrays.asList(resourceUri, resourceUri));
+        ResourceUri jarResourceUri = new ResourceUri(ResourceType.JAR, udfJar.getPath());
+        ResourceUri artifactResourceUri =
+                new ResourceUri(ResourceType.ARTIFACT, udfArtifact.getPath());
+
+        // register the same artifacts repeatedly
+        resourceManager.registerResources(Arrays.asList(jarResourceUri, artifactResourceUri));
+        resourceManager.registerResources(Arrays.asList(jarResourceUri, artifactResourceUri));
 
         // assert resource infos
-        Map<ResourceUri, URL> expected =
-                Collections.singletonMap(
-                        resourceUri, resourceManager.getURLFromPath(new Path(udfJar.getPath())));
+        Map<ResourceUri, URL> expected = new HashMap<>();
+        expected.put(jarResourceUri, resourceManager.getURLFromPath(new Path(udfJar.getPath())));
+        expected.put(
+                artifactResourceUri,
+                resourceManager.getURLFromPath(new Path(udfArtifact.getPath())));
 
         assertEquals(expected, resourceManager.getResources());
 
@@ -198,7 +214,7 @@ public class ResourceManagerTest {
                                 .relativize(udfJar.toPath())
                                 .toString());
         // register jar
-        resourceManager.registerJarResources(Collections.singletonList(resourceUri));
+        resourceManager.registerResources(Collections.singletonList(resourceUri));
 
         // assert resource infos
         Map<ResourceUri, URL> expected =
@@ -216,16 +232,16 @@ public class ResourceManagerTest {
     }
 
     @Test
-    public void testRegisterInvalidJarResource() throws Exception {
+    public void testRegisterInvalidResource() throws Exception {
         final String fileUri = file.getPath();
 
         CommonTestUtils.assertThrows(
                 String.format(
-                        "Expect the resource type to be jar, but encounter a resource [%s] with type %s.",
+                        "Expect the resource type to be jar or artifact, but encounter a resource [%s] with type %s.",
                         fileUri, ResourceType.FILE.name().toLowerCase()),
                 ValidationException.class,
                 () -> {
-                    resourceManager.registerJarResources(
+                    resourceManager.registerResources(
                             Collections.singletonList(new ResourceUri(ResourceType.FILE, fileUri)));
                     return null;
                 });
@@ -233,11 +249,11 @@ public class ResourceManagerTest {
         // test register jar resource with invalid suffix
         CommonTestUtils.assertThrows(
                 String.format(
-                        "The registering or unregistering jar resource [%s] must ends with '.jar' suffix.",
+                        "The registering or unregistering resource [%s] must end with a '.jar' suffix.",
                         fileUri),
                 ValidationException.class,
                 () -> {
-                    resourceManager.registerJarResources(
+                    resourceManager.registerResources(
                             Collections.singletonList(new ResourceUri(ResourceType.JAR, fileUri)));
                     return null;
                 });
@@ -247,11 +263,11 @@ public class ResourceManagerTest {
 
         CommonTestUtils.assertThrows(
                 String.format(
-                        "The registering or unregistering jar resource [%s] is a directory that is not allowed.",
+                        "The registering or unregistering resource [%s] is a directory, which is not allowed.",
                         jarDir),
                 ValidationException.class,
                 () -> {
-                    resourceManager.registerJarResources(
+                    resourceManager.registerResources(
                             Collections.singletonList(new ResourceUri(ResourceType.JAR, jarDir)));
                     return null;
                 });
@@ -262,11 +278,11 @@ public class ResourceManagerTest {
 
         CommonTestUtils.assertThrows(
                 String.format(
-                        "The registering or unregistering jar resource [%s] is a directory that is not allowed.",
+                        "The registering or unregistering resource [%s] is a directory, which is not allowed.",
                         jarPath),
                 ValidationException.class,
                 () -> {
-                    resourceManager.registerJarResources(
+                    resourceManager.registerResources(
                             Collections.singletonList(new ResourceUri(ResourceType.JAR, jarPath)));
                     return null;
                 });
@@ -385,7 +401,12 @@ public class ResourceManagerTest {
                         new ModuleManager());
 
         functionCatalog.registerCatalogFunction(
-                FULL_UNRESOLVED_IDENTIFIER1, GENERATED_LOWER_UDF_CLASS, resourceUris, false);
+                FULL_UNRESOLVED_IDENTIFIER1,
+                FunctionDescriptor.forClassName(GENERATED_LOWER_UDF_CLASS)
+                        .language(FunctionLanguage.JAVA)
+                        .resourceUris(resourceUris)
+                        .build(),
+                false);
 
         Map<ResourceUri, ResourceManager.ResourceCounter> functionResourceInfos =
                 resourceManager.functionResourceInfos();
@@ -396,7 +417,12 @@ public class ResourceManagerTest {
         // Register catalog function again to validate that unregister catalog function will not
         // decrease the reference count of resourceUris.
         functionCatalog.registerCatalogFunction(
-                FULL_UNRESOLVED_IDENTIFIER1, GENERATED_LOWER_UDF_CLASS, resourceUris, false);
+                FULL_UNRESOLVED_IDENTIFIER1,
+                FunctionDescriptor.forClassName(GENERATED_LOWER_UDF_CLASS)
+                        .language(FunctionLanguage.JAVA)
+                        .resourceUris(resourceUris)
+                        .build(),
+                false);
         functionCatalog.registerTemporaryCatalogFunction(
                 FULL_UNRESOLVED_IDENTIFIER2,
                 new CatalogFunctionImpl(
@@ -435,7 +461,7 @@ public class ResourceManagerTest {
     void testCloseCopiedResourceManager() throws Exception {
         ResourceUri resourceUri = new ResourceUri(ResourceType.JAR, udfJar.getPath());
         resourceManager.declareFunctionResources(Collections.singleton(resourceUri));
-        resourceManager.registerJarResources(Collections.singletonList(resourceUri));
+        resourceManager.registerResources(Collections.singletonList(resourceUri));
         assertThat(resourceManager.functionResourceInfos().size()).isEqualTo(1);
         assertThat(resourceManager.resourceInfos.size()).isEqualTo(1);
 

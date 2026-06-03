@@ -30,13 +30,16 @@ import org.apache.flink.api.common.state.State;
 import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.functions.KeySelector;
+import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MetricOptions;
+import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.core.memory.ManagedMemoryUseCase;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.metrics.groups.OperatorMetricGroup;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
+import org.apache.flink.runtime.event.WatermarkEvent;
 import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.metrics.groups.InternalOperatorMetricGroup;
@@ -59,6 +62,7 @@ import org.apache.flink.streaming.runtime.tasks.ProcessingTimeService;
 import org.apache.flink.streaming.runtime.tasks.StreamTask;
 import org.apache.flink.streaming.runtime.watermarkstatus.WatermarkStatus;
 import org.apache.flink.streaming.util.LatencyStats;
+import org.apache.flink.util.OutputTag;
 import org.apache.flink.util.Preconditions;
 
 import org.slf4j.Logger;
@@ -71,7 +75,9 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.function.Function;
 
+import static org.apache.flink.util.Preconditions.checkNotNull;
 import static org.apache.flink.util.Preconditions.checkState;
 
 /**
@@ -95,7 +101,6 @@ import static org.apache.flink.util.Preconditions.checkState;
 @PublicEvolving
 public abstract class AbstractStreamOperator<OUT>
         implements StreamOperator<OUT>,
-                SetupableStreamOperator<OUT>,
                 YieldingOperator<OUT>,
                 CheckpointedStreamOperator,
                 KeyContextHandler,
@@ -104,11 +109,6 @@ public abstract class AbstractStreamOperator<OUT>
 
     /** The logger used by the operator class and its subclasses. */
     protected static final Logger LOG = LoggerFactory.getLogger(AbstractStreamOperator.class);
-
-    // ----------- configuration properties -------------
-
-    // A sane default for most operators
-    protected ChainingStrategy chainingStrategy = ChainingStrategy.HEAD;
 
     // ---------------- runtime fields ------------------
 
@@ -119,7 +119,7 @@ public abstract class AbstractStreamOperator<OUT>
 
     protected transient Output<StreamRecord<OUT>> output;
 
-    private transient IndexedCombinedWatermarkStatus combinedWatermark;
+    protected transient IndexedCombinedWatermarkStatus combinedWatermark;
 
     /** The runtime context for UDFs. */
     private transient StreamingRuntimeContext runtimeContext;
@@ -127,6 +127,8 @@ public abstract class AbstractStreamOperator<OUT>
     private transient @Nullable MailboxExecutor mailboxExecutor;
 
     private transient @Nullable MailboxWatermarkProcessor watermarkProcessor;
+
+    private final OutputAdjustment<OUT> outputAdjustment;
 
     // ---------------- key/value state ------------------
 
@@ -164,23 +166,47 @@ public abstract class AbstractStreamOperator<OUT>
     protected transient RecordAttributes lastRecordAttributes1;
     protected transient RecordAttributes lastRecordAttributes2;
 
+    public AbstractStreamOperator() {
+        this(null);
+    }
+
+    public AbstractStreamOperator(StreamOperatorParameters<OUT> parameters) {
+        this(parameters, OutputAdjustment.noAdjustment());
+    }
+
+    public AbstractStreamOperator(
+            StreamOperatorParameters<OUT> parameters, OutputAdjustment<OUT> outputAdjustment) {
+        this.outputAdjustment = checkNotNull(outputAdjustment);
+        if (parameters != null) {
+            setup(
+                    parameters.getContainingTask(),
+                    parameters.getStreamConfig(),
+                    parameters.getOutput());
+            this.processingTimeService =
+                    Preconditions.checkNotNull(parameters.getProcessingTimeService());
+            this.mailboxExecutor = parameters.getMailboxExecutor();
+        }
+    }
+
     // ------------------------------------------------------------------------
     //  Life Cycle
     // ------------------------------------------------------------------------
 
-    @Override
-    public void setup(
+    protected void setup(
             StreamTask<?, ?> containingTask,
             StreamConfig config,
             Output<StreamRecord<OUT>> output) {
         final Environment environment = containingTask.getEnvironment();
         this.container = containingTask;
         this.config = config;
-        this.output = output;
+        this.output = outputAdjustment.apply(output);
         this.metrics =
                 environment
                         .getMetricGroup()
-                        .getOrAddOperator(config.getOperatorID(), config.getOperatorName());
+                        .getOrAddOperator(
+                                config.getOperatorID(),
+                                config.getOperatorName(),
+                                config.getAdditionalMetricVariables());
         this.combinedWatermark = IndexedCombinedWatermarkStatus.forInputsCount(2);
 
         try {
@@ -246,12 +272,7 @@ public abstract class AbstractStreamOperator<OUT>
         lastRecordAttributes2 = RecordAttributes.EMPTY_RECORD_ATTRIBUTES;
     }
 
-    /**
-     * @deprecated The {@link ProcessingTimeService} instance should be passed by the operator
-     *     constructor and this method will be removed along with {@link SetupableStreamOperator}.
-     */
-    @Deprecated
-    public void setProcessingTimeService(ProcessingTimeService processingTimeService) {
+    protected void setProcessingTimeService(ProcessingTimeService processingTimeService) {
         this.processingTimeService = Preconditions.checkNotNull(processingTimeService);
     }
 
@@ -260,8 +281,11 @@ public abstract class AbstractStreamOperator<OUT>
         return metrics;
     }
 
+    /** Initialize necessary state components before initializing state components. */
+    protected void beforeInitializeStateHandler() {}
+
     @Override
-    public void initializeState(StreamTaskStateInitializer streamTaskStateManager)
+    public final void initializeState(StreamTaskStateInitializer streamTaskStateManager)
             throws Exception {
 
         final TypeSerializer<?> keySerializer =
@@ -285,12 +309,17 @@ public abstract class AbstractStreamOperator<OUT>
                                 runtimeContext.getJobConfiguration(),
                                 runtimeContext.getTaskManagerRuntimeInfo().getConfiguration(),
                                 runtimeContext.getUserCodeClassLoader()),
-                        isUsingCustomRawKeyedState());
-
+                        isUsingCustomRawKeyedState(),
+                        isAsyncKeyOrderedProcessingEnabled());
         stateHandler =
                 new StreamOperatorStateHandler(
                         context, getExecutionConfig(), streamTaskCloseableRegistry);
-        timeServiceManager = context.internalTimerServiceManager();
+        timeServiceManager =
+                isAsyncKeyOrderedProcessingEnabled()
+                        ? context.asyncInternalTimerServiceManager()
+                        : context.internalTimerServiceManager();
+
+        beforeInitializeStateHandler();
         stateHandler.initializeOperatorState(this);
         runtimeContext.setKeyedStateStore(stateHandler.getKeyedStateStore().orElse(null));
     }
@@ -319,6 +348,14 @@ public abstract class AbstractStreamOperator<OUT>
         return false;
     }
 
+    /**
+     * Indicates whether this operator is enabling the async state. Can be overridden by subclasses.
+     */
+    @Internal
+    public boolean isAsyncKeyOrderedProcessingEnabled() {
+        return false;
+    }
+
     @Internal
     @Override
     public void setMailboxExecutor(MailboxExecutor mailboxExecutor) {
@@ -326,28 +363,22 @@ public abstract class AbstractStreamOperator<OUT>
     }
 
     /**
-     * Can be overridden to disable splittable timers for this particular operator even if config
-     * option is enabled. By default, splittable timers are disabled.
+     * Can be overridden to enable splittable timers for this particular operator if config option
+     * is enabled. By default, splittable timers are disabled.
      *
      * @return {@code true} if splittable timers should be used (subject to {@link
-     *     StreamConfig#isUnalignedCheckpointsEnabled()} and {@link
-     *     StreamConfig#isUnalignedCheckpointsSplittableTimersEnabled()}. {@code false} if
-     *     splittable timers should never be used.
+     *     CheckpointingOptions#isUnalignedCheckpointInterruptibleTimersEnabled(Configuration)}.
+     *     {@code false} if splittable timers should never be used.
      */
     @Internal
-    public boolean useSplittableTimers() {
+    public boolean useInterruptibleTimers(ReadableConfig config) {
         return false;
     }
 
     @Internal
-    private boolean areSplittableTimersConfigured() {
-        return areSplittableTimersConfigured(config);
-    }
-
-    static boolean areSplittableTimersConfigured(StreamConfig config) {
-        return config.isCheckpointingEnabled()
-                && config.isUnalignedCheckpointsEnabled()
-                && config.isUnalignedCheckpointsSplittableTimersEnabled();
+    private boolean areInterruptibleTimersConfigured() {
+        return CheckpointingOptions.isUnalignedCheckpointInterruptibleTimersEnabled(
+                getContainingTask().getJobConfiguration());
     }
 
     /**
@@ -360,9 +391,10 @@ public abstract class AbstractStreamOperator<OUT>
      */
     @Override
     public void open() throws Exception {
-        if (useSplittableTimers()
-                && areSplittableTimersConfigured()
+        if (useInterruptibleTimers(getContainingTask().getJobConfiguration())
+                && areInterruptibleTimersConfigured()
                 && getTimeServiceManager().isPresent()) {
+            LOG.info("Interruptible timers enabled for {}", getClass().getSimpleName());
             this.watermarkProcessor =
                     new MailboxWatermarkProcessor(
                             output, mailboxExecutor, getTimeServiceManager().get());
@@ -400,7 +432,8 @@ public abstract class AbstractStreamOperator<OUT>
                 timestamp,
                 checkpointOptions,
                 factory,
-                isUsingCustomRawKeyedState());
+                isUsingCustomRawKeyedState(),
+                isAsyncKeyOrderedProcessingEnabled());
     }
 
     /**
@@ -523,7 +556,7 @@ public abstract class AbstractStreamOperator<OUT>
      * @throws IllegalStateException Thrown, if the key/value state was already initialized.
      * @throws Exception Thrown, if the state backend cannot create the key/value state.
      */
-    protected <S extends State, N> S getPartitionedState(
+    public <S extends State, N> S getPartitionedState(
             N namespace,
             TypeSerializer<N> namespaceSerializer,
             StateDescriptor<S, ?> stateDescriptor)
@@ -590,16 +623,6 @@ public abstract class AbstractStreamOperator<OUT>
     //  Context and chaining properties
     // ------------------------------------------------------------------------
 
-    @Override
-    public final void setChainingStrategy(ChainingStrategy strategy) {
-        this.chainingStrategy = strategy;
-    }
-
-    @Override
-    public final ChainingStrategy getChainingStrategy() {
-        return chainingStrategy;
-    }
-
     // ------------------------------------------------------------------------
     //  Metrics
     // ------------------------------------------------------------------------
@@ -658,10 +681,10 @@ public abstract class AbstractStreamOperator<OUT>
         @SuppressWarnings("unchecked")
         InternalTimeServiceManager<K> keyedTimeServiceHandler =
                 (InternalTimeServiceManager<K>) timeServiceManager;
-        KeyedStateBackend<K> keyedStateBackend = getKeyedStateBackend();
-        checkState(keyedStateBackend != null, "Timers can only be used on keyed operators.");
+        TypeSerializer<K> keySerializer = stateHandler.getKeySerializer();
+        checkState(keySerializer != null, "Timers can only be used on keyed operators.");
         return keyedTimeServiceHandler.getInternalTimerService(
-                name, keyedStateBackend.getKeySerializer(), namespaceSerializer, triggerable);
+                name, keySerializer, namespaceSerializer, triggerable);
     }
 
     public void processWatermark(Watermark mark) throws Exception {
@@ -697,7 +720,7 @@ public abstract class AbstractStreamOperator<OUT>
         output.emitWatermarkStatus(watermarkStatus);
     }
 
-    private void processWatermarkStatus(WatermarkStatus watermarkStatus, int index)
+    protected void processWatermarkStatus(WatermarkStatus watermarkStatus, int index)
             throws Exception {
         boolean wasIdle = combinedWatermark.isIdle();
         if (combinedWatermark.updateStatus(index, watermarkStatus.isIdle())) {
@@ -747,5 +770,91 @@ public abstract class AbstractStreamOperator<OUT>
                 new RecordAttributesBuilder(
                                 Arrays.asList(lastRecordAttributes1, lastRecordAttributes2))
                         .build());
+    }
+
+    @Experimental
+    public void processWatermark(WatermarkEvent watermark) throws Exception {
+        output.emitWatermark(watermark);
+    }
+
+    @Experimental
+    public void processWatermark1(WatermarkEvent watermark) throws Exception {
+        output.emitWatermark(watermark);
+    }
+
+    @Experimental
+    public void processWatermark2(WatermarkEvent watermark) throws Exception {
+        output.emitWatermark(watermark);
+    }
+
+    @Experimental
+    public interface OutputAdjustment<OUT>
+            extends Function<Output<StreamRecord<OUT>>, Output<StreamRecord<OUT>>>, Serializable {
+
+        static <OUT> OutputAdjustment<OUT> noAdjustment() {
+            return out -> out;
+        }
+
+        static <OUT> OutputAdjustment<OUT> delayedWatermarkOutput(long delay) {
+            return new DelayedOutputAdjustment<>(delay);
+        }
+
+        @Experimental
+        class DelayedOutputAdjustment<OUT> implements OutputAdjustment<OUT> {
+            private static final long serialVersionUID = 1L;
+
+            private final long watermarkDelay;
+
+            public DelayedOutputAdjustment(long watermarkDelay) {
+                Preconditions.checkArgument(
+                        watermarkDelay > 0, "The watermark delay should be positive.");
+                this.watermarkDelay = watermarkDelay;
+            }
+
+            @Override
+            public Output<StreamRecord<OUT>> apply(Output<StreamRecord<OUT>> out) {
+                return new Output<>() {
+                    @Override
+                    public void collect(StreamRecord<OUT> record) {
+                        out.collect(record);
+                    }
+
+                    @Override
+                    public void close() {
+                        out.close();
+                    }
+
+                    @Override
+                    public void emitWatermark(Watermark mark) {
+                        out.emitWatermark(new Watermark(mark.getTimestamp() - watermarkDelay));
+                    }
+
+                    @Override
+                    public void emitWatermarkStatus(WatermarkStatus watermarkStatus) {
+                        out.emitWatermarkStatus(watermarkStatus);
+                    }
+
+                    @Override
+                    public <X> void collect(OutputTag<X> outputTag, StreamRecord<X> record) {
+                        out.collect(outputTag, record);
+                    }
+
+                    @Override
+                    public void emitLatencyMarker(LatencyMarker latencyMarker) {
+                        out.emitLatencyMarker(latencyMarker);
+                    }
+
+                    @Override
+                    public void emitRecordAttributes(RecordAttributes recordAttributes) {
+                        out.emitRecordAttributes(recordAttributes);
+                    }
+
+                    @Override
+                    public void emitWatermark(WatermarkEvent watermark) {
+                        out.emitWatermark(watermark);
+                    }
+                };
+            }
+        }
     }
 }

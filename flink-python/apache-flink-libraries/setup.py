@@ -49,8 +49,8 @@ def find_file_path(pattern):
     return files[0]
 
 
-in_flink_source = os.path.isfile("../../flink-java/src/main/java/org/apache/flink/api/java/"
-                                 "ExecutionEnvironment.java")
+in_flink_source = os.path.isfile("../../flink-runtime/src/main/java/org/apache/flink/streaming"
+                                 "/api/environment/StreamExecutionEnvironment.java")
 this_directory = os.path.abspath(os.path.dirname(__file__))
 pyflink_directory = os.path.join(this_directory, "pyflink")
 if in_flink_source:
@@ -225,17 +225,17 @@ run sdist.
         license='https://www.apache.org/licenses/LICENSE-2.0',
         author='Apache Software Foundation',
         author_email='dev@flink.apache.org',
-        python_requires='>=3.8',
+        python_requires='>=3.9',
         description='Apache Flink Libraries',
         long_description=long_description,
         long_description_content_type='text/markdown',
         classifiers=[
             'Development Status :: 5 - Production/Stable',
             'License :: OSI Approved :: Apache Software License',
-            'Programming Language :: Python :: 3.8',
             'Programming Language :: Python :: 3.9',
             'Programming Language :: Python :: 3.10',
-            'Programming Language :: Python :: 3.11'],
+            'Programming Language :: Python :: 3.11',
+            'Programming Language :: Python :: 3.12'],
     )
 finally:
     if in_flink_source:

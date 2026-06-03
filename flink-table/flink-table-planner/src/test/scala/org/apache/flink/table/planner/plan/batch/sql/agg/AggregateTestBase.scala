@@ -17,12 +17,10 @@
  */
 package org.apache.flink.table.planner.plan.batch.sql.agg
 
-import org.apache.flink.api.common.typeinfo.TypeInformation
-import org.apache.flink.api.scala._
-import org.apache.flink.table.api.{TableException, Types, _}
+import org.apache.flink.table.api._
 import org.apache.flink.table.planner.plan.utils.JavaUserDefinedAggFunctions.{VarSum1AggFunction, VarSum2AggFunction}
 import org.apache.flink.table.planner.utils.{BatchTableTestUtil, TableTestBase}
-import org.apache.flink.table.runtime.typeutils.DecimalDataTypeInfo
+import org.apache.flink.table.types.AbstractDataType
 
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.TestTemplate
@@ -32,20 +30,20 @@ abstract class AggregateTestBase extends TableTestBase {
   protected val util: BatchTableTestUtil = batchTestUtil()
   util.addTableSource(
     "MyTable",
-    Array[TypeInformation[_]](
-      Types.BYTE,
-      Types.SHORT,
-      Types.INT,
-      Types.LONG,
-      Types.FLOAT,
-      Types.DOUBLE,
-      Types.BOOLEAN,
-      Types.STRING,
-      Types.LOCAL_DATE,
-      Types.LOCAL_TIME,
-      Types.LOCAL_DATE_TIME,
-      DecimalDataTypeInfo.of(30, 20),
-      DecimalDataTypeInfo.of(10, 5)
+    Array[AbstractDataType[_]](
+      DataTypes.TINYINT(),
+      DataTypes.SMALLINT,
+      DataTypes.INT,
+      DataTypes.BIGINT,
+      DataTypes.FLOAT,
+      DataTypes.DOUBLE,
+      DataTypes.BOOLEAN,
+      DataTypes.STRING,
+      DataTypes.DATE,
+      DataTypes.TIME,
+      DataTypes.TIMESTAMP(3),
+      DataTypes.DECIMAL(30, 20),
+      DataTypes.DECIMAL(10, 5)
     ),
     Array(
       "byte",
@@ -63,6 +61,17 @@ abstract class AggregateTestBase extends TableTestBase {
       "decimal105")
   )
   util.addTableSource[(Int, Long, String)]("MyTable1", 'a, 'b, 'c)
+
+  // the test values table source supports projection push down by default
+  util.tableEnv.executeSql("""
+                             |CREATE TABLE src (
+                             | id VARCHAR,
+                             | cnt BIGINT
+                             |) WITH (
+                             | 'connector' = 'values'
+                             | ,'bounded' = 'true'
+                             |)
+                             |""".stripMargin)
 
   @TestTemplate
   def testAvg(): Unit = {
@@ -121,17 +130,16 @@ abstract class AggregateTestBase extends TableTestBase {
 
   @TestTemplate
   def testCountStartWithProjectPushDown(): Unit = {
-    // the test values table source supports projection push down by default
-    util.tableEnv.executeSql("""
-                               |CREATE TABLE src (
-                               | id VARCHAR,
-                               | cnt BIGINT
-                               |) WITH (
-                               | 'connector' = 'values'
-                               | ,'bounded' = 'true'
-                               |)
-                               |""".stripMargin)
     util.verifyRelPlanWithType("SELECT COUNT(*) FROM src")
+  }
+
+  @TestTemplate
+  def testCountStarWithHavingAndProjectPushDown(): Unit = {
+    val sql =
+      """
+        |SELECT COUNT(*) FROM src HAVING COUNT(*) > 1
+      """.stripMargin
+    util.verifyRelPlanWithType(sql)
   }
 
   @TestTemplate
@@ -241,6 +249,14 @@ abstract class AggregateTestBase extends TableTestBase {
         |SELECT a, MAX(b), c FROM (SELECT a, 'test' AS c, b FROM MyTable1) t GROUP BY a, c
       """.stripMargin
     util.verifyExecPlan(sql)
+  }
+
+  @TestTemplate
+  def testGlobalAggOverEmptyInputReplacedByValues(): Unit = {
+    // When the planner can statically determine the input is empty (WHERE 1=0),
+    // AGGREGATE_VALUES rule should replace the global aggregate with literal defaults
+    // (e.g. COUNT(*)=0, SUM=null) and remove the aggregate node entirely.
+    util.verifyExecPlan("SELECT COUNT(*), SUM(`int`), AVG(`int`) FROM MyTable WHERE 1=0")
   }
 
   // TODO supports group sets

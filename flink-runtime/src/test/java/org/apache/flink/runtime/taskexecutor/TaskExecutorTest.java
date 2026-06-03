@@ -18,9 +18,9 @@
 
 package org.apache.flink.runtime.taskexecutor;
 
+import org.apache.flink.api.common.ApplicationID;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.resources.CPUResource;
-import org.apache.flink.api.common.time.Time;
 import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MemorySize;
@@ -87,6 +87,7 @@ import org.apache.flink.runtime.state.TaskExecutorLocalStateStoresManager;
 import org.apache.flink.runtime.state.TaskExecutorStateChangelogStoragesManager;
 import org.apache.flink.runtime.taskexecutor.TaskSubmissionTestEnvironment.Builder;
 import org.apache.flink.runtime.taskexecutor.exceptions.RegistrationTimeoutException;
+import org.apache.flink.runtime.taskexecutor.exceptions.SlotAllocationException;
 import org.apache.flink.runtime.taskexecutor.exceptions.TaskManagerException;
 import org.apache.flink.runtime.taskexecutor.exceptions.TaskSubmissionException;
 import org.apache.flink.runtime.taskexecutor.partition.ClusterPartitionReport;
@@ -120,7 +121,7 @@ import org.apache.flink.util.function.TriConsumer;
 import org.apache.flink.util.function.TriConsumerWithException;
 
 import org.apache.flink.shaded.curator5.com.google.common.collect.Iterators;
-import org.apache.flink.shaded.guava32.com.google.common.collect.Lists;
+import org.apache.flink.shaded.guava33.com.google.common.collect.Lists;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -196,7 +197,7 @@ class TaskExecutorTest {
 
     @TempDir private Path tempDir;
 
-    private static final Time timeout = Time.milliseconds(10000L);
+    private static final Duration timeout = Duration.ofMillis(10000L);
 
     private static final HeartbeatServices failedRpcEnabledHeartbeatServices =
             new HeartbeatServicesImpl(1L, 10000000L, 1);
@@ -209,6 +210,8 @@ class TaskExecutorTest {
 
     private JobID jobId;
     private JobID jobId2;
+
+    private ApplicationID applicationId;
 
     private TestingFatalErrorHandler testingFatalErrorHandler;
 
@@ -231,6 +234,7 @@ class TaskExecutorTest {
         unresolvedTaskManagerLocation = new LocalUnresolvedTaskManagerLocation();
         jobId = new JobID();
         jobId2 = new JobID();
+        applicationId = new ApplicationID();
 
         testingFatalErrorHandler = new TestingFatalErrorHandler();
 
@@ -465,7 +469,7 @@ class TaskExecutorTest {
             final ResourceID resourceID = disconnectTaskManagerFuture.get();
             assertThat(resourceID).isEqualTo(unresolvedTaskManagerLocation.getResourceID());
 
-            assertThat(registrationAttempts.await(timeout.toMilliseconds(), TimeUnit.SECONDS))
+            assertThat(registrationAttempts.await(timeout.toMillis(), TimeUnit.SECONDS))
                     .withFailMessage("The TaskExecutor should try to reconnect to the JM")
                     .isTrue();
         } finally {
@@ -578,10 +582,10 @@ class TaskExecutorTest {
 
             // heartbeat timeout should trigger disconnect TaskManager from ResourceManager
             assertThat(taskExecutorDisconnectFuture)
-                    .succeedsWithin(timeout.toMilliseconds(), TimeUnit.MILLISECONDS)
+                    .succeedsWithin(timeout.toMillis(), TimeUnit.MILLISECONDS)
                     .isEqualTo(unresolvedTaskManagerLocation.getResourceID());
 
-            assertThat(registrationAttempts.await(timeout.toMilliseconds(), TimeUnit.SECONDS))
+            assertThat(registrationAttempts.await(timeout.toMillis(), TimeUnit.SECONDS))
                     .withFailMessage("The TaskExecutor should try to reconnect to the RM")
                     .isTrue();
         } finally {
@@ -766,9 +770,7 @@ class TaskExecutorTest {
             resourceManagerLeaderRetriever.notifyListener(
                     resourceManagerAddress, UUID.randomUUID());
 
-            assertThat(
-                            taskManagerRegisteredLatch.await(
-                                    timeout.toMilliseconds(), TimeUnit.MILLISECONDS))
+            assertThat(taskManagerRegisteredLatch.await(timeout.toMillis(), TimeUnit.MILLISECONDS))
                     .isTrue();
         } finally {
             RpcUtils.terminateRpcEndpoint(taskManager);
@@ -1848,6 +1850,7 @@ class TaskExecutorTest {
                     taskExecutorGateway.requestSlot(
                             new SlotID(resourceId, 0),
                             jobId,
+                            applicationId,
                             new AllocationID(),
                             ResourceProfile.ZERO,
                             "foobar",
@@ -2338,6 +2341,7 @@ class TaskExecutorTest {
             taskExecutorGateway.requestSlot(
                     new SlotID(taskExecutor.getResourceID(), 0),
                     jobId,
+                    applicationId,
                     allocationIdInBoth,
                     ResourceProfile.ZERO,
                     "foobar",
@@ -2346,6 +2350,7 @@ class TaskExecutorTest {
             taskExecutorGateway.requestSlot(
                     new SlotID(taskExecutor.getResourceID(), 1),
                     jobId,
+                    applicationId,
                     allocationIdOnlyInTM,
                     ResourceProfile.ZERO,
                     "foobar",
@@ -2464,6 +2469,7 @@ class TaskExecutorTest {
                     .requestSlot(
                             new SlotID(taskExecutorResourceId, 0),
                             jobId,
+                            applicationId,
                             new AllocationID(),
                             ResourceProfile.ZERO,
                             "foobar",
@@ -2476,7 +2482,7 @@ class TaskExecutorTest {
             verifySlotReportFuture.get();
         } finally {
             ExecutorUtils.gracefulShutdown(
-                    timeout.toMilliseconds(), TimeUnit.MILLISECONDS, heartbeatExecutor);
+                    timeout.toMillis(), TimeUnit.MILLISECONDS, heartbeatExecutor);
             RpcUtils.terminateRpcEndpoint(taskExecutor);
         }
     }
@@ -2936,32 +2942,35 @@ class TaskExecutorTest {
                     createTotalResourceProfile(1),
                     DEFAULT_RESOURCE_PROFILE,
                     MemoryManager.MIN_PAGE_SIZE,
-                    createDefaultTimerService(timeout.toMilliseconds()),
+                    createDefaultTimerService(timeout.toMillis()),
                     Executors.newDirectExecutorService());
             this.allocateSlotLatch = allocateSlotLatch;
         }
 
         @Override
-        public boolean allocateSlot(
-                int index, JobID jobId, AllocationID allocationId, Duration slotTimeout) {
-            final boolean result = super.allocateSlot(index, jobId, allocationId, slotTimeout);
-            allocateSlotLatch.trigger();
-
-            return result;
+        public void allocateSlot(
+                int index, JobID jobId, AllocationID allocationId, Duration slotTimeout)
+                throws SlotAllocationException {
+            try {
+                super.allocateSlot(index, jobId, allocationId, slotTimeout);
+            } finally {
+                allocateSlotLatch.trigger();
+            }
         }
 
         @Override
-        public boolean allocateSlot(
+        public void allocateSlot(
                 int index,
                 JobID jobId,
                 AllocationID allocationId,
                 ResourceProfile resourceProfile,
-                Duration slotTimeout) {
-            final boolean result =
-                    super.allocateSlot(index, jobId, allocationId, resourceProfile, slotTimeout);
-            allocateSlotLatch.trigger();
-
-            return result;
+                Duration slotTimeout)
+                throws SlotAllocationException {
+            try {
+                super.allocateSlot(index, jobId, allocationId, resourceProfile, slotTimeout);
+            } finally {
+                allocateSlotLatch.trigger();
+            }
         }
     }
 
@@ -2976,7 +2985,7 @@ class TaskExecutorTest {
                     createTotalResourceProfile(numberOfDefaultSlots),
                     DEFAULT_RESOURCE_PROFILE,
                     MemoryManager.MIN_PAGE_SIZE,
-                    createDefaultTimerService(timeout.toMilliseconds()),
+                    createDefaultTimerService(timeout.toMillis()),
                     Executors.newDirectExecutorService());
             this.slotsToActivate = slotsToActivate;
         }
@@ -3002,7 +3011,16 @@ class TaskExecutorTest {
             String address,
             ResourceManagerId token)
             throws InterruptedException, ExecutionException {
-        gateway.requestSlot(slotId, jobId, allocationId, profile, address, token, timeout).get();
+        gateway.requestSlot(
+                        slotId,
+                        jobId,
+                        applicationId,
+                        allocationId,
+                        profile,
+                        address,
+                        token,
+                        timeout)
+                .get();
     }
 
     private SlotID buildSlotID(int slotIndex) {

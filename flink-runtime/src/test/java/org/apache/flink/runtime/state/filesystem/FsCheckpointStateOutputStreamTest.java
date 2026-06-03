@@ -33,7 +33,6 @@ import org.apache.flink.testutils.junit.extensions.parameterized.ParameterizedTe
 import org.apache.flink.testutils.junit.extensions.parameterized.Parameters;
 import org.apache.flink.testutils.junit.utils.TempDirUtils;
 
-import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.TestTemplate;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
@@ -60,9 +59,9 @@ import static org.assertj.core.api.Assumptions.assumeThat;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyBoolean;
-import static org.mockito.Matchers.eq;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -376,7 +375,6 @@ public class FsCheckpointStateOutputStreamTest {
      * This test checks that the stream does not check and clean the parent directory when
      * encountering a write error.
      */
-    @Tag("org.apache.flink.testutils.junit.FailsInGHAContainerWithRootUser")
     @TestTemplate
     void testStreamDoesNotTryToCleanUpParentOnError() throws Exception {
         final File directory = TempDirUtils.newFolder(tempDir);

@@ -21,10 +21,10 @@ import org.apache.flink.table.api.DataTypes
 import org.apache.flink.table.data.util.DataFormatConverters
 import org.apache.flink.table.planner.codegen.{CodeGeneratorContext, GeneratedExpression}
 import org.apache.flink.table.planner.codegen.CodeGenUtils._
-import org.apache.flink.table.planner.codegen.GenerateUtils.{generateCallIfArgsNotNull, generateCallIfArgsNullable, generateNonNullField, generateNullLiteral, generateStringResultCallIfArgsNotNull}
+import org.apache.flink.table.planner.codegen.GenerateUtils._
 import org.apache.flink.table.planner.codegen.calls.ScalarOperatorGens._
 import org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable._
-import org.apache.flink.table.planner.functions.sql.SqlDefaultOperator
+import org.apache.flink.table.planner.functions.sql.SqlDefaultArgOperator
 import org.apache.flink.table.runtime.functions.SqlFunctionUtils
 import org.apache.flink.table.runtime.typeutils.TypeCheckUtils.{isCharacterString, isTimestamp, isTimestampWithLocalZone}
 import org.apache.flink.table.types.logical._
@@ -78,10 +78,6 @@ object StringCallGen {
 
       case NOT_SIMILAR_TO =>
         generateNot(ctx, generateSimilarTo(ctx, operands, returnType), returnType)
-
-      case REGEXP_EXTRACT => generateRegexpExtract(ctx, operands, returnType)
-
-      case REGEXP_REPLACE => generateRegexpReplace(ctx, operands, returnType)
 
       case IS_DECIMAL => generateIsDecimal(ctx, operands, returnType)
 
@@ -137,8 +133,6 @@ object StringCallGen {
       case TO_BASE64 => generateToBase64(ctx, operands, returnType)
 
       case CHR => generateChr(ctx, operands, returnType)
-
-      case REGEXP => generateRegExp(ctx, operands, returnType)
 
       case BIN => generateBin(ctx, operands, returnType)
 
@@ -239,7 +233,7 @@ object StringCallGen {
         generateNonNullField(returnType, currentDatabase)
 
       case op => {
-        if (op.isInstanceOf[SqlDefaultOperator]) {
+        if (op.isInstanceOf[SqlDefaultArgOperator]) {
           generateNullLiteral(returnType)
         } else {
           null

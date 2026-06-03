@@ -43,7 +43,7 @@ import org.apache.flink.runtime.testutils.CommonTestUtils;
 import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.v2.DiscardingSink;
-import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunction;
+import org.apache.flink.streaming.api.functions.source.legacy.RichParallelSourceFunction;
 import org.apache.flink.streaming.api.operators.StreamingRuntimeContext;
 import org.apache.flink.test.recovery.utils.TaskExecutorProcessEntryPoint;
 import org.apache.flink.test.util.TestProcessBuilder;
@@ -68,7 +68,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 /** Tests local recovery by restarting Flink processes. */
 @ExtendWith(TestLoggerExtension.class)
@@ -79,7 +79,7 @@ class LocalRecoveryITCase {
     @TempDir private File tmpDirectory;
 
     @Test
-    public void testRecoverLocallyFromProcessCrashWithWorkingDirectory() throws Exception {
+    void testRecoverLocallyFromProcessCrashWithWorkingDirectory() throws Exception {
         final Configuration configuration = new Configuration();
         configuration.set(JobManagerOptions.ADDRESS, "localhost");
         configuration.set(JobManagerOptions.PORT, 0);
@@ -116,7 +116,7 @@ class LocalRecoveryITCase {
                             .getJobExecutionResult()
                             .get(waitingTimeInSeconds, TimeUnit.SECONDS)
                             .getAccumulatorResult(ALLOCATION_FAILURES_ACCUMULATOR_NAME);
-            assertTrue(allocFailures.isEmpty(), allocFailures.toString());
+            assertThat(allocFailures).withFailMessage(allocFailures.toString()).isEmpty();
 
             success = true;
         } finally {

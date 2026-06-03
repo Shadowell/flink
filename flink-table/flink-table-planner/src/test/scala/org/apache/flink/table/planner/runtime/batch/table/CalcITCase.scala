@@ -17,7 +17,6 @@
  */
 package org.apache.flink.table.planner.runtime.batch.table
 
-import org.apache.flink.api.scala._
 import org.apache.flink.core.testutils.EachCallbackWrapper
 import org.apache.flink.table.api._
 import org.apache.flink.table.catalog.CatalogDatabaseImpl
@@ -35,6 +34,8 @@ import org.apache.flink.types.Row
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.{BeforeEach, Test}
 import org.junit.jupiter.api.extension.RegisterExtension
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.ValueSource
 
 import java.sql.{Date, Time, Timestamp}
 import java.time.LocalDateTime
@@ -444,7 +445,7 @@ class CalcITCase extends BatchTestBase {
 
   @Test
   def testRowType(): Unit = {
-    val data = new mutable.MutableList[(Int, Long, String)]
+    val data = new mutable.ListBuffer[(Int, Long, String)]
     data.+=((1, 1L, "Jack#22"))
     data.+=((2, 2L, "John#19"))
     data.+=((3, 2L, "Anna#44"))
@@ -540,7 +541,7 @@ class CalcITCase extends BatchTestBase {
       "{3=Hello world}\n"
     TestBaseUtils.compareResultAsText(result3.asJava, expected3)
 
-    val data = new mutable.MutableList[(String, BigDecimal, String, BigDecimal)]
+    val data = new mutable.ListBuffer[(String, BigDecimal, String, BigDecimal)]
     data.+=(("AAA", BigDecimal.valueOf(123.45), "BBB", BigDecimal.valueOf(234.56)))
     data.+=(("CCC", BigDecimal.valueOf(345.67), "DDD", BigDecimal.valueOf(456.78)))
     data.+=(("EEE", BigDecimal.valueOf(567.89), "FFF", BigDecimal.valueOf(678.99)))
@@ -556,7 +557,7 @@ class CalcITCase extends BatchTestBase {
 
   @Test
   def testValueConstructor(): Unit = {
-    val data = new mutable.MutableList[(String, Int, LocalDateTime)]
+    val data = new mutable.ListBuffer[(String, Int, LocalDateTime)]
     data.+=(("foo", 12, localDateTime("1984-07-12 14:34:24")))
     val t = BatchTableEnvUtil
       .fromCollection(tEnv, data, "a, b, c")
@@ -642,8 +643,9 @@ class CalcITCase extends BatchTestBase {
     TestBaseUtils.compareResultAsText(results.asJava, expected)
   }
 
-  @Test
-  def testCurrentDatabase(): Unit = {
+  @ParameterizedTest(name = "{index}: {0}")
+  @ValueSource(strings = Array[String]("db1", "\"db1", "\"db1\"", "db1\""))
+  def testCurrentDatabase(dbName: String): Unit = {
     val result1 = executeQuery(
       tEnv
         .from("Table3")
@@ -656,10 +658,10 @@ class CalcITCase extends BatchTestBase {
       .getCatalog(tEnv.getCurrentCatalog)
       .get()
       .createDatabase(
-        "db1",
-        new CatalogDatabaseImpl(new util.HashMap[String, String](), "db1"),
+        dbName,
+        new CatalogDatabaseImpl(new util.HashMap[String, String](), dbName),
         false)
-    tEnv.useDatabase("db1")
+    tEnv.useDatabase(dbName)
     val result2 = executeQuery(
       tEnv
         .from("default_database.Table3")

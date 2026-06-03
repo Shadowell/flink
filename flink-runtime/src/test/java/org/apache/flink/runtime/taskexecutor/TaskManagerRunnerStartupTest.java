@@ -44,13 +44,12 @@ import org.apache.flink.runtime.testutils.WorkingDirectoryExtension;
 import org.apache.flink.testutils.junit.utils.TempDirUtils;
 import org.apache.flink.util.IOUtils;
 
-import org.apache.flink.shaded.guava32.com.google.common.collect.Sets;
+import org.apache.flink.shaded.guava33.com.google.common.collect.Sets;
 
 import org.apache.commons.io.FileUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.api.io.TempDir;
@@ -114,7 +113,6 @@ class TaskManagerRunnerStartupTest {
      * Tests that the TaskManagerRunner startup fails synchronously when the I/O directories are not
      * writable.
      */
-    @Tag("org.apache.flink.testutils.junit.FailsInGHAContainerWithRootUser")
     @Test
     void testIODirectoryNotWritable() throws Exception {
         File nonWritable = TempDirUtils.newFolder(tempFolder);
@@ -242,8 +240,6 @@ class TaskManagerRunnerStartupTest {
                         ".taskmanager..Status.JVM.Threads.Count",
                         ".taskmanager..Status.JVM.CPU.Load",
                         ".taskmanager..Status.JVM.CPU.Time",
-                        ".taskmanager..Status.Network.TotalMemorySegments",
-                        ".taskmanager..Status.Network.AvailableMemorySegments",
                         ".taskmanager..Status.Shuffle.Netty.TotalMemorySegments",
                         ".taskmanager..Status.Shuffle.Netty.TotalMemory",
                         ".taskmanager..Status.Shuffle.Netty.AvailableMemorySegments",

@@ -126,6 +126,14 @@ class PyFlinkBatchExpressionTests(PyFlinkTestCase):
         self.assertEqual('hex(a)', str(expr1.hex))
         self.assertEqual("UNHEX(a)", str(expr1.unhex))
         self.assertEqual('truncate(a, 3)', str(expr1.truncate(3)))
+        self.assertEqual('PERCENTILE(a, 0.5)', str(expr1.percentile(0.5)))
+        self.assertEqual('PERCENTILE(a, 0.5, b)',
+                         str(expr1.percentile(0.5, expr2)))
+        self.assertEqual('PERCENTILE(a, array(0.1, 0.5))', str(expr1.percentile(array(0.1, 0.5))))
+        self.assertEqual('PERCENTILE(a, array(0.1, 0.5), b)',
+                         str(expr1.percentile(array(0.1, 0.5), expr2)))
+        self.assertEqual("ASSIGNMENT('a2', a)", str(expr1.as_argument('a2')))
+        self.assertEqual("ASSIGNMENT('a', 10)", str(expr5.as_argument('a')))
 
         # string functions
         self.assertEqual('substring(a, b)', str(expr1.substring(expr2)))
@@ -176,13 +184,22 @@ class PyFlinkBatchExpressionTests(PyFlinkTestCase):
         self.assertEqual("STARTSWITH(a, b)", str(expr1.starts_with(expr2)))
         self.assertEqual("ENDSWITH(a, b)", str(expr1.ends_with(expr2)))
 
+        # ip address functions
+        self.assertEqual("INET_ATON(a)", str(expr1.inet_aton()))
+        self.assertEqual("INET_NTOA(a)", str(expr1.inet_ntoa()))
+
+        # utf-8 validation functions
+        self.assertEqual("IS_VALID_UTF8(a)", str(expr1.is_valid_utf8))
+        self.assertEqual("MAKE_VALID_UTF8(a)", str(expr1.make_valid_utf8))
+
         # regexp functions
-        self.assertEqual("regexp(a, b)", str(expr1.regexp(expr2)))
+        self.assertEqual("REGEXP(a, b)", str(expr1.regexp(expr2)))
         self.assertEqual("REGEXP_COUNT(a, b)", str(expr1.regexp_count(expr2)))
-        self.assertEqual('regexpExtract(a, b, 3)', str(expr1.regexp_extract(expr2, 3)))
+        self.assertEqual('REGEXP_EXTRACT(a, b)', str(expr1.regexp_extract(expr2)))
+        self.assertEqual('REGEXP_EXTRACT(a, b, 3)', str(expr1.regexp_extract(expr2, 3)))
         self.assertEqual('REGEXP_EXTRACT_ALL(a, b)', str(expr1.regexp_extract_all(expr2)))
         self.assertEqual('REGEXP_EXTRACT_ALL(a, b, 3)', str(expr1.regexp_extract_all(expr2, 3)))
-        self.assertEqual("regexpReplace(a, b, 'abc')", str(expr1.regexp_replace(expr2, 'abc')))
+        self.assertEqual("REGEXP_REPLACE(a, b, 'abc')", str(expr1.regexp_replace(expr2, 'abc')))
         self.assertEqual("REGEXP_INSTR(a, b)", str(expr1.regexp_instr(expr2)))
         self.assertEqual("REGEXP_SUBSTR(a, b)", str(expr1.regexp_substr(expr2)))
 
@@ -252,6 +269,27 @@ class PyFlinkBatchExpressionTests(PyFlinkTestCase):
                                                   JsonQueryOnEmptyOrError.NULL,
                                                   JsonQueryOnEmptyOrError.EMPTY_ARRAY)))
 
+        # bitmap functions
+        self.assertEqual("BITMAP_AND(a, b)", str(expr1.bitmap_and(expr2)))
+        self.assertEqual("BITMAP_ANDNOT(a, b)", str(expr1.bitmap_andnot(expr2)))
+        self.assertEqual("BITMAP_AND_AGG(a)", str(expr1.bitmap_and_agg()))
+        self.assertEqual("BITMAP_AND_CARDINALITY_AGG(a)", str(expr1.bitmap_and_cardinality_agg()))
+        self.assertEqual("BITMAP_BUILD(a)", str(expr1.bitmap_build()))
+        self.assertEqual("BITMAP_BUILD_AGG(a)", str(expr1.bitmap_build_agg()))
+        self.assertEqual("BITMAP_BUILD_CARDINALITY_AGG(a)",
+                         str(expr1.bitmap_build_cardinality_agg()))
+        self.assertEqual("BITMAP_CARDINALITY(a)", str(expr1.bitmap_cardinality()))
+        self.assertEqual("BITMAP_FROM_BYTES(a)", str(expr1.bitmap_from_bytes()))
+        self.assertEqual("BITMAP_OR(a, b)", str(expr1.bitmap_or(expr2)))
+        self.assertEqual("BITMAP_OR_AGG(a)", str(expr1.bitmap_or_agg()))
+        self.assertEqual("BITMAP_OR_CARDINALITY_AGG(a)", str(expr1.bitmap_or_cardinality_agg()))
+        self.assertEqual("BITMAP_TO_ARRAY(a)", str(expr1.bitmap_to_array()))
+        self.assertEqual("BITMAP_TO_BYTES(a)", str(expr1.bitmap_to_bytes()))
+        self.assertEqual("BITMAP_TO_STRING(a)", str(expr1.bitmap_to_string()))
+        self.assertEqual("BITMAP_XOR(a, b)", str(expr1.bitmap_xor(expr2)))
+        self.assertEqual("BITMAP_XOR_AGG(a)", str(expr1.bitmap_xor_agg()))
+        self.assertEqual("BITMAP_XOR_CARDINALITY_AGG(a)", str(expr1.bitmap_xor_cardinality_agg()))
+
     def test_expressions(self):
         expr1 = col('a')
         expr2 = col('b')
@@ -278,7 +316,20 @@ class PyFlinkBatchExpressionTests(PyFlinkTestCase):
         self.assertEqual("toDate('2018-03-18')", str(to_date('2018-03-18')))
         self.assertEqual("toDate('2018-03-18', 'yyyy-MM-dd')",
                          str(to_date('2018-03-18', 'yyyy-MM-dd')))
-        self.assertEqual('toTimestampLtz(123, 0)', str(to_timestamp_ltz(123, 0)))
+        self.assertEqual('TO_TIMESTAMP_LTZ(100)', str(to_timestamp_ltz(100)))
+        self.assertEqual("TO_TIMESTAMP_LTZ('2023-01-01 00:00:00')",
+                         str(to_timestamp_ltz('2023-01-01 00:00:00')))
+        self.assertEqual("TO_TIMESTAMP_LTZ('01/01/2023 00:00:00', 'MM/dd/yyyy HH:mm:ss')",
+                         str(to_timestamp_ltz("01/01/2023 00:00:00", "MM/dd/yyyy HH:mm:ss")))
+        self.assertEqual("TO_TIMESTAMP_LTZ('2023-01-01 00:00:00', 'yyyy-MM-dd HH:mm:ss', 'UTC')",
+                         str(to_timestamp_ltz("2023-01-01 00:00:00", "yyyy-MM-dd HH:mm:ss", "UTC")))
+        self.assertEqual("TO_TIMESTAMP_LTZ(123, 0)", str(to_timestamp_ltz(123, 0)))
+        self.assertEqual("TO_TIMESTAMP_LTZ(a)", str(to_timestamp_ltz(expr1)))
+        self.assertEqual("TO_TIMESTAMP_LTZ(a, 0)", str(to_timestamp_ltz(expr1, 0)))
+        self.assertEqual("TO_TIMESTAMP_LTZ(a, 'MM/dd/yyyy HH:mm:ss')",
+                         str(to_timestamp_ltz(expr1, "MM/dd/yyyy HH:mm:ss")))
+        self.assertEqual("TO_TIMESTAMP_LTZ(a, 'MM/dd/yyyy HH:mm:ss', 'UTC')",
+                         str(to_timestamp_ltz(expr1, "MM/dd/yyyy HH:mm:ss", "UTC")))
         self.assertEqual("toTimestamp('1970-01-01 08:01:40')",
                          str(to_timestamp('1970-01-01 08:01:40')))
         self.assertEqual("toTimestamp('1970-01-01 08:01:40', 'yyyy-MM-dd HH:mm:ss')",

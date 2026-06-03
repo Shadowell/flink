@@ -26,7 +26,6 @@ import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.array.BytePrimitiveArraySerializer;
 import org.apache.flink.api.connector.sink2.CommittingSinkWriter;
 import org.apache.flink.api.connector.sink2.Sink;
-import org.apache.flink.api.connector.sink2.Sink.InitContext;
 import org.apache.flink.api.connector.sink2.SinkWriter;
 import org.apache.flink.api.connector.sink2.SupportsCommitter;
 import org.apache.flink.api.connector.sink2.SupportsWriterState;
@@ -45,6 +44,7 @@ import org.apache.flink.streaming.api.operators.BoundedOneInput;
 import org.apache.flink.streaming.api.operators.InternalTimerService;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.operators.Output;
+import org.apache.flink.streaming.api.operators.StreamOperatorParameters;
 import org.apache.flink.streaming.api.operators.StreamingRuntimeContext;
 import org.apache.flink.streaming.api.operators.util.SimpleVersionedListState;
 import org.apache.flink.streaming.api.watermark.Watermark;
@@ -61,13 +61,14 @@ import java.util.Collection;
 import java.util.List;
 import java.util.OptionalLong;
 
+import static org.apache.flink.runtime.checkpoint.CheckpointIDCounter.INITIAL_CHECKPOINT_ID;
 import static org.apache.flink.util.IOUtils.closeAll;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 import static org.apache.flink.util.Preconditions.checkState;
 
 /**
  * An operator that processes records to be written into a {@link
- * org.apache.flink.api.connector.sink.Sink}. It also has a way to process committables with the
+ * org.apache.flink.api.connector.sink2.Sink}. It also has a way to process committables with the
  * same parallelism or send them downstream to a {@link CommitterOperator} with a different
  * parallelism.
  *
@@ -108,10 +109,14 @@ class SinkWriterOperator<InputT, CommT> extends AbstractStreamOperator<Committab
 
     private boolean endOfInput = false;
 
+    private long lastKnownCheckpointId = INITIAL_CHECKPOINT_ID - 1;
+
     SinkWriterOperator(
+            StreamOperatorParameters<CommittableMessage<CommT>> parameters,
             Sink<InputT> sink,
             ProcessingTimeService processingTimeService,
             MailboxExecutor mailboxExecutor) {
+        super(parameters);
         this.processingTimeService = checkNotNull(processingTimeService);
         this.mailboxExecutor = checkNotNull(mailboxExecutor);
         this.context = new Context<>();
@@ -132,7 +137,7 @@ class SinkWriterOperator<InputT, CommT> extends AbstractStreamOperator<Committab
     }
 
     @Override
-    public void setup(
+    protected void setup(
             StreamTask<?, ?> containingTask,
             StreamConfig config,
             Output<StreamRecord<CommittableMessage<CommT>>> output) {
@@ -147,8 +152,10 @@ class SinkWriterOperator<InputT, CommT> extends AbstractStreamOperator<Committab
     @Override
     public void initializeState(StateInitializationContext context) throws Exception {
         super.initializeState(context);
-        WriterInitContext initContext = createInitContext(context.getRestoredCheckpointId());
-        if (context.isRestored()) {
+        OptionalLong restoredCheckpointId = context.getRestoredCheckpointId();
+        WriterInitContext initContext = createInitContext(restoredCheckpointId);
+        if (restoredCheckpointId.isPresent()) {
+            lastKnownCheckpointId = restoredCheckpointId.getAsLong();
             if (committableSerializer != null) {
                 final ListState<List<CommT>> legacyCommitterState =
                         new SimpleVersionedListState<>(
@@ -160,6 +167,7 @@ class SinkWriterOperator<InputT, CommT> extends AbstractStreamOperator<Committab
                 legacyCommitterState.clear();
             }
         }
+
         sinkWriter = writerStateHandler.createWriter(initContext, context);
     }
 
@@ -171,6 +179,7 @@ class SinkWriterOperator<InputT, CommT> extends AbstractStreamOperator<Committab
 
     @Override
     public void processElement(StreamRecord<InputT> element) throws Exception {
+        checkState(!endOfInput, "Received element after endOfInput: %s", element);
         context.element = element;
         sinkWriter.write(element.getValue(), context);
     }
@@ -195,12 +204,16 @@ class SinkWriterOperator<InputT, CommT> extends AbstractStreamOperator<Committab
 
     @Override
     public void endInput() throws Exception {
-        endOfInput = true;
-        sinkWriter.flush(true);
-        emitCommittables(Long.MAX_VALUE);
+        LOG.info("Received endInput");
+        if (!endOfInput) {
+            endOfInput = true;
+            sinkWriter.flush(true);
+            emitCommittables(lastKnownCheckpointId + 1);
+        }
     }
 
-    private void emitCommittables(Long checkpointId) throws IOException, InterruptedException {
+    private void emitCommittables(long checkpointId) throws IOException, InterruptedException {
+        lastKnownCheckpointId = checkpointId;
         if (!emitDownstream) {
             // To support SinkV1 topologies with only a writer we have to call prepareCommit
             // although no committables are forwarded
@@ -218,11 +231,11 @@ class SinkWriterOperator<InputT, CommT> extends AbstractStreamOperator<Committab
 
         // Emit only committable summary if there are legacy committables
         if (!legacyCommittables.isEmpty()) {
-            checkState(checkpointId > InitContext.INITIAL_CHECKPOINT_ID);
+            checkState(checkpointId > WriterInitContext.INITIAL_CHECKPOINT_ID);
             emit(
                     indexOfThisSubtask,
                     numberOfParallelSubtasks,
-                    InitContext.INITIAL_CHECKPOINT_ID,
+                    WriterInitContext.INITIAL_CHECKPOINT_ID,
                     legacyCommittables);
             legacyCommittables.clear();
         }
@@ -239,7 +252,7 @@ class SinkWriterOperator<InputT, CommT> extends AbstractStreamOperator<Committab
             int numberOfParallelSubtasks,
             long checkpointId,
             Collection<CommT> committables) {
-        output.collect(
+        emit(
                 new StreamRecord<>(
                         new CommittableSummary<>(
                                 indexOfThisSubtask,
@@ -249,11 +262,16 @@ class SinkWriterOperator<InputT, CommT> extends AbstractStreamOperator<Committab
                                 committables.size(),
                                 0)));
         for (CommT committable : committables) {
-            output.collect(
+            emit(
                     new StreamRecord<>(
                             new CommittableWithLineage<>(
                                     committable, checkpointId, indexOfThisSubtask)));
         }
+    }
+
+    private void emit(StreamRecord<CommittableMessage<CommT>> message) {
+        LOG.debug("Sending message to committer: {}", message);
+        output.collect(message);
     }
 
     private WriterInitContext createInitContext(OptionalLong restoredCheckpointId) {

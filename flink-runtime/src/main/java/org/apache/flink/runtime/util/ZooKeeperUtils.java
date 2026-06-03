@@ -19,13 +19,14 @@
 package org.apache.flink.runtime.util;
 
 import org.apache.flink.annotation.VisibleForTesting;
+import org.apache.flink.api.common.ApplicationID;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.HighAvailabilityOptions;
 import org.apache.flink.configuration.IllegalConfigurationException;
 import org.apache.flink.configuration.SecurityOptions;
-import org.apache.flink.core.execution.RestoreMode;
+import org.apache.flink.core.execution.RecoveryClaimMode;
 import org.apache.flink.runtime.checkpoint.CompletedCheckpoint;
 import org.apache.flink.runtime.checkpoint.CompletedCheckpointStore;
 import org.apache.flink.runtime.checkpoint.DefaultCompletedCheckpointStore;
@@ -35,12 +36,15 @@ import org.apache.flink.runtime.checkpoint.ZooKeeperCheckpointIDCounter;
 import org.apache.flink.runtime.checkpoint.ZooKeeperCheckpointStoreUtil;
 import org.apache.flink.runtime.highavailability.HighAvailabilityServicesUtils;
 import org.apache.flink.runtime.highavailability.zookeeper.CuratorFrameworkWithUnhandledErrorListener;
-import org.apache.flink.runtime.jobgraph.JobGraph;
-import org.apache.flink.runtime.jobmanager.DefaultJobGraphStore;
+import org.apache.flink.runtime.jobmanager.ApplicationStore;
+import org.apache.flink.runtime.jobmanager.ApplicationStoreEntry;
+import org.apache.flink.runtime.jobmanager.DefaultApplicationStore;
+import org.apache.flink.runtime.jobmanager.DefaultExecutionPlanStore;
+import org.apache.flink.runtime.jobmanager.ExecutionPlanStore;
 import org.apache.flink.runtime.jobmanager.HighAvailabilityMode;
-import org.apache.flink.runtime.jobmanager.JobGraphStore;
-import org.apache.flink.runtime.jobmanager.ZooKeeperJobGraphStoreUtil;
-import org.apache.flink.runtime.jobmanager.ZooKeeperJobGraphStoreWatcher;
+import org.apache.flink.runtime.jobmanager.ZooKeeperApplicationStoreUtil;
+import org.apache.flink.runtime.jobmanager.ZooKeeperExecutionPlanStoreUtil;
+import org.apache.flink.runtime.jobmanager.ZooKeeperExecutionPlanStoreWatcher;
 import org.apache.flink.runtime.leaderelection.LeaderInformation;
 import org.apache.flink.runtime.leaderretrieval.DefaultLeaderRetrievalService;
 import org.apache.flink.runtime.leaderretrieval.LeaderRetrievalDriverFactory;
@@ -51,6 +55,7 @@ import org.apache.flink.runtime.persistence.filesystem.FileSystemStateStorageHel
 import org.apache.flink.runtime.rpc.FatalErrorHandler;
 import org.apache.flink.runtime.state.SharedStateRegistryFactory;
 import org.apache.flink.runtime.zookeeper.ZooKeeperStateHandleStore;
+import org.apache.flink.streaming.api.graph.ExecutionPlan;
 import org.apache.flink.util.concurrent.Executors;
 import org.apache.flink.util.function.RunnableWithException;
 
@@ -65,7 +70,7 @@ import org.apache.flink.shaded.curator5.org.apache.curator.framework.recipes.cac
 import org.apache.flink.shaded.curator5.org.apache.curator.framework.recipes.cache.TreeCacheListener;
 import org.apache.flink.shaded.curator5.org.apache.curator.framework.recipes.cache.TreeCacheSelector;
 import org.apache.flink.shaded.curator5.org.apache.curator.framework.state.SessionConnectionStateErrorPolicy;
-import org.apache.flink.shaded.curator5.org.apache.curator.retry.ExponentialBackoffRetry;
+import org.apache.flink.shaded.curator5.org.apache.curator.retry.BoundedExponentialBackoffRetry;
 import org.apache.flink.shaded.zookeeper3.org.apache.zookeeper.CreateMode;
 import org.apache.flink.shaded.zookeeper3.org.apache.zookeeper.KeeperException;
 import org.apache.flink.shaded.zookeeper3.org.apache.zookeeper.ZooDefs;
@@ -99,7 +104,11 @@ public class ZooKeeperUtils {
     private static final Logger LOG = LoggerFactory.getLogger(ZooKeeperUtils.class);
 
     /** The prefix of the submitted job graph file. */
-    public static final String HA_STORAGE_SUBMITTED_JOBGRAPH_PREFIX = "submittedJobGraph";
+    public static final String HA_STORAGE_SUBMITTED_EXECUTION_PLAN_PREFIX =
+            "submittedExecutionPlan";
+
+    /** The prefix of the submitted application file. */
+    public static final String HA_STORAGE_SUBMITTED_APPLICATION_PREFIX = "submittedApplication";
 
     /** The prefix of the completed checkpoint file. */
     public static final String HA_STORAGE_COMPLETED_CHECKPOINT = "completedCheckpoint";
@@ -209,6 +218,12 @@ public class ZooKeeperUtils {
         int maxRetryAttempts =
                 configuration.get(HighAvailabilityOptions.ZOOKEEPER_MAX_RETRY_ATTEMPTS);
 
+        int maxRetryWait =
+                Math.toIntExact(
+                        configuration
+                                .get(HighAvailabilityOptions.ZOOKEEPER_MAX_RETRY_WAIT)
+                                .toMillis());
+
         String root = configuration.getValue(HighAvailabilityOptions.HA_ZOOKEEPER_ROOT);
 
         String namespace = configuration.getValue(HighAvailabilityOptions.HA_CLUSTER_ID);
@@ -251,7 +266,9 @@ public class ZooKeeperUtils {
                         .connectString(zkQuorum)
                         .sessionTimeoutMs(sessionTimeout)
                         .connectionTimeoutMs(connectionTimeout)
-                        .retryPolicy(new ExponentialBackoffRetry(retryWait, maxRetryAttempts))
+                        .retryPolicy(
+                                new BoundedExponentialBackoffRetry(
+                                        retryWait, maxRetryWait, maxRetryAttempts))
                         // Curator prepends a '/' manually and throws an Exception if the
                         // namespace starts with a '/'.
                         .namespace(trimStartingSlash(rootWithNamespace))
@@ -514,25 +531,26 @@ public class ZooKeeperUtils {
     }
 
     /**
-     * Creates a {@link DefaultJobGraphStore} instance with {@link ZooKeeperStateHandleStore},
-     * {@link ZooKeeperJobGraphStoreWatcher} and {@link ZooKeeperJobGraphStoreUtil}.
+     * Creates a {@link DefaultExecutionPlanStore} instance with {@link ZooKeeperStateHandleStore},
+     * {@link ZooKeeperExecutionPlanStoreWatcher} and {@link ZooKeeperExecutionPlanStoreUtil}.
      *
      * @param client The {@link CuratorFramework} ZooKeeper client to use
      * @param configuration {@link Configuration} object
-     * @return {@link DefaultJobGraphStore} instance
-     * @throws Exception if the submitted job graph store cannot be created
+     * @return {@link DefaultExecutionPlanStore} instance
+     * @throws Exception if the submitted execution plan store cannot be created
      */
-    public static JobGraphStore createJobGraphs(
+    public static ExecutionPlanStore createExecutionPlans(
             CuratorFramework client, Configuration configuration) throws Exception {
 
         checkNotNull(configuration, "Configuration");
 
-        RetrievableStateStorageHelper<JobGraph> stateStorage =
-                createFileSystemStateStorage(configuration, HA_STORAGE_SUBMITTED_JOBGRAPH_PREFIX);
+        RetrievableStateStorageHelper<ExecutionPlan> stateStorage =
+                createFileSystemStateStorage(
+                        configuration, HA_STORAGE_SUBMITTED_EXECUTION_PLAN_PREFIX);
 
         // ZooKeeper submitted jobs root dir
         String zooKeeperJobsPath =
-                configuration.get(HighAvailabilityOptions.HA_ZOOKEEPER_JOBGRAPHS_PATH);
+                configuration.get(HighAvailabilityOptions.HA_ZOOKEEPER_EXECUTION_PLANS_PATH);
 
         // Ensure that the job graphs path exists
         client.newNamespaceAwareEnsurePath(zooKeeperJobsPath).ensure(client.getZookeeperClient());
@@ -540,17 +558,53 @@ public class ZooKeeperUtils {
         // All operations will have the path as root
         CuratorFramework facade = client.usingNamespace(client.getNamespace() + zooKeeperJobsPath);
 
-        final String zooKeeperFullJobsPath = client.getNamespace() + zooKeeperJobsPath;
-
-        final ZooKeeperStateHandleStore<JobGraph> zooKeeperStateHandleStore =
+        final ZooKeeperStateHandleStore<ExecutionPlan> zooKeeperStateHandleStore =
                 new ZooKeeperStateHandleStore<>(facade, stateStorage);
 
         final PathChildrenCache pathCache = new PathChildrenCache(facade, "/", false);
 
-        return new DefaultJobGraphStore<>(
+        return new DefaultExecutionPlanStore<>(
                 zooKeeperStateHandleStore,
-                new ZooKeeperJobGraphStoreWatcher(pathCache),
-                ZooKeeperJobGraphStoreUtil.INSTANCE);
+                new ZooKeeperExecutionPlanStoreWatcher(pathCache),
+                ZooKeeperExecutionPlanStoreUtil.INSTANCE);
+    }
+
+    /**
+     * Creates a {@link DefaultApplicationStore} instance with {@link ZooKeeperStateHandleStore},
+     * and {@link ZooKeeperApplicationStoreUtil}.
+     *
+     * @param client The {@link CuratorFramework} ZooKeeper client to use
+     * @param configuration {@link Configuration} object
+     * @return {@link DefaultApplicationStore} instance
+     * @throws Exception if the submitted application store cannot be created
+     */
+    public static ApplicationStore createApplicationStore(
+            CuratorFramework client, Configuration configuration) throws Exception {
+
+        checkNotNull(configuration, "Configuration");
+
+        RetrievableStateStorageHelper<ApplicationStoreEntry> stateStorage =
+                createFileSystemStateStorage(
+                        configuration, HA_STORAGE_SUBMITTED_APPLICATION_PREFIX);
+
+        // ZooKeeper submitted applications root dir
+        String zooKeeperApplicationsPath =
+                configuration.get(HighAvailabilityOptions.HA_ZOOKEEPER_APPLICATIONS_PATH);
+
+        // Ensure that the applications path exists
+        client.newNamespaceAwareEnsurePath(zooKeeperApplicationsPath)
+                .ensure(client.getZookeeperClient());
+
+        // All operations will have the path as root
+        CuratorFramework facade =
+                client.usingNamespace(client.getNamespace() + zooKeeperApplicationsPath);
+
+        final ZooKeeperStateHandleStore<ApplicationStoreEntry>
+                zooKeeperApplicationStateHandleStore =
+                        new ZooKeeperStateHandleStore<>(facade, stateStorage);
+
+        return new DefaultApplicationStore<>(
+                zooKeeperApplicationStateHandleStore, ZooKeeperApplicationStoreUtil.INSTANCE);
     }
 
     /**
@@ -561,7 +615,7 @@ public class ZooKeeperUtils {
      * @param configuration {@link Configuration} object
      * @param maxNumberOfCheckpointsToRetain The maximum number of checkpoints to retain
      * @param executor to run ZooKeeper callbacks
-     * @param restoreMode the mode in which the job is being restored
+     * @param recoveryClaimMode the mode in which the job is being restored
      * @return {@link DefaultCompletedCheckpointStore} instance
      * @throws Exception if the completed checkpoint store cannot be created
      */
@@ -572,7 +626,7 @@ public class ZooKeeperUtils {
             SharedStateRegistryFactory sharedStateRegistryFactory,
             Executor ioExecutor,
             Executor executor,
-            RestoreMode restoreMode)
+            RecoveryClaimMode recoveryClaimMode)
             throws Exception {
 
         checkNotNull(configuration, "Configuration");
@@ -592,7 +646,7 @@ public class ZooKeeperUtils {
                         ZooKeeperCheckpointStoreUtil.INSTANCE,
                         completedCheckpoints,
                         sharedStateRegistryFactory.create(
-                                ioExecutor, completedCheckpoints, restoreMode),
+                                ioExecutor, completedCheckpoints, recoveryClaimMode),
                         executor);
         LOG.info(
                 "Initialized {} in '{}' with {}.",
@@ -606,6 +660,12 @@ public class ZooKeeperUtils {
     public static String getPathForJob(JobID jobId) {
         checkNotNull(jobId, "Job ID");
         return String.format("/%s", jobId);
+    }
+
+    /** Returns the ApplicationID as a String (with leading slash). */
+    public static String getPathForApplication(ApplicationID applicationId) {
+        checkNotNull(applicationId, "Application ID");
+        return String.format("/%s", applicationId);
     }
 
     /**

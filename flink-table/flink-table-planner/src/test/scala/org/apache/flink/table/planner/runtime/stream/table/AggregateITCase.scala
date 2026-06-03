@@ -17,14 +17,13 @@
  */
 package org.apache.flink.table.planner.runtime.stream.table
 
-import org.apache.flink.api.common.time.Time
-import org.apache.flink.api.common.typeinfo.TypeInformation
-import org.apache.flink.api.scala._
 import org.apache.flink.table.api._
 import org.apache.flink.table.api.DataTypes.DECIMAL
 import org.apache.flink.table.api.bridge.scala._
-import org.apache.flink.table.api.internal.TableEnvironmentInternal
-import org.apache.flink.table.planner.runtime.utils.{JavaUserDefinedAggFunctions, StreamingWithStateTestBase, TestingRetractSink, TestingUpsertTableSink}
+import org.apache.flink.table.connector.ChangelogMode
+import org.apache.flink.table.legacy.api.Types
+import org.apache.flink.table.planner.factories.TestValuesTableFactory
+import org.apache.flink.table.planner.runtime.utils._
 import org.apache.flink.table.planner.runtime.utils.JavaUserDefinedAggFunctions.{CountDistinct, DataViewTestAgg, WeightedAvg}
 import org.apache.flink.table.planner.runtime.utils.StreamingWithStateTestBase.StateBackendMode
 import org.apache.flink.table.planner.runtime.utils.TestData._
@@ -33,11 +32,13 @@ import org.apache.flink.testutils.junit.extensions.parameterized.ParameterizedTe
 import org.apache.flink.types.Row
 
 import org.assertj.core.api.Assertions.assertThat
+import org.assertj.core.data.Percentage
 import org.junit.jupiter.api.{BeforeEach, TestTemplate}
 import org.junit.jupiter.api.extension.ExtendWith
 
 import java.time.Duration
 
+import scala.collection.JavaConversions._
 import scala.collection.mutable
 
 /** Tests of groupby (without window) aggregations */
@@ -61,13 +62,13 @@ class AggregateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
     t.toRetractStream[Row].addSink(sink)
     env.execute()
 
-    val expected = mutable.MutableList("1,10", "2,21", "3,12")
+    val expected = mutable.ListBuffer("1,10", "2,21", "3,12")
     assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
   @TestTemplate
   def testMaxAggRetractWithCondition(): Unit = {
-    val data = new mutable.MutableList[(Int, Int)]
+    val data = new mutable.ListBuffer[(Int, Int)]
     data.+=((1, 10))
     data.+=((1, 10))
     data.+=((2, 5))
@@ -96,7 +97,7 @@ class AggregateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
 
   @TestTemplate
   def testMinAggRetractWithCondition(): Unit = {
-    val data = new mutable.MutableList[(Int, Int)]
+    val data = new mutable.ListBuffer[(Int, Int)]
     data.+=((1, 5))
     data.+=((2, 6))
     data.+=((1, 5))
@@ -134,13 +135,13 @@ class AggregateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
     t.toRetractStream[Row].addSink(sink)
     env.execute()
 
-    val expected = mutable.MutableList("1,3,3", "2,3,4", "3,4,4")
+    val expected = mutable.ListBuffer("1,3,3", "2,3,4", "3,4,4")
     assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
   @TestTemplate
   def testDistinctAggregate(): Unit = {
-    val data = new mutable.MutableList[(Int, Int, String)]
+    val data = new mutable.ListBuffer[(Int, Int, String)]
     data.+=((1, 1, "A"))
     data.+=((2, 2, "B"))
     data.+=((2, 2, "B"))
@@ -169,7 +170,7 @@ class AggregateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
     t.toRetractStream[Row].addSink(sink)
     env.execute()
 
-    val expected = mutable.MutableList("A,2,5,1,1,1", "B,3,12,4,2,3", "C,2,9,4,3,4", "D,1,9,9,4,9")
+    val expected = mutable.ListBuffer("A,2,5,1,1,1", "B,3,12,4,2,3", "C,2,9,4,3,4", "D,1,9,9,4,9")
     assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
@@ -184,7 +185,7 @@ class AggregateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
     t.toRetractStream[Row].addSink(sink)
     env.execute()
 
-    val expected = mutable.MutableList("1,4,5", "2,4,7", "3,2,3")
+    val expected = mutable.ListBuffer("1,4,5", "2,4,7", "3,2,3")
     assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
@@ -197,7 +198,7 @@ class AggregateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
 //    t.toRetractStream[Row].addSink(sink)
 //    env.execute()
 //
-//    val expected = mutable.MutableList("Hi,Hello world,Hi#Hello#Hello world")
+//    val expected = mutable.ListBuffer("Hi,Hello world,Hi#Hello#Hello world")
 //    assertEquals(expected.sorted, sink.getRetractResults.sorted)
 //  }
 
@@ -212,7 +213,7 @@ class AggregateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
     t.toRetractStream[Row].addSink(sink)
     env.execute()
 
-    val expected = mutable.MutableList("1,null", "2,null", "3,null", "4,null", "5,null", "6,null")
+    val expected = mutable.ListBuffer("1,null", "2,null", "3,null", "4,null", "5,null", "6,null")
     assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
@@ -228,7 +229,7 @@ class AggregateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
     t.toRetractStream[Row].addSink(sink)
     env.execute()
 
-    val expected = mutable.MutableList("1,5", "2,7", "3,3")
+    val expected = mutable.ListBuffer("1,5", "2,7", "3,3")
     assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
@@ -313,7 +314,7 @@ class AggregateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
     t.toRetractStream[Row].addSink(sink)
     env.execute()
 
-    val expected = mutable.MutableList(
+    val expected = mutable.ListBuffer(
       s"0,1,1,1,1,0,Hallo",
       s"1,2,3,3,2,13,Hallo Welt-ABC-JKL",
       s"12,3,5,1,13,12,IJK",
@@ -349,7 +350,7 @@ class AggregateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
 
   @TestTemplate
   def testGroupAggregateWithStateBackend(): Unit = {
-    val data = new mutable.MutableList[(Int, Long, String)]
+    val data = new mutable.ListBuffer[(Int, Long, String)]
     data.+=((1, 1L, "A"))
     data.+=((2, 2L, "B"))
     data.+=((3, 2L, "B"))
@@ -364,8 +365,8 @@ class AggregateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
     data.+=((12, 5L, "B"))
 
     val distinct = new CountDistinct
-    val t = env
-      .fromCollection(data)
+    val t = StreamingEnvUtil
+      .fromCollection(env, data)
       .toTable(tEnv, 'a, 'b, 'c)
       .groupBy('b)
       .select('b, distinct('c), call(classOf[DataViewTestAgg], 'c, 'b))
@@ -383,27 +384,34 @@ class AggregateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
 
   @TestTemplate
   def testRemoveDuplicateRecordsWithUpsertSink(): Unit = {
-    val data = new mutable.MutableList[(Int, Long, String)]
+    val data = new mutable.ListBuffer[(Int, Long, String)]
     data.+=((1, 1L, "A"))
     data.+=((2, 2L, "B"))
     data.+=((3, 2L, "B"))
     data.+=((4, 3L, "C"))
     data.+=((5, 3L, "C"))
 
-    val t = env
-      .fromCollection(data)
+    val t = StreamingEnvUtil
+      .fromCollection(env, data)
       .toTable(tEnv, 'a, 'b, 'c)
       .groupBy('c)
       .select('c, 'b.max)
 
-    val tableSink = new TestingUpsertTableSink(Array(0))
-      .configure(Array[String]("c", "bMax"), Array[TypeInformation[_]](Types.STRING, Types.LONG))
+    TestSinkUtil.addValuesSink(
+      tEnv,
+      "testSink",
+      List("c", "bMax"),
+      List(DataTypes.STRING, DataTypes.BIGINT),
+      ChangelogMode.upsert(),
+      List("c"))
 
-    tEnv.asInstanceOf[TableEnvironmentInternal].registerTableSinkInternal("testSink", tableSink)
-    t.executeInsert("testSink").await()
+    t.executeInsert("testSink", InsertConflictStrategy.deduplicate()).await()
 
-    val expected = List("A,1", "B,2", "C,3")
-    assertThat(tableSink.getUpsertResults.sorted).isEqualTo(expected.sorted)
+    val expected = List("+I[A, 1]", "+I[B, 2]", "+I[C, 3]")
+    assertThat(
+      TestValuesTableFactory
+        .getResultsAsStrings("testSink")
+        .sorted).isEqualTo(expected)
   }
 
   @TestTemplate
@@ -441,7 +449,7 @@ class AggregateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
 
   @TestTemplate
   def testGroupAggregateWithDataView(): Unit = {
-    val data = new mutable.MutableList[(Int, Long, String)]
+    val data = new mutable.ListBuffer[(Int, Long, String)]
     data.+=((1, 1L, "A"))
     data.+=((2, 2L, "B"))
     data.+=((3, 2L, "B"))
@@ -487,13 +495,13 @@ class AggregateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
     results.addSink(sink).setParallelism(1)
     env.execute()
 
-    val expected = mutable.MutableList("1,1", "2,3", "3,6", "4,10", "5,15", "6,21")
+    val expected = mutable.ListBuffer("1,1", "2,3", "3,6", "4,10", "5,15", "6,21")
     assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
   @TestTemplate
   def testPrecisionForSumAggregationOnDecimal(): Unit = {
-    val data = new mutable.MutableList[(Double, Double, Double, Double)]
+    val data = new mutable.ListBuffer[(Double, Double, Double, Double)]
     data.+=((1.03520274, 12345.035202748654, 12.345678901234567, 1.11111111))
     data.+=((0, 0, 0, 1.11111111))
     val t = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c, 'd)
@@ -518,7 +526,7 @@ class AggregateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
 
   @TestTemplate
   def testPrecisionForSum0AggregationOnDecimal(): Unit = {
-    val data = new mutable.MutableList[(Double, Double, Double, Double)]
+    val data = new mutable.ListBuffer[(Double, Double, Double, Double)]
     data.+=((1.03520274, 12345.035202748654, 12.345678901234567, 1.11111111))
     data.+=((0, 0, 0, 1.11111111))
     val t = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c, 'd)
@@ -543,7 +551,7 @@ class AggregateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
 
   @TestTemplate
   def testPrecisionForAvgAggregationOnDecimal(): Unit = {
-    val data = new mutable.MutableList[(Double, Double, Double, Double)]
+    val data = new mutable.ListBuffer[(Double, Double, Double, Double)]
     data.+=((1.03520274, 12345.035202748654, 12.345678901234567, 1.11111111))
     data.+=((0, 0, 0, 2.22222222))
     val t = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c, 'd)
@@ -564,5 +572,108 @@ class AggregateITCase(mode: StateBackendMode) extends StreamingWithStateTestBase
     // with the one calculated for plus()/minus(), which result in loosing a decimal digit.
     val expected = List("0.51760137,6172.51760137432650000000,6.17283945061728350000,1.66666667")
     assertThat(sink.getRetractResults).isEqualTo(expected)
+  }
+
+  @TestTemplate
+  def testPercentile(): Unit = {
+    val t = failingDataSource(tupleData5)
+      .toTable(tEnv, 'a, 'b, 'c, 'd, 'e)
+      .groupBy('e)
+      .select(
+        'e,
+        'a.percentile(0.7).as('swo),
+        'a.percentile(0.7, 'b).as('sw),
+        'a.percentile(array(0.3, 0.1, 0.7)).as('mwo),
+        'a.percentile(array(0.3, 0.1, 0.7), 'b).as('mw))
+      .select('e, 'swo, 'sw, 'mwo.at(1), 'mwo.at(2), 'mwo.at(3), 'mw.at(1), 'mw.at(2), 'mw.at(3))
+
+    val sink = new TestingRetractSink
+    t.toRetractStream[Row].addSink(sink).setParallelism(1)
+    env.execute()
+
+    val expected = List(
+      List(4.0, 5.0, 2.4, 1.4, 4.0, 4.0, 2.2, 5.0),
+      List(4.2, 5.0, 3.0, 2.6, 4.2, 4.0, 3.0, 5.0),
+      List(5.0, 5.0, 4.2, 3.4, 5.0, 5.0, 3.0, 5.0))
+    val ERROR_RATE = Percentage.withPercentage(1e-6)
+
+    val result = sink.getRetractResults.sorted
+    for (i <- result.indices) {
+      val actual = result(i).split(",")
+      assertThat(actual(0).toInt).isEqualTo(i + 1)
+      for (j <- expected(i).indices) {
+        assertThat(actual(j + 1).toDouble).isCloseTo(expected(i)(j), ERROR_RATE)
+      }
+    }
+  }
+
+  @TestTemplate
+  def testBitmapBuildAgg(): Unit = {
+    val data = new mutable.ListBuffer[(Int, Int, String)]
+    for (i <- 0 until 5) {
+      data.+=((i, -i, "a"))
+      data.+=((i * 2, -i * 2, "b"))
+    }
+
+    val t = failingDataSource(data)
+      .toTable(tEnv, 'a, 'b, 'c)
+      .groupBy('c)
+      .select(
+        'c,
+        'a.bitmapBuildAgg().cast(DataTypes.STRING()),
+        'b.bitmapBuildAgg().cast(DataTypes.STRING()))
+
+    val sink = new TestingRetractSink
+    t.toRetractStream[Row].addSink(sink).setParallelism(1)
+    env.execute()
+
+    val expected = List(
+      s"a,{0,1,2,3,4},{0,${Integer.toUnsignedLong(-4)},${Integer.toUnsignedLong(-3)},${Integer
+          .toUnsignedLong(-2)},${Integer.toUnsignedLong(-1)}}",
+      s"b,{0,2,4,6,8},{0,${Integer.toUnsignedLong(-8)},${Integer.toUnsignedLong(-6)},${Integer
+          .toUnsignedLong(-4)},${Integer.toUnsignedLong(-2)}}"
+    )
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
+  }
+
+  @TestTemplate
+  def testBitmapLogicalOpsAgg(): Unit = {
+    val data = new mutable.ListBuffer[(Int, Int, Int, String)]
+    data.+=((-3, 5, 0, "a"))
+    data.+=((7, 2, 5, "b"))
+    data.+=((-3, 8, -8, "c"))
+    data.+=((2, 1, 7, "b"))
+    data.+=((2, 9, 0, "a"))
+    data.+=((8, 3, -3, "c"))
+    data.+=((7, 6, 2, "b"))
+    data.+=((0, 4, 5, "a"))
+    data.+=((-3, 7, 8, "c"))
+    data.+=((5, 0, 2, "b"))
+    data.+=((0, 10, 5, "a"))
+    data.+=((2, 5, 0, "a"))
+
+    val t = failingDataSource(data)
+      .toTable(tEnv, 'a, 'b, 'c, 'd)
+      .groupBy('d)
+      .select(
+        'd,
+        array('a, 'b, 'c).bitmapBuild().bitmapAndAgg().cast(DataTypes.STRING()),
+        array('a, 'b, 'c).bitmapBuild().bitmapOrAgg().cast(DataTypes.STRING()),
+        array('a, 'b, 'c).bitmapBuild().bitmapXorAgg().cast(DataTypes.STRING())
+      )
+
+    val sink = new TestingRetractSink
+    t.toRetractStream[Row].addSink(sink).setParallelism(1)
+    env.execute()
+
+    val expected =
+      List(
+        s"a,{0},{0,2,4,5,9,10,${Integer.toUnsignedLong(-3)}},{0,4,9,10,${Integer.toUnsignedLong(-3)}}",
+        "b,{2},{0,1,2,5,6,7},{0,1,6,7}",
+        s"c,{8,${Integer.toUnsignedLong(-3)}},{3,7,8,${Integer.toUnsignedLong(-8)},${Integer
+            .toUnsignedLong(-3)}},{3,7,8,${Integer.toUnsignedLong(-8)},${Integer
+            .toUnsignedLong(-3)}}"
+      )
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 }

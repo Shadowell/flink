@@ -19,8 +19,7 @@
 package org.apache.flink.test.runtime;
 
 import org.apache.flink.api.common.functions.FlatMapFunction;
-import org.apache.flink.api.java.DataSet;
-import org.apache.flink.api.java.ExecutionEnvironment;
+import org.apache.flink.api.common.functions.ReduceFunction;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.JobManagerOptions;
@@ -29,15 +28,21 @@ import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.runtime.rpc.RpcService;
 import org.apache.flink.runtime.rpc.RpcSystem;
 import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.windowing.assigners.GlobalWindows;
+import org.apache.flink.test.junit5.MiniClusterExtension;
 import org.apache.flink.test.testdata.WordCountData;
-import org.apache.flink.test.util.MiniClusterWithClientResource;
 import org.apache.flink.test.util.TestBaseUtils;
+import org.apache.flink.util.CollectionUtil;
 import org.apache.flink.util.Collector;
-import org.apache.flink.util.TestLogger;
+import org.apache.flink.util.TestLoggerExtension;
 
-import org.junit.AssumptionViolatedException;
-import org.junit.Rule;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.Inet6Address;
@@ -48,29 +53,29 @@ import java.net.ServerSocket;
 import java.util.Enumeration;
 import java.util.List;
 
-import static org.junit.Assert.fail;
+import static org.assertj.core.api.Assumptions.assumeThat;
 
 /** Test proper handling of IPv6 address literals in URLs. */
-@SuppressWarnings("serial")
-public class IPv6HostnamesITCase extends TestLogger {
+@ExtendWith(TestLoggerExtension.class)
+class IPv6HostnamesITCase {
+    private static final Logger LOG = LoggerFactory.getLogger(IPv6HostnamesITCase.class);
 
-    @Rule
-    public final MiniClusterWithClientResource miniClusterResource =
-            new MiniClusterWithClientResource(
+    @RegisterExtension
+    private static final MiniClusterExtension MINI_CLUSTER_RESOURCE =
+            new MiniClusterExtension(
                     new MiniClusterResourceConfiguration.Builder()
-                            .setConfiguration(getConfiguration())
                             .setNumberTaskManagers(2)
                             .setNumberSlotsPerTaskManager(2)
                             .build());
 
     private Configuration getConfiguration() {
         final Inet6Address ipv6address = getLocalIPv6Address();
-        if (ipv6address == null) {
-            throw new AssumptionViolatedException(
-                    "--- Cannot find a non-loopback local IPv6 address that Pekko/Netty can bind to; skipping IPv6HostnamesITCase");
-        }
+        assumeThat(ipv6address)
+                .as(
+                        "--- Cannot find a non-loopback local IPv6 address that Pekko/Netty can bind to; skipping IPv6HostnamesITCase")
+                .isNotNull();
         final String addressString = ipv6address.getHostAddress();
-        log.info("Test will use IPv6 address " + addressString + " for connection tests");
+        LOG.info("Test will use IPv6 address {} for connection tests", addressString);
 
         Configuration config = new Configuration();
         config.set(JobManagerOptions.ADDRESS, addressString);
@@ -80,41 +85,44 @@ public class IPv6HostnamesITCase extends TestLogger {
     }
 
     @Test
-    public void testClusterWithIPv6host() {
-        try {
+    void testClusterWithIPv6host() throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(4);
 
-            ExecutionEnvironment env = ExecutionEnvironment.getExecutionEnvironment();
-            env.setParallelism(4);
+        // get input data
+        DataStream<String> text = env.fromData(WordCountData.TEXT.split("\n"));
 
-            // get input data
-            DataSet<String> text = env.fromElements(WordCountData.TEXT.split("\n"));
-
-            DataSet<Tuple2<String, Integer>> counts =
-                    text.flatMap(
-                                    new FlatMapFunction<String, Tuple2<String, Integer>>() {
-                                        @Override
-                                        public void flatMap(
-                                                String value,
-                                                Collector<Tuple2<String, Integer>> out)
-                                                throws Exception {
-                                            for (String token : value.toLowerCase().split("\\W+")) {
-                                                if (token.length() > 0) {
-                                                    out.collect(
-                                                            new Tuple2<String, Integer>(token, 1));
-                                                }
+        DataStream<Tuple2<String, Integer>> counts =
+                text.flatMap(
+                                new FlatMapFunction<String, Tuple2<String, Integer>>() {
+                                    @Override
+                                    public void flatMap(
+                                            String value, Collector<Tuple2<String, Integer>> out)
+                                            throws Exception {
+                                        for (String token : value.toLowerCase().split("\\W+")) {
+                                            if (token.length() > 0) {
+                                                out.collect(new Tuple2<String, Integer>(token, 1));
                                             }
                                         }
-                                    })
-                            .groupBy(0)
-                            .sum(1);
+                                    }
+                                })
+                        .keyBy(x -> x.f0)
+                        .window(GlobalWindows.createWithEndOfStreamTrigger())
+                        .reduce(
+                                new ReduceFunction<Tuple2<String, Integer>>() {
+                                    @Override
+                                    public Tuple2<String, Integer> reduce(
+                                            Tuple2<String, Integer> value1,
+                                            Tuple2<String, Integer> value2)
+                                            throws Exception {
+                                        return Tuple2.of(value1.f0, value1.f1 + value2.f1);
+                                    }
+                                });
 
-            List<Tuple2<String, Integer>> result = counts.collect();
+        List<Tuple2<String, Integer>> result =
+                CollectionUtil.iteratorToList(counts.executeAndCollect());
 
-            TestBaseUtils.compareResultAsText(result, WordCountData.COUNTS_AS_TUPLES);
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail(e.getMessage());
-        }
+        TestBaseUtils.compareResultAsText(result, WordCountData.COUNTS_AS_TUPLES);
     }
 
     private Inet6Address getLocalIPv6Address() {
@@ -135,16 +143,16 @@ public class IPv6HostnamesITCase extends TestLogger {
                         InetSocketAddress socketAddress = new InetSocketAddress(addr, 0);
 
                         try {
-                            log.info("Considering address " + addr);
+                            LOG.info("Considering address {}", addr);
 
                             // test whether we can bind a socket to that address
-                            log.info("Testing whether sockets can bind to " + addr);
+                            LOG.info("Testing whether sockets can bind to {}", addr);
                             ServerSocket sock = new ServerSocket();
                             sock.bind(socketAddress);
                             sock.close();
 
                             // test whether Pekko's netty can bind to the address
-                            log.info("Testing whether Pekko can use " + addr);
+                            LOG.info("Testing whether Pekko can use {}", addr);
                             final RpcService rpcService =
                                     RpcSystem.load()
                                             // this port is only used for advertising (==no port
@@ -155,7 +163,7 @@ public class IPv6HostnamesITCase extends TestLogger {
                                             .createAndStart();
                             rpcService.closeAsync().get();
 
-                            log.info("Using address " + addr);
+                            LOG.info("Using address {}", addr);
                             return (Inet6Address) addr;
                         } catch (IOException ignored) {
                             // fall through the loop

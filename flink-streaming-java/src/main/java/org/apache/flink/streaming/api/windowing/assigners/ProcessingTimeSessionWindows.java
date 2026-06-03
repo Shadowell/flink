@@ -21,8 +21,6 @@ package org.apache.flink.streaming.api.windowing.assigners;
 import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.windowing.time.Time;
 import org.apache.flink.streaming.api.windowing.triggers.ProcessingTimeTrigger;
 import org.apache.flink.streaming.api.windowing.triggers.Trigger;
 import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
@@ -35,7 +33,7 @@ import java.util.Collections;
  * A {@link WindowAssigner} that windows elements into sessions based on the current processing
  * time. Windows cannot overlap.
  *
- * <p>For example, in order to window into windows of 1 minute, every 10 seconds:
+ * <p>For example, in order to window into windows(sessions) with an inactivity gap of 1 minute:
  *
  * <pre>{@code
  * DataStream<Tuple2<String, Integer>> in = ...;
@@ -68,12 +66,6 @@ public class ProcessingTimeSessionWindows extends MergingWindowAssigner<Object, 
     }
 
     @Override
-    public Trigger<Object, TimeWindow> getDefaultTrigger(StreamExecutionEnvironment env) {
-        throw new UnsupportedOperationException(
-                "This method is deprecated and shouldn't be invoked. Please use getDefaultTrigger() instead.");
-    }
-
-    @Override
     public Trigger<Object, TimeWindow> getDefaultTrigger() {
         return ProcessingTimeTrigger.create();
     }
@@ -81,19 +73,6 @@ public class ProcessingTimeSessionWindows extends MergingWindowAssigner<Object, 
     @Override
     public String toString() {
         return "ProcessingTimeSessionWindows(" + sessionTimeout + ")";
-    }
-
-    /**
-     * Creates a new {@code SessionWindows} {@link WindowAssigner} that assigns elements to sessions
-     * based on the element timestamp.
-     *
-     * @param size The session timeout, i.e. the time gap between sessions
-     * @return The policy.
-     * @deprecated Use {@link #withGap(Duration)}
-     */
-    @Deprecated
-    public static ProcessingTimeSessionWindows withGap(Time size) {
-        return withGap(size.toDuration());
     }
 
     /**

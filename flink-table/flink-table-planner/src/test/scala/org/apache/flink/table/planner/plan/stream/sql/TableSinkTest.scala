@@ -17,19 +17,20 @@
  */
 package org.apache.flink.table.planner.plan.stream.sql
 
-import org.apache.flink.api.scala._
 import org.apache.flink.configuration.ConfigOption
-import org.apache.flink.streaming.api.functions.source.{ParallelSourceFunction, SourceFunction}
+import org.apache.flink.legacy.table.connector.source.SourceFunctionProvider
+import org.apache.flink.streaming.api.functions.source.legacy.{ParallelSourceFunction, SourceFunction}
 import org.apache.flink.table.api._
 import org.apache.flink.table.api.config.ExecutionConfigOptions
 import org.apache.flink.table.connector.ChangelogMode
-import org.apache.flink.table.connector.source.{DynamicTableSource, ScanTableSource, SourceFunctionProvider}
+import org.apache.flink.table.connector.source.{DynamicTableSource, ScanTableSource}
 import org.apache.flink.table.data.RowData
 import org.apache.flink.table.factories.{DynamicTableFactory, DynamicTableSourceFactory}
-import org.apache.flink.table.planner.utils.{TableTestBase, TestingTableEnvironment}
+import org.apache.flink.table.planner.utils.{TableTestBase, TableTestUtil, TestingTableEnvironment}
 
 import org.assertj.core.api.Assertions
 import org.assertj.core.api.Assertions.assertThatThrownBy
+import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
 
 import java.util
@@ -192,6 +193,30 @@ class TableSinkTest extends TableTestBase {
                      |) WITH (
                      |  'connector' = 'values',
                      |  'sink-insert-only' = 'false'
+                     |)
+                     |""".stripMargin)
+    val dml =
+      """
+        |INSERT INTO retractSink
+        |SELECT cnt, COUNT(a) AS a FROM (
+        |    SELECT a, COUNT(*) AS cnt FROM MyTable GROUP BY a) t
+        |GROUP BY cnt
+      """.stripMargin
+    val stmtSet = util.tableEnv.createStatementSet()
+    stmtSet.addInsertSql(dml)
+    util.verifyRelPlan(stmtSet, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testRetractSinkWithPrimaryKey(): Unit = {
+    util.addTable(s"""
+                     |CREATE TABLE retractSink (
+                     |  `cnt` BIGINT,
+                     |  `a` BIGINT,
+                     |  PRIMARY KEY (a) NOT ENFORCED
+                     |) WITH (
+                     |  'connector' = 'values',
+                     |  'sink-changelog-mode-enforced' = 'I,UB,UA,D'
                      |)
                      |""".stripMargin)
     val dml =
@@ -474,6 +499,8 @@ class TableSinkTest extends TableTestBase {
         |SELECT T.person, T.sum_votes, award.prize FROM
         |   (SELECT person, SUM(votes) AS sum_votes FROM src GROUP BY person) T, award
         |   WHERE T.sum_votes = award.votes
+        |ON CONFLICT
+        |DO DEDUPLICATE
         |""".stripMargin)
   }
 
@@ -497,6 +524,7 @@ class TableSinkTest extends TableTestBase {
         |   FROM (SELECT person, SUM(votes) AS sum_votes, SUM(votes) / 2 AS vote_section FROM src
         |      GROUP BY person))
         |   WHERE rank_number < 10
+        |ON CONFLICT DO DEDUPLICATE
         |""".stripMargin)
   }
 
@@ -521,7 +549,7 @@ class TableSinkTest extends TableTestBase {
                       | 'sink.parallelism' = '9'
                       |)""".stripMargin)
     val stmtSet = tEnv.asInstanceOf[TestingTableEnvironment].createStatementSet
-    stmtSet.addInsertSql("insert into sink select * from source")
+    stmtSet.addInsertSql("insert into sink select * from source on conflict do deduplicate")
     // we set the sink parallelism to 9 which differs from the source, expect 'keyby' was added.
     util.verifyExplain(stmtSet, ExplainDetail.JSON_EXECUTION_PLAN)
   }
@@ -550,7 +578,7 @@ class TableSinkTest extends TableTestBase {
                       | 'sink.parallelism' = '9'
                       |)""".stripMargin)
     val stmtSet = tEnv.asInstanceOf[TestingTableEnvironment].createStatementSet
-    stmtSet.addInsertSql("insert into sink select * from source")
+    stmtSet.addInsertSql("insert into sink select * from source on conflict do deduplicate")
     // we set the sink parallelism to 9 which differs from the source, but disable auto keyby
     util.verifyExplain(stmtSet, ExplainDetail.JSON_EXECUTION_PLAN)
   }
@@ -580,7 +608,7 @@ class TableSinkTest extends TableTestBase {
                       | 'sink.parallelism' = '4'
                       |)""".stripMargin)
     val stmtSet = tEnv.asInstanceOf[TestingTableEnvironment].createStatementSet
-    stmtSet.addInsertSql("insert into sink select * from source")
+    stmtSet.addInsertSql("insert into sink select * from source on conflict do deduplicate")
     // source and sink has same parallelism, but sink shuffle by pk is enforced
     util.verifyExplain(stmtSet, ExplainDetail.JSON_EXECUTION_PLAN)
   }
@@ -610,7 +638,7 @@ class TableSinkTest extends TableTestBase {
                       | 'sink.parallelism' = '1'
                       |)""".stripMargin)
     val stmtSet = tEnv.asInstanceOf[TestingTableEnvironment].createStatementSet
-    stmtSet.addInsertSql("insert into sink select * from source")
+    stmtSet.addInsertSql("insert into sink select * from source on conflict do deduplicate")
     // source and sink has same parallelism, but sink shuffle by pk is enforced
     util.verifyExplain(stmtSet, ExplainDetail.JSON_EXECUTION_PLAN)
   }
@@ -742,45 +770,6 @@ class TableSinkTest extends TableTestBase {
   }
 
   @Test
-  def testManagedTableSinkWithDisableCheckpointing(): Unit = {
-    util.addTable(s"""
-                     |CREATE TABLE sink (
-                     |  `a` INT,
-                     |  `b` BIGINT,
-                     |  `c` STRING
-                     |) WITH(
-                     |)
-                     |""".stripMargin)
-    val stmtSet = util.tableEnv.createStatementSet()
-    stmtSet.addInsertSql("INSERT INTO sink SELECT * FROM MyTable")
-
-    assertThatThrownBy(() => util.verifyAstPlan(stmtSet, ExplainDetail.CHANGELOG_MODE))
-      .hasMessageContaining(
-        s"You should enable the checkpointing for sinking to managed table " +
-          s"'default_catalog.default_database.sink', " +
-          s"managed table relies on checkpoint to commit and " +
-          s"the data is visible only after commit.")
-      .isInstanceOf[TableException]
-  }
-
-  @Test
-  def testManagedTableSinkWithEnableCheckpointing(): Unit = {
-    util.getStreamEnv.enableCheckpointing(10)
-    util.addTable(s"""
-                     |CREATE TABLE sink (
-                     |  `a` INT,
-                     |  `b` BIGINT,
-                     |  `c` STRING
-                     |) WITH(
-                     |)
-                     |""".stripMargin)
-    val stmtSet = util.tableEnv.createStatementSet()
-    stmtSet.addInsertSql("INSERT INTO sink SELECT * FROM MyTable")
-
-    util.verifyAstPlan(stmtSet, ExplainDetail.CHANGELOG_MODE)
-  }
-
-  @Test
   def testInsertPartColumn(): Unit = {
     util.addTable(s"""
                      |CREATE TABLE zm_test (
@@ -859,15 +848,154 @@ class TableSinkTest extends TableTestBase {
   }
 
   @Test
-  def testCreateTableAsSelect(): Unit = {
-    // TODO: support explain CreateTableASOperation
-    // Flink does not support explain CreateTableASOperation yet, we will fix it in FLINK-28770.
-    Assertions
-      .assertThatThrownBy(
-        () => util.tableEnv.explainSql("CREATE TABLE zm_ctas_test AS SELECT * FROM MyTable"))
-      .hasMessageContaining(
-        "Unsupported ModifyOperation: org.apache.flink.table.operations.CreateTableASOperation")
+  def testExplainCreateTableAsSelect(): Unit = {
+    val actual = util.tableEnv.explainSql("""
+                                            |CREATE TABLE MyCtasTable
+                                            | WITH (
+                                            |   'connector' = 'values'
+                                            |) AS
+                                            |  SELECT
+                                            |    `a`,
+                                            |    `b`
+                                            |  FROM
+                                            |    MyTable
+                                            |""".stripMargin)
+
+    val expected = TableTestUtil.readFromResource("/explain/testExplainCtas.out")
+
+    assertEquals(TableTestUtil.replaceStageId(expected), TableTestUtil.replaceStageId(actual))
   }
+
+  @Test
+  def testExplainReplaceTableAsSelect(): Unit = {
+    val actual = util.tableEnv.explainSql("""
+                                            |REPLACE TABLE MyCtasTable
+                                            | WITH (
+                                            |   'connector' = 'values'
+                                            |) AS
+                                            |  SELECT
+                                            |    `a`,
+                                            |    `b`
+                                            |  FROM
+                                            |    MyTable
+                                            |""".stripMargin)
+
+    // Same as CTAS
+    val expected = TableTestUtil.readFromResource("/explain/testExplainCtas.out")
+
+    assertEquals(TableTestUtil.replaceStageId(expected), TableTestUtil.replaceStageId(actual))
+  }
+
+  @Test
+  def testExplainCreateTableAsSelectWithColumnsInCreateAndQueryParts(): Unit = {
+    val actual =
+      util.tableEnv.explainSql("""
+                                 |CREATE TABLE MyCtasTable(`votes` INT, `votes_2x` AS `b` * 2)
+                                 | WITH (
+                                 |   'connector' = 'values'
+                                 |) AS
+                                 |  SELECT
+                                 |    `a`,
+                                 |    `b`
+                                 |  FROM
+                                 |    MyTable
+                                 |""".stripMargin)
+
+    val expected =
+      TableTestUtil.readFromResource("/explain/testExplainCtasWithColumnsInCreateAndQueryParts.out")
+
+    assertEquals(TableTestUtil.replaceStageId(expected), TableTestUtil.replaceStageId(actual))
+  }
+
+  @Test
+  def testExplainReplaceTableAsSelectWithColumnsInCreateAndQueryParts(): Unit = {
+    val actual =
+      util.tableEnv.explainSql("""
+                                 |REPLACE TABLE MyCtasTable(`votes` INT, `votes_2x` AS `b` * 2)
+                                 | WITH (
+                                 |   'connector' = 'values'
+                                 |) AS
+                                 |  SELECT
+                                 |    `a`,
+                                 |    `b`
+                                 |  FROM
+                                 |    MyTable
+                                 |""".stripMargin)
+
+    // Same as CTAS
+    val expected =
+      TableTestUtil.readFromResource("/explain/testExplainCtasWithColumnsInCreateAndQueryParts.out")
+
+    assertEquals(TableTestUtil.replaceStageId(expected), TableTestUtil.replaceStageId(actual))
+  }
+
+  @Test
+  def testInsertOnConflictDoDeduplicate(): Unit = {
+    util.addTable(s"""
+                     |CREATE TABLE conflictSink3 (
+                     |  `a` INT,
+                     |  `b` BIGINT,
+                     |  PRIMARY KEY (a) NOT ENFORCED
+                     |) WITH (
+                     |  'connector' = 'values',
+                     |  'sink-insert-only' = 'false'
+                     |)
+                     |""".stripMargin)
+    val stmtSet = util.tableEnv.createStatementSet()
+    stmtSet.addInsertSql(
+      "INSERT INTO conflictSink3 SELECT a, b FROM MyTable ON CONFLICT DO DEDUPLICATE")
+    util.verifyRelPlan(stmtSet, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testInjectiveCastPreservesUpsertKey(): Unit = {
+    // Aggregation produces upsert stream with key (a).
+    // Sink expects STRING primary key.
+    // CAST(INT AS STRING) is injective, so the upsert key is preserved - no materializer needed.
+    util.tableEnv.executeSql("""
+                               |CREATE TABLE sink_agg_with_string_pk (
+                               |  id STRING NOT NULL,
+                               |  cnt BIGINT,
+                               |  PRIMARY KEY (id) NOT ENFORCED
+                               |) WITH (
+                               |  'connector' = 'values',
+                               |  'sink-insert-only' = 'false'
+                               |)
+                               |""".stripMargin)
+    val stmtSet = util.tableEnv.createStatementSet()
+    // GROUP BY a produces upsert key (a), then CAST(a AS STRING) preserves it
+    stmtSet.addInsertSql(
+      "INSERT INTO sink_agg_with_string_pk SELECT CAST(a AS STRING), COUNT(*) FROM MyTable GROUP BY a")
+    // The plan should NOT contain upsertMaterialize=[true] because INT->STRING is injective
+    util.verifyRelPlan(stmtSet, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testNonInjectiveCastLosesUpsertKey(): Unit = {
+    // Aggregation produces upsert stream with key (c) which is STRING.
+    // Sink expects INT primary key.
+    // CAST(STRING AS INT) is NOT injective ("1" and "01" both become 1), so key is lost.
+    util.tableEnv.executeSql("""
+                               |CREATE TABLE sink_agg_with_int_pk (
+                               |  id INT NOT NULL,
+                               |  cnt BIGINT,
+                               |  PRIMARY KEY (id) NOT ENFORCED
+                               |) WITH (
+                               |  'connector' = 'values',
+                               |  'sink-insert-only' = 'false'
+                               |)
+                               |""".stripMargin)
+    // GROUP BY c (STRING) produces upsert key (c), then CAST(c AS INT) loses it
+    util.verifyExplainInsert(
+      """
+        |INSERT INTO sink_agg_with_int_pk
+        |SELECT CAST(c AS INT), COUNT(*) FROM MyTable GROUP BY c
+        |ON CONFLICT DO DEDUPLICATE
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+
 }
 
 /** tests table factory use ParallelSourceFunction which support parallelism by env */

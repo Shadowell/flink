@@ -18,6 +18,7 @@
 package org.apache.flink.streaming.api.operators;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.runtime.event.WatermarkEvent;
 import org.apache.flink.runtime.state.VoidNamespace;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.streaming.api.SimpleTimerService;
@@ -46,8 +47,6 @@ public class KeyedProcessOperator<K, IN, OUT>
 
     public KeyedProcessOperator(KeyedProcessFunction<K, IN, OUT> function) {
         super(function);
-
-        chainingStrategy = ChainingStrategy.ALWAYS;
     }
 
     @Override
@@ -68,6 +67,11 @@ public class KeyedProcessOperator<K, IN, OUT>
     public void onEventTime(InternalTimer<K, VoidNamespace> timer) throws Exception {
         collector.setAbsoluteTimestamp(timer.getTimestamp());
         invokeUserFunction(TimeDomain.EVENT_TIME, timer);
+    }
+
+    @Override
+    public void processWatermark(WatermarkEvent watermark) throws Exception {
+        output.emitWatermark(watermark);
     }
 
     @Override

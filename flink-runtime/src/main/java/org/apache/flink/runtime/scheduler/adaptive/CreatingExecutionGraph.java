@@ -27,11 +27,14 @@ import org.apache.flink.runtime.executiongraph.ExecutionVertex;
 import org.apache.flink.runtime.jobgraph.JobType;
 import org.apache.flink.runtime.jobgraph.jsonplan.JsonPlanGenerator;
 import org.apache.flink.runtime.metrics.groups.JobManagerJobMetricGroup;
+import org.apache.flink.runtime.rest.messages.JobPlanInfo;
 import org.apache.flink.runtime.scheduler.DefaultOperatorCoordinatorHandler;
 import org.apache.flink.runtime.scheduler.ExecutionGraphHandler;
 import org.apache.flink.runtime.scheduler.GlobalFailureHandler;
 import org.apache.flink.runtime.scheduler.OperatorCoordinatorHandler;
 import org.apache.flink.runtime.scheduler.adaptive.allocator.VertexParallelism;
+import org.apache.flink.runtime.scheduler.adaptive.timeline.RescaleTimeline;
+import org.apache.flink.runtime.scheduler.adaptive.timeline.TerminatedReason;
 import org.apache.flink.util.IterableUtils;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.concurrent.FutureUtils;
@@ -41,6 +44,7 @@ import org.slf4j.Logger;
 import javax.annotation.Nullable;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Collections;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -96,6 +100,9 @@ public class CreatingExecutionGraph extends StateWithoutExecutionGraph {
                             CreatingExecutionGraph.class.getSimpleName(),
                             Executing.class.getSimpleName(),
                             throwable);
+
+            recordRescaleForException(throwable);
+
             context.goToFinished(context.getArchivedExecutionGraph(JobStatus.FAILED, throwable));
         } else {
             for (ExecutionVertex vertex :
@@ -107,6 +114,8 @@ public class CreatingExecutionGraph extends StateWithoutExecutionGraph {
                     context.tryToAssignSlots(executionGraphWithVertexParallelism);
 
             if (result.isSuccess()) {
+                recordRescaleForGraphCreation(executionGraphWithVertexParallelism);
+
                 getLogger()
                         .debug(
                                 "Successfully reserved and assigned the required slots for the ExecutionGraph.");
@@ -123,7 +132,7 @@ public class CreatingExecutionGraph extends StateWithoutExecutionGraph {
                         operatorCoordinatorHandlerFactory.create(executionGraph, context);
                 operatorCoordinatorHandler.initializeOperatorCoordinators(
                         context.getMainThreadExecutor());
-                final String updatedPlan =
+                final JobPlanInfo.Plan updatedPlan =
                         JsonPlanGenerator.generatePlan(
                                 executionGraph.getJobID(),
                                 executionGraph.getJobName(),
@@ -135,7 +144,7 @@ public class CreatingExecutionGraph extends StateWithoutExecutionGraph {
                                                 .map(ExecutionJobVertex::getJobVertex)
                                                 .iterator(),
                                 executionGraphWithVertexParallelism.getVertexParallelism());
-                executionGraph.setJsonPlan(updatedPlan);
+                executionGraph.setPlan(updatedPlan);
 
                 executionGraph.transitionToRunning();
                 operatorCoordinatorHandler.startAllOperatorCoordinators();
@@ -152,6 +161,31 @@ public class CreatingExecutionGraph extends StateWithoutExecutionGraph {
                 context.goToWaitingForResources(previousExecutionGraph);
             }
         }
+    }
+
+    private void recordRescaleForGraphCreation(
+            ExecutionGraphWithVertexParallelism executionGraphWithVertexParallelism) {
+        RescaleTimeline rescaleTimeline = context.getRescaleTimeline();
+        rescaleTimeline.updateRescale(
+                rescale ->
+                        rescale.setPostRescaleVertexParallelism(
+                                        rescaleTimeline.getJobInformation(),
+                                        executionGraphWithVertexParallelism.getVertexParallelism())
+                                .setPostRescaleSlots(
+                                        executionGraphWithVertexParallelism.jobSchedulingPlan
+                                                .getSlotAssignments())
+                                .log());
+    }
+
+    private void recordRescaleForException(Throwable throwable) {
+        final long epochMilli = Instant.now().toEpochMilli();
+        context.getRescaleTimeline()
+                .updateRescale(
+                        rescale ->
+                                rescale.setTerminatedReason(TerminatedReason.EXCEPTION_OCCURRED)
+                                        .setEndTimestamp(epochMilli)
+                                        .addSchedulerState(this, throwable)
+                                        .log());
     }
 
     @Override
@@ -316,8 +350,8 @@ public class CreatingExecutionGraph extends StateWithoutExecutionGraph {
         }
 
         public static ExecutionGraphWithVertexParallelism create(
-                ExecutionGraph executionGraph, JobSchedulingPlan vertexParallelism) {
-            return new ExecutionGraphWithVertexParallelism(executionGraph, vertexParallelism);
+                ExecutionGraph executionGraph, JobSchedulingPlan jobSchedulingPlan) {
+            return new ExecutionGraphWithVertexParallelism(executionGraph, jobSchedulingPlan);
         }
 
         public ExecutionGraph getExecutionGraph() {

@@ -22,19 +22,19 @@ import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.functions.RichFilterFunction;
 import org.apache.flink.api.common.functions.RichMapFunction;
 import org.apache.flink.api.common.functions.RichReduceFunction;
-import org.apache.flink.api.common.restartstrategy.RestartStrategies;
 import org.apache.flink.api.common.state.CheckpointListener;
 import org.apache.flink.streaming.api.checkpoint.ListCheckpointed;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.co.RichCoFlatMapFunction;
-import org.apache.flink.streaming.api.functions.sink.SinkFunction;
-import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunction;
-import org.apache.flink.test.util.AbstractTestBaseJUnit4;
+import org.apache.flink.streaming.api.functions.sink.legacy.SinkFunction;
+import org.apache.flink.streaming.api.functions.source.legacy.RichParallelSourceFunction;
+import org.apache.flink.streaming.util.RestartStrategyUtils;
+import org.apache.flink.test.util.AbstractTestBase;
 import org.apache.flink.test.util.TestUtils;
 import org.apache.flink.util.Collector;
 
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.io.Serializable;
@@ -42,8 +42,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Random;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * A simple test that runs a streaming topology with checkpointing enabled. This differs from {@link
@@ -56,8 +55,8 @@ import static org.junit.Assert.assertTrue;
  * <p>The test triggers a failure after a while and verifies that, after completion, the state
  * reflects the "exactly once" semantics.
  */
-@SuppressWarnings({"serial", "deprecation"})
-public class CoStreamCheckpointingITCase extends AbstractTestBaseJUnit4 {
+@SuppressWarnings("deprecation")
+class CoStreamCheckpointingITCase extends AbstractTestBase {
 
     private static final long NUM_STRINGS = 10_000L;
     private static final int PARALLELISM = 4;
@@ -70,13 +69,13 @@ public class CoStreamCheckpointingITCase extends AbstractTestBaseJUnit4 {
      * </pre>
      */
     @Test
-    public void testCoStreamCheckpointingProgram() throws Exception {
-        assertTrue("Broken test setup", NUM_STRINGS % 40 == 0);
+    void testCoStreamCheckpointingProgram() throws Exception {
+        assertThat(NUM_STRINGS % 40).as("Broken test setup").isZero();
 
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         env.setParallelism(PARALLELISM);
         env.enableCheckpointing(50);
-        env.setRestartStrategy(RestartStrategies.fixedDelayRestart(Integer.MAX_VALUE, 0L));
+        RestartStrategyUtils.configureFixedDelayRestartStrategy(env, Integer.MAX_VALUE, 0L);
 
         DataStream<String> stream =
                 env.addSource(new StringGeneratingSourceFunction(NUM_STRINGS, NUM_STRINGS / 5));
@@ -95,7 +94,7 @@ public class CoStreamCheckpointingITCase extends AbstractTestBaseJUnit4 {
                 .map(new StatefulCounterFunction())
 
                 // -------------- fourth vertex - reducer (failing) and the sink ----------------
-                .keyBy("prefix")
+                .keyBy(x -> x.prefix)
                 .reduce(new OnceFailingReducer(NUM_STRINGS))
                 .addSink(
                         new SinkFunction<PrefixCount>() {
@@ -131,10 +130,10 @@ public class CoStreamCheckpointingITCase extends AbstractTestBaseJUnit4 {
         }
 
         // verify that we counted exactly right
-        assertEquals(NUM_STRINGS, filterSum);
-        assertEquals(NUM_STRINGS, coMapSum);
-        assertEquals(NUM_STRINGS, mapSum);
-        assertEquals(NUM_STRINGS, countSum);
+        assertThat(filterSum).isEqualTo(NUM_STRINGS);
+        assertThat(coMapSum).isEqualTo(NUM_STRINGS);
+        assertThat(mapSum).isEqualTo(NUM_STRINGS);
+        assertThat(countSum).isEqualTo(NUM_STRINGS);
     }
 
     // --------------------------------------------------------------------------------------------

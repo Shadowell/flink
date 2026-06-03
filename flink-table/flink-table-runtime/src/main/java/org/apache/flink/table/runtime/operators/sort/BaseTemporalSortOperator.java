@@ -18,12 +18,12 @@
 
 package org.apache.flink.table.runtime.operators.sort;
 
+import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.runtime.state.VoidNamespace;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.streaming.api.SimpleTimerService;
 import org.apache.flink.streaming.api.TimerService;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
-import org.apache.flink.streaming.api.operators.ChainingStrategy;
 import org.apache.flink.streaming.api.operators.InternalTimerService;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.operators.TimestampedCollector;
@@ -37,12 +37,16 @@ abstract class BaseTemporalSortOperator extends AbstractStreamOperator<RowData>
     protected transient TimerService timerService;
     protected transient TimestampedCollector<RowData> collector;
 
-    BaseTemporalSortOperator() {
-        setChainingStrategy(ChainingStrategy.ALWAYS);
+    BaseTemporalSortOperator() {}
+
+    @Override
+    public boolean useInterruptibleTimers(ReadableConfig config) {
+        return true;
     }
 
     @Override
     public void open() throws Exception {
+        super.open();
         InternalTimerService<VoidNamespace> internalTimerService =
                 getInternalTimerService("user-timers", VoidNamespaceSerializer.INSTANCE, this);
         timerService = new SimpleTimerService(internalTimerService);

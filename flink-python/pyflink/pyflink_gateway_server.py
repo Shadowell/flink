@@ -46,34 +46,14 @@ def on_windows():
 def read_from_config(key, default_value, flink_conf_directory):
     from ruamel.yaml import YAML
     yaml = YAML(typ='safe')
-    # try to find flink-conf.yaml file in flink_conf_directory
-    flink_conf_file = os.path.join(flink_conf_directory, "flink-conf.yaml")
-    if os.path.isfile(flink_conf_file):
-        # If flink-conf.yaml exists, use the old parsing logic to read the value
-        # get the realpath of tainted path value to avoid CWE22 problem that constructs a path
-        # or URI using the tainted value and might allow an attacker to access, modify, or test
-        # the existence of critical or sensitive files.
-        with open(os.path.realpath(flink_conf_file), "r") as f:
-            while True:
-                line = f.readline()
-                if not line:
-                    break
-                if line.startswith("#") or len(line.strip()) == 0:
-                    continue
-                k, v = line.split(":", 1)
-                if k.strip() == key:
-                    return v.strip()
-    else:
-        # If flink-conf.yaml does not exist, try to find config.yaml instead
-        config_file = os.path.join(flink_conf_directory, "config.yaml")
-        if os.path.isfile(config_file):
-            # If config.yaml exists, use YAML parser to read the value
-            with open(os.path.realpath(config_file), "r") as f:
-                config = yaml.load(f)
-                flat_config = flatten_config(config)
-                return flat_config.get(key, default_value)
+    config_file = os.path.join(flink_conf_directory, "config.yaml")
+    if os.path.isfile(config_file):
+        # If config.yaml exists, use YAML parser to read the value
+        with open(os.path.realpath(config_file), "r") as f:
+            config = yaml.load(f)
+            flat_config = flatten_config(config)
+            return flat_config.get(key, default_value)
 
-    # If neither file exists, return the default value
     return default_value
 
 
@@ -138,6 +118,17 @@ def prepare_environment_variables(env):
     env["FLINK_BIN_DIR"] = os.path.join(real_flink_home, "bin")
 
 
+def get_log_dir(env):
+    flink_home = os.path.realpath(_find_flink_home())
+
+    if "FLINK_LOG_DIR" in env:
+        flink_log_dir = env["FLINK_LOG_DIR"]
+    else:
+        flink_log_dir = read_from_config(
+            KEY_ENV_LOG_DIR, os.path.join(flink_home, "log"), env['FLINK_CONF_DIR'])
+    return flink_log_dir
+
+
 def construct_log_settings(env):
     templates = [
         "-Dlog.file=${flink_log_dir}/flink-${flink_ident_string}-python-${hostname}.log",
@@ -146,14 +137,8 @@ def construct_log_settings(env):
         "-Dlogback.configurationFile=${logback_xml}"
     ]
 
-    flink_home = os.path.realpath(_find_flink_home())
     flink_conf_dir = env['FLINK_CONF_DIR']
-
-    if "FLINK_LOG_DIR" in env:
-        flink_log_dir = env["FLINK_LOG_DIR"]
-    else:
-        flink_log_dir = read_from_config(
-            KEY_ENV_LOG_DIR, os.path.join(flink_home, "log"), env['FLINK_CONF_DIR'])
+    flink_log_dir = get_log_dir(env)
 
     if "LOG4J_PROPERTIES" in env:
         log4j_properties = env["LOG4J_PROPERTIES"]
@@ -291,6 +276,9 @@ def launch_gateway_server_process(env, args):
             *jvm_args,
             "-XX:+IgnoreUnrecognizedVMOptions",
             "--add-opens=jdk.proxy2/jdk.proxy2=ALL-UNNAMED",
+            "--sun-misc-unsafe-memory-access=allow",
+            "--enable-native-access=ALL-UNNAMED",
+            "-Dio.netty.tryReflectionSetAccessible=true",
             *jvm_opts,
             *log_settings,
             "-cp",

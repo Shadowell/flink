@@ -18,8 +18,10 @@
 
 package org.apache.flink.runtime.scheduler.adaptive;
 
+import org.apache.flink.api.common.JobID;
+import org.apache.flink.runtime.scheduler.adaptive.timeline.RescaleContext;
+
 import java.time.Duration;
-import java.time.Instant;
 import java.util.concurrent.ScheduledFuture;
 
 /**
@@ -30,8 +32,17 @@ public interface StateTransitionManager {
 
     /**
      * Is called if the environment changed in a way that a state transition could be considered.
+     *
+     * @param newResourceDriven Whether the onchange is driven by new available resources.
      */
-    void onChange();
+    void onChange(boolean newResourceDriven);
+
+    /**
+     * Is called if the environment changed in a way that a state transition could be considered.
+     */
+    default void onChange() {
+        onChange(false);
+    }
 
     /**
      * Is called when any previous observed environment changes shall be verified possibly
@@ -46,7 +57,9 @@ public interface StateTransitionManager {
      * The interface that can be used by the {@code StateTransitionManager} to communicate with the
      * underlying system.
      */
-    interface Context {
+    interface Context extends RescaleContext {
+
+        State schedulerState();
 
         /**
          * Returns {@code true} if the available resources are sufficient enough for a state
@@ -69,15 +82,12 @@ public interface StateTransitionManager {
          * @return a ScheduledFuture representing pending completion of the operation.
          */
         ScheduledFuture<?> scheduleOperation(Runnable callback, Duration delay);
-    }
-
-    /** Interface for creating {@code StateTransitionManager} instances. */
-    interface Factory {
 
         /**
-         * Creates a {@code StateTransitionManager} instance for the given {@code Context} and
-         * previous state transition time.
+         * Gets the {@link JobID} of the job.
+         *
+         * @return the {@link JobID} of the job
          */
-        StateTransitionManager create(Context context, Instant lastStateTransition);
+        JobID getJobId();
     }
 }

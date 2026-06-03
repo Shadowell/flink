@@ -17,30 +17,24 @@
  */
 package org.apache.flink.table.planner.calcite
 
-import org.apache.flink.sql.parser.`type`.SqlMapTypeNameSpec
 import org.apache.flink.sql.parser.SqlProperty
 import org.apache.flink.sql.parser.dml.RichSqlInsert
 import org.apache.flink.sql.parser.dql.SqlRichExplain
 import org.apache.flink.table.api.ValidationException
 import org.apache.flink.table.planner.calcite.PreValidateReWriter.{appendPartitionAndNullsProjects, notSupported}
-import org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable
 import org.apache.flink.table.planner.plan.schema.{CatalogSourceTable, FlinkPreparingTableBase, LegacyCatalogSourceTable}
-import org.apache.flink.util.Preconditions.checkArgument
 
 import org.apache.calcite.plan.RelOptTable
 import org.apache.calcite.prepare.CalciteCatalogReader
 import org.apache.calcite.rel.`type`.{RelDataType, RelDataTypeFactory, RelDataTypeField}
 import org.apache.calcite.runtime.{CalciteContextException, Resources}
-import org.apache.calcite.sql.`type`.SqlTypeUtil
-import org.apache.calcite.sql.{SqlCall, SqlDataTypeSpec, SqlIdentifier, SqlKind, SqlLiteral, SqlNode, SqlNodeList, SqlOrderBy, SqlSelect, SqlTableRef, SqlUtil}
-import org.apache.calcite.sql.fun.SqlStdOperatorTable
+import org.apache.calcite.sql.{SqlCall, SqlIdentifier, SqlLiteral, SqlNode, SqlNodeList, SqlTableRef, SqlUtil}
 import org.apache.calcite.sql.parser.SqlParserPos
 import org.apache.calcite.sql.util.SqlBasicVisitor
 import org.apache.calcite.sql.validate.{SqlValidatorException, SqlValidatorTable, SqlValidatorUtil}
 import org.apache.calcite.util.Static.RESOURCE
 
 import java.util
-import java.util.Collections
 
 import scala.collection.JavaConversions._
 
@@ -153,11 +147,7 @@ object PreValidateReWriter {
       val value = sqlProperty.getValue.asInstanceOf[SqlLiteral]
       assignedFields.put(
         targetField.getIndex,
-        rewriterUtils.maybeCast(
-          value,
-          value.createSqlType(typeFactory),
-          targetField.getType,
-          typeFactory))
+        validator.maybeCast(value, value.createSqlType(typeFactory), targetField.getType))
     }
 
     // validate partial insert columns.
@@ -205,11 +195,11 @@ object PreValidateReWriter {
             validateField(idx => !assignedFields.contains(idx), id, targetField)
             assignedFields.put(
               targetField.getIndex,
-              rewriterUtils.maybeCast(
+              validator.maybeCast(
                 SqlLiteral.createNull(SqlParserPos.ZERO),
                 typeFactory.createUnknownType(),
-                targetField.getType,
-                typeFactory)
+                targetField.getType
+              )
             )
           } else {
             // handle reorder
@@ -220,63 +210,14 @@ object PreValidateReWriter {
       }
     }
 
-    rewriteSqlCall(rewriterUtils, validator, source, targetRowType, assignedFields, targetPosition)
-  }
-
-  private def rewriteSqlCall(
-      rewriterUtils: SqlRewriterUtils,
-      validator: FlinkCalciteSqlValidator,
-      call: SqlCall,
-      targetRowType: RelDataType,
-      assignedFields: util.LinkedHashMap[Integer, SqlNode],
-      targetPosition: util.List[Int]): SqlCall = {
-
-    def rewrite(node: SqlNode): SqlCall = {
-      checkArgument(node.isInstanceOf[SqlCall], node)
-      rewriteSqlCall(
-        rewriterUtils,
-        validator,
-        node.asInstanceOf[SqlCall],
-        targetRowType,
-        assignedFields,
-        targetPosition)
-    }
-
-    call.getKind match {
-      case SqlKind.SELECT =>
-        val sqlSelect = call.asInstanceOf[SqlSelect]
-
-        if (targetPosition.nonEmpty && sqlSelect.getSelectList.size() != targetPosition.size()) {
-          throw newValidationError(call, RESOURCE.columnCountMismatch())
-        }
-        rewriterUtils.rewriteSelect(sqlSelect, targetRowType, assignedFields, targetPosition)
-      case SqlKind.VALUES =>
-        call.getOperandList.toSeq.foreach {
-          case sqlCall: SqlCall => {
-            if (targetPosition.nonEmpty && sqlCall.getOperandList.size() != targetPosition.size()) {
-              throw newValidationError(call, RESOURCE.columnCountMismatch())
-            }
-          }
-        }
-        rewriterUtils.rewriteValues(call, targetRowType, assignedFields, targetPosition)
-      case kind if SqlKind.SET_QUERY.contains(kind) =>
-        call.getOperandList.zipWithIndex.foreach {
-          case (operand, index) => call.setOperand(index, rewrite(operand))
-        }
-        call
-      case SqlKind.ORDER_BY =>
-        val operands = call.getOperandList
-        new SqlOrderBy(
-          call.getParserPosition,
-          rewrite(operands.get(0)),
-          operands.get(1).asInstanceOf[SqlNodeList],
-          operands.get(2),
-          operands.get(3))
-      // Not support:
-      // case SqlKind.WITH =>
-      // case SqlKind.EXPLICIT_TABLE =>
-      case _ => throw new ValidationException(notSupported(call))
-    }
+    rewriterUtils.rewriteCall(
+      rewriterUtils,
+      validator,
+      source,
+      targetRowType,
+      assignedFields,
+      targetPosition,
+      () => notSupported(source))
   }
 
   /**

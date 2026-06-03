@@ -29,6 +29,7 @@ import org.apache.flink.api.common.cache.DistributedCache;
 import org.apache.flink.api.common.time.Deadline;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.TaskManagerOptions;
+import org.apache.flink.core.fs.AutoCloseableRegistry;
 import org.apache.flink.core.fs.FileSystemSafetyNet;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.core.security.FlinkSecurityManager;
@@ -41,6 +42,7 @@ import org.apache.flink.runtime.checkpoint.CheckpointMetaData;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.checkpoint.CheckpointStoreUtil;
 import org.apache.flink.runtime.checkpoint.channel.ChannelStateWriteRequestExecutorFactory;
+import org.apache.flink.runtime.checkpoint.channel.ChannelStateWriter;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
 import org.apache.flink.runtime.deployment.InputGateDeploymentDescriptor;
 import org.apache.flink.runtime.deployment.ResultPartitionDeploymentDescriptor;
@@ -54,7 +56,6 @@ import org.apache.flink.runtime.executiongraph.TaskInformation;
 import org.apache.flink.runtime.externalresource.ExternalResourceInfoProvider;
 import org.apache.flink.runtime.filecache.FileCache;
 import org.apache.flink.runtime.io.disk.iomanager.IOManager;
-import org.apache.flink.runtime.io.network.NettyShuffleEnvironment;
 import org.apache.flink.runtime.io.network.TaskEventDispatcher;
 import org.apache.flink.runtime.io.network.api.writer.ResultPartitionWriter;
 import org.apache.flink.runtime.io.network.partition.PartitionProducerStateProvider;
@@ -286,6 +287,7 @@ public class Task
 
     /** atomic flag that makes sure the invokable is canceled exactly once upon error. */
     private final AtomicBoolean invokableHasBeenCanceled;
+
     /**
      * The invokable of this task, if initialized. All accesses must copy the reference and check
      * for null, as this field is cleared as part of the disposal logic.
@@ -309,6 +311,9 @@ public class Task
      * load user code.
      */
     private UserCodeClassLoader userCodeClassLoader;
+
+    /** The channelStateWriter of the env. We obtain it after the invokable is initialized. */
+    @Nullable private volatile ChannelStateWriter channelStateWriter;
 
     /**
      * <b>IMPORTANT:</b> This constructor may not start any work that would need to be undone in the
@@ -433,13 +438,6 @@ public class Task
                             gate, metrics.getIOMetricGroup().getNumBytesInCounter());
         }
 
-        if (shuffleEnvironment instanceof NettyShuffleEnvironment) {
-            //noinspection deprecation
-            ((NettyShuffleEnvironment) shuffleEnvironment)
-                    .registerLegacyNetworkMetrics(
-                            metrics.getIOMetricGroup(), resultPartitionWriters, gates);
-        }
-
         invokableHasBeenCanceled = new AtomicBoolean(false);
 
         // finally, create the executing thread, but do not start it
@@ -512,6 +510,12 @@ public class Task
     @VisibleForTesting
     TaskInvokable getInvokable() {
         return invokable;
+    }
+
+    @Nullable
+    @VisibleForTesting
+    ChannelStateWriter getChannelStateWriter() {
+        return channelStateWriter;
     }
 
     public boolean isBackPressured() {
@@ -619,6 +623,9 @@ public class Task
         // need to be undone in the end
         Map<String, Future<Path>> distributedCacheEntries = new HashMap<>();
         TaskInvokable invokable = null;
+        // Registry that can be used to execute actions after the task has already failed. These
+        // actions are fired in the registration order.
+        AutoCloseableRegistry postFailureCleanUpRegistry = new AutoCloseableRegistry(false);
 
         try {
             // ----------------------------
@@ -752,6 +759,10 @@ public class Task
                 FlinkSecurityManager.unmonitorUserSystemExitForCurrentThread();
             }
 
+            // We register a reference to the channelStateWriter
+            // so we can close it after the inputGates close
+            this.channelStateWriter = env.getChannelStateWriter();
+
             // ----------------------------------------------------------------
             //  actual task core work
             // ----------------------------------------------------------------
@@ -760,7 +771,7 @@ public class Task
             // by the time we switched to running.
             this.invokable = invokable;
 
-            restoreAndInvoke(invokable);
+            restoreAndInvoke(invokable, postFailureCleanUpRegistry);
 
             // make sure, we enter the catch block if the task leaves the invoke() method due
             // to the fact that it has been canceled
@@ -793,47 +804,8 @@ public class Task
             t = preProcessException(t);
 
             try {
-                // transition into our final state. we should be either in DEPLOYING, INITIALIZING,
-                // RUNNING, CANCELING, or FAILED
-                // loop for multiple retries during concurrent state changes via calls to cancel()
-                // or to failExternally()
-                while (true) {
-                    ExecutionState current = this.executionState;
-
-                    if (current == ExecutionState.RUNNING
-                            || current == ExecutionState.INITIALIZING
-                            || current == ExecutionState.DEPLOYING) {
-                        if (ExceptionUtils.findThrowable(t, CancelTaskException.class)
-                                .isPresent()) {
-                            if (transitionState(current, ExecutionState.CANCELED, t)) {
-                                cancelInvokable(invokable);
-                                break;
-                            }
-                        } else {
-                            if (transitionState(current, ExecutionState.FAILED, t)) {
-                                cancelInvokable(invokable);
-                                break;
-                            }
-                        }
-                    } else if (current == ExecutionState.CANCELING) {
-                        if (transitionState(current, ExecutionState.CANCELED)) {
-                            break;
-                        }
-                    } else if (current == ExecutionState.FAILED) {
-                        // in state failed already, no transition necessary any more
-                        break;
-                    }
-                    // unexpected state, go to failed
-                    else if (transitionState(current, ExecutionState.FAILED, t)) {
-                        LOG.error(
-                                "Unexpected state in task {} ({}) during an exception: {}.",
-                                taskNameWithSubtask,
-                                executionId,
-                                current);
-                        break;
-                    }
-                    // else fall through the loop and
-                }
+                transitionStateOnFailure(t, postFailureCleanUpRegistry);
+                postFailureCleanUpRegistry.close();
             } catch (Throwable tt) {
                 String message =
                         String.format(
@@ -892,6 +864,53 @@ public class Task
         }
     }
 
+    /**
+     * Transition into our final state in case of failure. We should be either in DEPLOYING,
+     * INITIALIZING, RUNNING, CANCELING, or FAILED. Loop for multiple retries in case of concurrent
+     * state changes via calls to cancel() or to failExternally()
+     */
+    private void transitionStateOnFailure(
+            Throwable t, AutoCloseableRegistry postFailureCleanUpRegistry) throws IOException {
+        while (true) {
+            ExecutionState current = this.executionState;
+
+            if (current == ExecutionState.RUNNING
+                    || current == ExecutionState.INITIALIZING
+                    || current == ExecutionState.DEPLOYING) {
+                if (ExceptionUtils.findThrowable(t, CancelTaskException.class).isPresent()) {
+                    if (transitionState(current, ExecutionState.CANCELED, t)) {
+                        postFailureCleanUpRegistry.registerCloseable(
+                                () -> cancelInvokable(invokable));
+                        break;
+                    }
+                } else {
+                    if (transitionState(current, ExecutionState.FAILED, t)) {
+                        postFailureCleanUpRegistry.registerCloseable(
+                                () -> cancelInvokable(invokable));
+                        break;
+                    }
+                }
+            } else if (current == ExecutionState.CANCELING) {
+                if (transitionState(current, ExecutionState.CANCELED)) {
+                    break;
+                }
+            } else if (current == ExecutionState.FAILED) {
+                // in state failed already, no transition necessary any more
+                break;
+            }
+            // unexpected state, go to failed
+            else if (transitionState(current, ExecutionState.FAILED, t)) {
+                LOG.error(
+                        "Unexpected state in task {} ({}) during an exception: {}.",
+                        taskNameWithSubtask,
+                        executionId,
+                        current);
+                break;
+            }
+            // else fall through the loop
+        }
+    }
+
     /** Unwrap, enrich and handle fatal errors. */
     private Throwable preProcessException(Throwable t) {
         // unwrap wrapped exceptions to make stack traces more compact
@@ -922,7 +941,8 @@ public class Task
         return t;
     }
 
-    private void restoreAndInvoke(TaskInvokable finalInvokable) throws Exception {
+    private void restoreAndInvoke(
+            TaskInvokable finalInvokable, AutoCloseableRegistry cleanUpRegistry) throws Exception {
         try {
             // switch to the INITIALIZING state, if that fails, we have been canceled/failed in the
             // meantime
@@ -948,11 +968,8 @@ public class Task
 
             runWithSystemExitMonitoring(finalInvokable::invoke);
         } catch (Throwable throwable) {
-            try {
-                runWithSystemExitMonitoring(() -> finalInvokable.cleanUp(throwable));
-            } catch (Throwable cleanUpThrowable) {
-                throwable.addSuppressed(cleanUpThrowable);
-            }
+            cleanUpRegistry.registerCloseable(
+                    () -> runWithSystemExitMonitoring(() -> finalInvokable.cleanUp(throwable)));
             throw throwable;
         }
         runWithSystemExitMonitoring(() -> finalInvokable.cleanUp(null));
@@ -1008,6 +1025,16 @@ public class Task
         }
         closeAllResultPartitions();
         closeAllInputGates();
+        if (this.channelStateWriter != null) {
+            LOG.debug("Closing channelStateWriter for task {}", taskNameWithSubtask);
+            try {
+                this.channelStateWriter.close();
+            } catch (Throwable t) {
+                ExceptionUtils.rethrowIfFatalError(t);
+                LOG.error(
+                        "Failed to close channelStateWriter for task {}.", taskNameWithSubtask, t);
+            }
+        }
 
         try {
             taskStateManager.close();
@@ -1067,7 +1094,11 @@ public class Task
     }
 
     private void notifyFinalState() {
-        checkState(executionState.isTerminal());
+        checkState(
+                executionState.isTerminal(),
+                "Execution %s is not in terminal state: %s",
+                executionId,
+                executionState);
         taskManagerActions.updateTaskExecutionState(
                 new TaskExecutionState(executionId, executionState, failureCause));
     }
@@ -1210,10 +1241,17 @@ public class Task
                 return;
             }
 
-            if (current == ExecutionState.DEPLOYING || current == ExecutionState.CREATED) {
+            if (current == ExecutionState.CREATED) {
                 if (transitionState(current, targetState, cause)) {
                     // if we manage this state transition, then the invokable gets never called
                     // we need not call cancel on it
+                    return;
+                }
+            } else if (current == ExecutionState.DEPLOYING) {
+                if (transitionState(current, targetState, cause)) {
+                    // task may hang on the invokable constructor or static code
+                    // we need watchdog to ensure the task does not remain hanging
+                    startTaskCancellationWatchDog();
                     return;
                 }
             } else if (current == ExecutionState.INITIALIZING
@@ -1278,29 +1316,7 @@ public class Task
                                 FatalExitExceptionHandler.INSTANCE);
                         interruptingThread.start();
 
-                        // if a cancellation timeout is set, the watchdog thread kills the process
-                        // if graceful cancellation does not succeed
-                        if (taskCancellationTimeout > 0) {
-                            Runnable cancelWatchdog =
-                                    new TaskCancelerWatchDog(
-                                            taskInfo,
-                                            executingThread,
-                                            taskManagerActions,
-                                            taskCancellationTimeout,
-                                            jobId);
-
-                            Thread watchDogThread =
-                                    new Thread(
-                                            executingThread.getThreadGroup(),
-                                            cancelWatchdog,
-                                            String.format(
-                                                    "Cancellation Watchdog for %s (%s).",
-                                                    taskNameWithSubtask, executionId));
-                            watchDogThread.setDaemon(true);
-                            watchDogThread.setUncaughtExceptionHandler(
-                                    FatalExitExceptionHandler.INSTANCE);
-                            watchDogThread.start();
-                        }
+                        startTaskCancellationWatchDog();
                     }
                     return;
                 }
@@ -1310,6 +1326,31 @@ public class Task
                                 "Unexpected state: %s of task %s (%s).",
                                 current, taskNameWithSubtask, executionId));
             }
+        }
+    }
+
+    private void startTaskCancellationWatchDog() {
+        // if a cancellation timeout is set, the watchdog thread kills the process
+        // if graceful cancellation does not succeed
+        if (taskCancellationTimeout > 0) {
+            Runnable cancelWatchdog =
+                    new TaskCancelerWatchDog(
+                            taskInfo,
+                            executingThread,
+                            taskManagerActions,
+                            taskCancellationTimeout,
+                            jobId);
+
+            Thread watchDogThread =
+                    new Thread(
+                            executingThread.getThreadGroup(),
+                            cancelWatchdog,
+                            String.format(
+                                    "Cancellation Watchdog for %s (%s).",
+                                    taskNameWithSubtask, executionId));
+            watchDogThread.setDaemon(true);
+            watchDogThread.setUncaughtExceptionHandler(FatalExitExceptionHandler.INSTANCE);
+            watchDogThread.start();
         }
     }
 

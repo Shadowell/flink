@@ -21,6 +21,7 @@ from typing import Union, TypeVar, Generic, Any
 from pyflink import add_version_doc
 from pyflink.java_gateway import get_gateway
 from pyflink.table.types import DataType, DataTypes, _to_java_data_type
+from pyflink.util.api_stability_decorators import PublicEvolving
 from pyflink.util.java_utils import to_jarray
 
 __all__ = [
@@ -192,7 +193,7 @@ def _make_string_doc():
     ]
 
     for func in string_funcs:
-        func.__doc__ = func.__doc__.replace('  ', '') + _string_doc_seealso
+        func.__doc__ = func.__doc__ + _string_doc_seealso
 
 
 def _make_temporal_doc():
@@ -202,7 +203,7 @@ def _make_temporal_doc():
     ]
 
     for func in temporal_funcs:
-        func.__doc__ = func.__doc__.replace('  ', '') + _temporal_doc_seealso
+        func.__doc__ = func.__doc__ + _temporal_doc_seealso
 
 
 def _make_time_doc():
@@ -454,6 +455,7 @@ class JsonOnNull(Enum):
 T = TypeVar('T')
 
 
+@PublicEvolving()
 class Expression(Generic[T]):
     """
     Expressions represent a logical tree for producing a computation result.
@@ -630,6 +632,12 @@ class Expression(Generic[T]):
         `lit(646.646).round(0)` leads to `647`, `lit(646.646).round(-2)` leads to `600`.
         """
         return _binary_op("round")(self, places)
+
+    def concat(self, other: Union[str, 'Expression[str]']) -> 'Expression[str]':
+        """
+        Concatenates two strings.
+        """
+        return _binary_op("concat")(self, other)
 
     def between(self, lower_bound, upper_bound) -> 'Expression[bool]':
         """
@@ -853,6 +861,31 @@ class Expression(Generic[T]):
         gateway = get_gateway()
         return _ternary_op("as")(self, name, to_jarray(gateway.jvm.String, extra_names))
 
+    def as_argument(self, name: str) -> 'Expression':
+        """
+        Converts this expression into a named argument.
+
+        If the function declares a static signature (usually indicated by the "=>" assignment
+        operator), the framework is able to reorder named arguments and consider optional arguments
+        accordingly, before passing them into the function call.
+
+        .. note::
+            Not every function supports named arguments. Named arguments are not available for
+            signatures that are overloaded, use varargs, or any other kind of input type strategy.
+
+        Example:
+        ::
+
+            >>> table.select(
+            ...     call(
+            ...         "MyFunction",
+            ...         col("my_column").as_argument("input"),
+            ...         lit(42).as_argument("threshold")
+            ...     )
+            ... )
+        """
+        return _binary_op("asArgument")(self, name)
+
     def cast(self, data_type: DataType) -> 'Expression':
         """
         Returns a new value being cast to type type.
@@ -1026,6 +1059,33 @@ class Expression(Generic[T]):
         """
         return _binary_op("truncate")(self, n)
 
+    def percentile(self, percentage, frequency=None) -> 'Expression':
+        """
+        Returns the exact percentile value of expr at the specified percentage in a group.
+
+        percentage must be a literal numeric value between [0.0, 1.0] or an array of such values.
+        If a variable expression is passed to this function, the result will be calculated using
+        any one of them. frequency describes how many times expr should be counted, the default
+        value is 1.
+
+        If no expr lies exactly at the desired percentile, the result is calculated using linear
+        interpolation of the two nearest exprs. If expr or frequency is null, or frequency is not
+        positive, the input row will be ignored.
+
+        NOTE: It is recommended to use this function in a window scenario, as it typically offers
+        better performance. In a regular group aggregation scenario, users should be aware of the
+        performance overhead caused by a full sort triggered by each record.
+
+        :param percentage: A NUMERIC NOT NULL or ARRAY<NUMERIC NOT NULL> NOT NULL expression.
+        :param frequency: An optional INTEGER_NUMERIC expression.
+        :return: A DOUBLE if percentage is numeric, or an ARRAY<DOUBLE> if percentage is an
+                 array. null if percentage is an empty array.
+        """
+        if frequency is None:
+            return _binary_op("percentile")(self, percentage)
+        else:
+            return _ternary_op("percentile")(self, percentage, frequency)
+
     # ---------------------------- string functions ----------------------------------
 
     def starts_with(self, start_expr) -> 'Expression':
@@ -1159,10 +1219,10 @@ class Expression(Generic[T]):
              pattern: Union[str, 'Expression[str]'] = None,
              escape=None) -> 'Expression[bool]':
         """
-        Returns true, if a string matches the specified LIKE pattern
+        Returns true, if a string matches the specified LIKE pattern.
         e.g. 'Jo_n%' matches all strings that start with 'Jo(arbitrary letter)n'.
-        An escape character consisting of a single char can be defined if necessary,
-        '\\' by default.
+        An escape character consisting of a single char can be defined if necessary.
+        There is no default escape character.
         """
         if escape is None:
             return _binary_op("like")(self, pattern)
@@ -1259,7 +1319,7 @@ class Expression(Generic[T]):
         group index.
         """
         if extract_index is None:
-            return _ternary_op("regexpExtract")(self, regex)
+            return _binary_op("regexpExtract")(self, regex)
         else:
             return _ternary_op("regexpExtract")(self, regex, extract_index)
 
@@ -1386,6 +1446,70 @@ class Expression(Generic[T]):
         the encoding scheme is not supported, will return null.
         """
         return _unary_op("urlEncode")(self)
+
+    def inet_aton(self) -> 'Expression':
+        """
+        Converts an IPv4 address string to its numeric representation (BIGINT).
+        This function follows MySQL INET_ATON behavior.
+
+        The conversion formula is: A * 256^3 + B * 256^2 + C * 256 + D for an IP address A.B.C.D
+
+        Supports MySQL-compatible short-form IPv4 addresses:
+          - a — the value is stored directly as an address (value must be in [0, 255])
+          - a.b — interpreted as a.0.0.b
+          - a.b.c — interpreted as a.b.0.c
+          - a.b.c.d — standard dotted-decimal format
+
+        Examples:
+          - lit('1').inet_aton() returns 1 (single number)
+          - lit('127.0.0.1').inet_aton() returns 2130706433
+          - lit('127.1').inet_aton() returns 2130706433 (short-form: 127.0.0.1)
+          - lit('0.0.0.0').inet_aton() returns 0
+
+        :return: the numeric representation of the IP address, or null if the input is
+                 null or invalid
+        """
+        return _unary_op("inetAton")(self)
+
+    def inet_ntoa(self) -> 'Expression[str]':
+        """
+        Converts a numeric IPv4 address representation back to its string format.
+
+        Accepts any integer numeric type (TINYINT, SMALLINT, INT, BIGINT). The input must be
+        in the valid IPv4 range [0, 4294967295]. Negative values return null, consistent with
+        MySQL's INET_NTOA(-1) = NULL behavior.
+
+        Examples:
+          - lit(2130706433).inet_ntoa() returns '127.0.0.1'
+          - lit(0).inet_ntoa() returns '0.0.0.0'
+          - lit(-1).inet_ntoa() returns null
+
+        :return: the IPv4 address string in dotted-decimal notation, or null if the input is
+                 null, negative, or out of valid range
+        """
+        return _unary_op("inetNtoa")(self)
+
+    @property
+    def is_valid_utf8(self) -> 'Expression[bool]':
+        """
+        Returns true if the input bytes are a well-formed UTF-8 sequence, false otherwise.
+        Returns null if the input is null.
+
+        Specifically rejects: truncated multi-byte sequences (missing continuation bytes),
+        "overlong" encodings (using more bytes than necessary for the code point), code points
+        above the Unicode maximum U+10FFFF, and UTF-16 surrogate values U+D800-U+DFFF (which
+        have no UTF-8 representation).
+        """
+        return _unary_op("isValidUtf8")(self)
+
+    @property
+    def make_valid_utf8(self) -> 'Expression[str]':
+        """
+        Decodes the input bytes as UTF-8, replacing each invalid sequence with the Unicode
+        replacement character U+FFFD. The substitution is lossy and irreversible. Returns null
+        if the input is null.
+        """
+        return _unary_op("makeValidUtf8")(self)
 
     def parse_url(self, part_to_extract: Union[str, 'Expression[str]'],
                   key: Union[str, 'Expression[str]'] = None) -> 'Expression[str]':
@@ -2132,6 +2256,243 @@ class Expression(Generic[T]):
         double quotes but is not a valid JSON string literal, an error occurs.
         """
         return _unary_op("jsonUnquote")(self)
+
+    # ---------------------------- value modification functions -----------------------------
+
+    def object_update(self, *kv) -> "Expression":
+        """
+        Updates existing fields in a structured object by providing key-value pairs.
+
+        This function takes a structured object and updates specified fields with new values.
+        The keys must be string literals that correspond to existing fields in the structured type.
+        If a key does not exist in the input object, an exception will be thrown.
+
+        The function expects alternating key-value pairs where keys are field names
+        (non-null strings) and values are the new values for those fields.
+        At least one key-value pair must be provided.
+        The total number of arguments must be odd (object + pairs of key-value arguments).
+
+        The result type is the same structured class, with the specified fields
+        updated to their new values.
+
+        Example:
+        ::
+
+            >>> # Update the 'name' field of a user object
+            >>> user_obj.object_update("name", "Alice")
+            >>> # Returns an updated user object with 'name' set to "Alice"
+            >>>
+            >>> # Update multiple fields
+            >>> user_obj.object_update("name", "Alice", "age", 30)
+            >>> # Returns an updated user object with 'name' set to "Alice" and 'age' set to 30
+
+        The result type is the same structured type class, with the specified
+        fields updated to their new values.
+
+        :param kv: key-value pairs where even-indexed elements are field names
+                   (strings) and odd-indexed elements are the new values for those
+                   fields
+        :return: expression representing the updated structured type with modified
+                 field values
+        """
+        return _varargs_op("objectUpdate")(self, *kv)
+
+    # ---------------------------- Bitmap functions -----------------------------
+
+    def bitmap_and(self, bitmap2) -> 'Expression':
+        """
+        Computes the AND (intersection) of two bitmaps.
+
+        If any of the inputs are null, the result is null.
+
+        :param bitmap2: the bitmap to perform AND operation with
+        :return: a BITMAP expression
+        """
+        return _binary_op("bitmapAnd")(self, bitmap2)
+
+    def bitmap_andnot(self, bitmap2) -> 'Expression':
+        """
+        Computes the AND NOT (difference) of two bitmaps.
+
+        If any of the inputs are null, the result is null.
+
+        :param bitmap2: the bitmap to perform AND NOT operation with
+        :return: a BITMAP expression
+        """
+        return _binary_op("bitmapAndnot")(self, bitmap2)
+
+    def bitmap_and_agg(self):
+        """
+        Aggregates the AND (intersection) of multiple bitmaps.
+
+        NOTE: The retraction variant of this function may have significant performance overhead
+        with large bitmaps.
+
+        :return: a BITMAP expression
+        """
+        return _unary_op("bitmapAndAgg")(self)
+
+    def bitmap_and_cardinality_agg(self):
+        """
+        Aggregates the AND (intersection) of multiple bitmaps and returns its 64-bit cardinality.
+
+        NOTE: The retraction variant of this function may have significant performance overhead
+        with large bitmaps.
+
+        :return: a BIGINT expression
+        """
+        return _unary_op("bitmapAndCardinalityAgg")(self)
+
+    def bitmap_build(self) -> 'Expression':
+        """
+        Creates a bitmap from an array of 32-bit integers.
+
+        If the input is null, the result is null.
+
+        :return: a BITMAP expression
+        """
+        return _unary_op("bitmapBuild")(self)
+
+    def bitmap_build_agg(self):
+        """
+        Aggregates 32-bit integers into a bitmap.
+
+        :return: a BITMAP expression
+        """
+        return _unary_op("bitmapBuildAgg")(self)
+
+    def bitmap_build_cardinality_agg(self):
+        """
+        Aggregates 32-bit integers into a bitmap and returns its 64-bit cardinality.
+
+        :return: a BIGINT expression
+        """
+        return _unary_op("bitmapBuildCardinalityAgg")(self)
+
+    def bitmap_cardinality(self) -> 'Expression':
+        """
+        Returns the cardinality of a bitmap.
+
+        If the input is null, the result is null.
+
+        :return: a BIGINT expression
+        """
+        return _unary_op("bitmapCardinality")(self)
+
+    def bitmap_from_bytes(self) -> 'Expression':
+        """
+        Converts an array of bytes to a bitmap.
+
+        Following the format defined in `32-bit RoaringBitmap format specification \
+        <https://github.com/RoaringBitmap/RoaringFormatSpec>`_.
+
+        If the input is null, the result is null.
+
+        :return: a BITMAP expression
+        """
+        return _unary_op("bitmapFromBytes")(self)
+
+    def bitmap_or(self, bitmap2) -> 'Expression':
+        """
+        Computes the OR (union) of two bitmaps.
+
+        If any of the inputs are null, the result is null.
+
+        :param bitmap2: the bitmap to perform OR operation with
+        :return: a BITMAP expression
+        """
+        return _binary_op("bitmapOr")(self, bitmap2)
+
+    def bitmap_or_agg(self):
+        """
+        Aggregates the OR (union) of multiple bitmaps.
+
+        NOTE: The retraction variant of this function may have significant performance overhead
+        with large bitmaps.
+
+        :return: a BITMAP expression
+        """
+        return _unary_op("bitmapOrAgg")(self)
+
+    def bitmap_or_cardinality_agg(self):
+        """
+        Aggregates the OR (union) of multiple bitmaps and returns its 64-bit cardinality.
+
+        NOTE: The retraction variant of this function may have significant performance overhead
+        with large bitmaps.
+
+        :return: a BIGINT expression
+        """
+        return _unary_op("bitmapOrCardinalityAgg")(self)
+
+    def bitmap_to_array(self) -> 'Expression':
+        """
+        Converts a bitmap to an array of 32-bit integers, the values are sorted by \
+        :py:meth:`Integer.compareUnsigned`.
+
+        If the input is null, the result is null.
+
+        :return: an ARRAY<INT> expression
+        """
+        return _unary_op("bitmapToArray")(self)
+
+    def bitmap_to_bytes(self) -> 'Expression':
+        """
+        Converts a bitmap to an array of bytes.
+
+        Following the format defined in `32-bit RoaringBitmap format specification \
+        <https://github.com/RoaringBitmap/RoaringFormatSpec>`_.
+
+        If the input is null, the result is null.
+
+        :return: a VARBINARY expression
+        """
+        return _unary_op("bitmapToBytes")(self)
+
+    def bitmap_to_string(self) -> 'Expression':
+        """
+        Converts a bitmap to a string, the values are sorted by `Integer.compareUnsigned` in Java.
+        The string will be truncated and end with "..." if it is too long.
+
+        For example:
+
+        - ``"{}"``, ``"{1,2,3,4,5}"``
+        - Negative values (converted to unsigned): ``"{0,1,4294967294,4294967295}"``
+        - String too long: ``"{1,2,3,...}"``
+
+        If the input is null, the result is null.
+
+        :return: a STRING expression
+        """
+        return _unary_op("bitmapToString")(self)
+
+    def bitmap_xor(self, bitmap2) -> 'Expression':
+        """
+        Computes the XOR (symmetric difference) of two bitmaps.
+
+        If any of the inputs are null, the result is null.
+
+        :param bitmap2: the bitmap to perform XOR operation with
+        :return: a BITMAP expression
+        """
+        return _binary_op("bitmapXor")(self, bitmap2)
+
+    def bitmap_xor_agg(self):
+        """
+        Aggregates the XOR (symmetric difference) of multiple bitmaps.
+
+        :return: a BITMAP expression
+        """
+        return _unary_op("bitmapXorAgg")(self)
+
+    def bitmap_xor_cardinality_agg(self):
+        """
+        Aggregates the XOR (symmetric difference) of multiple bitmaps and returns its 64-bit
+        cardinality.
+
+        :return: a BIGINT expression
+        """
+        return _unary_op("bitmapXorCardinalityAgg")(self)
 
 
 # add the docs

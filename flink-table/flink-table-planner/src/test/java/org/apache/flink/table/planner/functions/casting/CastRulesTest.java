@@ -23,6 +23,7 @@ import org.apache.flink.api.common.typeutils.base.LocalDateTimeSerializer;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.TableRuntimeException;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.catalog.ObjectIdentifier;
 import org.apache.flink.table.data.DecimalData;
 import org.apache.flink.table.data.GenericArrayData;
@@ -39,6 +40,7 @@ import org.apache.flink.table.planner.functions.CastFunctionITCase;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.logical.StructuredType;
 import org.apache.flink.table.utils.DateTimeUtils;
+import org.apache.flink.types.bitmap.Bitmap;
 
 import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.TestFactory;
@@ -46,6 +48,7 @@ import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -64,6 +67,7 @@ import java.util.stream.Stream;
 import static org.apache.flink.table.api.DataTypes.ARRAY;
 import static org.apache.flink.table.api.DataTypes.BIGINT;
 import static org.apache.flink.table.api.DataTypes.BINARY;
+import static org.apache.flink.table.api.DataTypes.BITMAP;
 import static org.apache.flink.table.api.DataTypes.BOOLEAN;
 import static org.apache.flink.table.api.DataTypes.BYTES;
 import static org.apache.flink.table.api.DataTypes.CHAR;
@@ -112,6 +116,14 @@ class CastRulesTest {
             new CodeGeneratorContext(
                     new Configuration(), Thread.currentThread().getContextClassLoader());
 
+    private static final CodeGeneratorContext CTX_LEGACY_BYTES_TO_STRING =
+            new CodeGeneratorContext(
+                    new Configuration()
+                            .set(
+                                    ExecutionConfigOptions.TABLE_EXEC_LEGACY_BYTES_TO_STRING_CAST,
+                                    true),
+                    Thread.currentThread().getContextClassLoader());
+
     private static final CastRule.Context CET_CONTEXT =
             CastRule.Context.create(
                     false, false, CET, Thread.currentThread().getContextClassLoader(), CTX);
@@ -143,6 +155,8 @@ class CastRulesTest {
             timestampDataFromInstant(2022, 1, 4, 12, 34, 56, 123456780);
     private static final StringData TIMESTAMP_STRING = fromString("2021-09-24 12:34:56.123456");
     private static final StringData TIMESTAMP_STRING_CET = fromString("2021-09-24 14:34:56.123456");
+
+    private static final Bitmap DEFAULT_BITMAP = Bitmap.fromArray(new int[] {0, 1, 2});
 
     private static final DataType MY_STRUCTURED_TYPE =
             STRUCTURED(
@@ -475,12 +489,12 @@ class CastRulesTest {
                                 STRING(),
                                 fromString("2021-09-27 12:34:56"),
                                 TableRuntimeException.class)
-                        // https://issues.apache.org/jira/browse/FLINK-17224 Currently, fractional
-                        // seconds are lost
+                        // https://issues.apache.org/jira/browse/FLINK-39214
+                        // Fractional seconds below milliseconds are lost
                         .fromCase(
                                 STRING(),
                                 fromString("12:34:56.123456789"),
-                                DateTimeUtils.toInternal(LocalTime.of(12, 34, 56, 123_000_000)))
+                                DateTimeUtils.toInternal(LocalTime.of(12, 34, 56, 0)))
                         .fail(
                                 STRING(),
                                 fromString("2021-09-27 12:34:56.123456789"),
@@ -488,11 +502,11 @@ class CastRulesTest {
                         .fromCase(
                                 TIMESTAMP(6),
                                 TIMESTAMP,
-                                DateTimeUtils.toInternal(LocalTime.of(12, 34, 56, 123_000_000)))
+                                DateTimeUtils.toInternal(LocalTime.of(12, 34, 56, 0)))
                         .fromCase(
                                 TIMESTAMP_LTZ(8),
                                 TIMESTAMP_LTZ,
-                                DateTimeUtils.toInternal(LocalTime.of(11, 34, 56, 123_000_000))),
+                                DateTimeUtils.toInternal(LocalTime.of(11, 34, 56, 0))),
                 CastTestSpecBuilder.testCastTo(TIMESTAMP(9))
                         .fail(CHAR(3), fromString("foo"), TableRuntimeException.class)
                         .fail(VARCHAR(5), fromString("Flink"), TableRuntimeException.class)
@@ -536,8 +550,8 @@ class CastRulesTest {
                                 DATE(),
                                 DateTimeUtils.toInternal(LocalDate.of(2022, 1, 4)),
                                 timestampDataFromLocalDateTime(2022, 1, 4, 0, 0, 0, 0))
-                        // https://issues.apache.org/jira/browse/FLINK-17224 Currently, fractional
-                        // seconds are lost
+                        // https://issues.apache.org/jira/browse/FLINK-39214
+                        // Fractional seconds below milliseconds are lost
                         .fromCase(
                                 TIME(5),
                                 TIME,
@@ -613,8 +627,8 @@ class CastRulesTest {
                                 DATE(),
                                 DateTimeUtils.toInternal(LocalDate.of(2022, 1, 4)),
                                 timestampDataFromInstant(2022, 1, 4, 1, 0, 0, 0))
-                        // https://issues.apache.org/jira/browse/FLINK-17224 Currently, fractional
-                        // seconds are lost
+                        // https://issues.apache.org/jira/browse/FLINK-39214
+                        // Fractional seconds below milliseconds are lost
                         .fromCase(
                                 TIME(5),
                                 TIME,
@@ -689,6 +703,25 @@ class CastRulesTest {
                                 BYTES(),
                                 new byte[] {70, 108, 105, 110, 107},
                                 fromString("x'466c696e6b'"))
+                        // Strict UTF-8 validation across all BINARY_STRING family roots.
+                        .fail(BINARY(1), new byte[] {(byte) 0x80}, TableRuntimeException.class)
+                        .fail(
+                                VARBINARY(2),
+                                new byte[] {(byte) 0xC0, (byte) 0xAF},
+                                TableRuntimeException.class)
+                        .fail(BYTES(), new byte[] {(byte) 0x80}, TableRuntimeException.class)
+                        // table.exec.legacy-bytes-to-string-cast=true restores silent substitution.
+                        .fromCaseLegacyBytesToString(
+                                BYTES(), new byte[] {(byte) 0x80}, fromString("�"))
+                        .fromCaseLegacyBytesToString(
+                                VARBINARY(2),
+                                new byte[] {(byte) 0xC0, (byte) 0xAF},
+                                fromString("��"))
+                        .fromCase(
+                                BYTES(),
+                                "é€😀".getBytes(StandardCharsets.UTF_8),
+                                fromString("é€😀"))
+                        .fromCasePrinting(BYTES(), new byte[] {(byte) 0x80}, fromString("x'80'"))
                         .fromCase(BOOLEAN(), true, StringData.fromString("TRUE"))
                         .fromCase(BOOLEAN(), false, StringData.fromString("FALSE"))
                         .fromCase(
@@ -867,6 +900,11 @@ class CastRulesTest {
                         .fromCaseLegacy(VARBINARY(1), new byte[] {33}, fromString("\u0021"))
                         .fromCase(BYTES(), new byte[] {32}, fromString("      "))
                         .fromCaseLegacy(BYTES(), new byte[] {32}, fromString(" "))
+                        // Strict UTF-8 validation must fire before trim/pad on a CHAR(n) target.
+                        .fail(BYTES(), new byte[] {(byte) 0x80}, TableRuntimeException.class)
+                        // Legacy-bytes-to-string mode: invalid byte becomes U+FFFD then is padded.
+                        .fromCaseLegacyBytesToString(
+                                BYTES(), new byte[] {(byte) 0x80}, fromString("�     "))
                         .fromCase(TINYINT(), (byte) -125, fromString("-125  "))
                         .fromCaseLegacy(TINYINT(), (byte) -125, fromString("-125"))
                         .fromCase(SMALLINT(), (short) 32767, fromString("32767 "))
@@ -1485,7 +1523,24 @@ class CastRulesTest {
                                                     TIMESTAMP_STRING,
                                                     TIMESTAMP_STRING,
                                                     TIMESTAMP_STRING
-                                                }))));
+                                                }))),
+                // BITMAP cast rules
+                CastTestSpecBuilder.testCastTo(CHAR(5))
+                        .fromCase(BITMAP(), DEFAULT_BITMAP, fromString("{0,1,"))
+                        .fromCase(BITMAP(), Bitmap.empty(), fromString("{}   "))
+                        .fromCase(BITMAP(), null, EMPTY_UTF8),
+                CastTestSpecBuilder.testCastTo(VARCHAR(5))
+                        .fromCase(BITMAP(), DEFAULT_BITMAP, fromString("{0,1,"))
+                        .fromCase(BITMAP(), Bitmap.empty(), fromString("{}"))
+                        .fromCase(BITMAP(), null, EMPTY_UTF8),
+                CastTestSpecBuilder.testCastTo(STRING())
+                        .fromCase(BITMAP(), DEFAULT_BITMAP, fromString("{0,1,2}"))
+                        .fromCase(BITMAP(), Bitmap.empty(), fromString("{}"))
+                        .fromCase(BITMAP(), null, null),
+                CastTestSpecBuilder.testCastTo(BYTES())
+                        .fromCase(BITMAP(), DEFAULT_BITMAP, DEFAULT_BITMAP.toBytes())
+                        .fromCase(BITMAP(), Bitmap.empty(), Bitmap.empty().toBytes())
+                        .fromCase(BITMAP(), null, null));
     }
 
     @TestFactory
@@ -1636,6 +1691,20 @@ class CastRulesTest {
                             DateTimeUtils.UTC_ZONE.toZoneId(),
                             Thread.currentThread().getContextClassLoader(),
                             CTX),
+                    src,
+                    target);
+        }
+
+        private CastTestSpecBuilder fromCaseLegacyBytesToString(
+                DataType srcDataType, Object src, Object target) {
+            return fromCase(
+                    srcDataType,
+                    CastRule.Context.create(
+                            false,
+                            false,
+                            DateTimeUtils.UTC_ZONE.toZoneId(),
+                            Thread.currentThread().getContextClassLoader(),
+                            CTX_LEGACY_BYTES_TO_STRING),
                     src,
                     target);
         }

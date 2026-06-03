@@ -26,7 +26,7 @@ import org.apache.flink.annotation.docs.Documentation;
 import org.apache.flink.configuration.description.Description;
 import org.apache.flink.util.ArrayUtils;
 
-import org.apache.flink.shaded.guava32.com.google.common.collect.Iterables;
+import org.apache.flink.shaded.guava33.com.google.common.collect.Iterables;
 
 import java.util.List;
 
@@ -224,6 +224,17 @@ public class CoreOptions {
     // ------------------------------------------------------------------------
     //  process parameters
     // ------------------------------------------------------------------------
+
+    public static final ConfigOption<String> FLINK_JAVA_HOME =
+            ConfigOptions.key("env.java.home")
+                    .stringType()
+                    .noDefaultValue()
+                    .withDescription(
+                            Description.builder()
+                                    .text(
+                                            "Location where Java is installed. If not specified,"
+                                                    + " Flink will use your default Java installation.")
+                                    .build());
 
     public static final ConfigOption<String> FLINK_JVM_OPTIONS =
             ConfigOptions.key("env.java.opts.all")
@@ -555,5 +566,25 @@ public class CoreOptions {
         return ConfigOptions.key("fs." + scheme + ".limit.stream-timeout")
                 .longType()
                 .defaultValue(0L);
+    }
+
+    /**
+     * Explicitly resolves the conflict between multiple FileSystemFactory implementations when
+     * multiple jars are loaded for the same scheme. Primary use is to allow configuration based
+     * migration between file systems without the need to build separate images.
+     *
+     * <p>Config key pattern: {@code fs.<scheme>.priority.<factoryClassName>}
+     */
+    public static ConfigOption<Integer> fileSystemFactoryPriority(String scheme, String className) {
+        return ConfigOptions.key("fs." + scheme + ".priority." + className)
+                .intType()
+                .noDefaultValue()
+                .withDescription(
+                        "Priority for the filesystem factory '"
+                                + className
+                                + "' when multiple factories register for the '"
+                                + scheme
+                                + "' scheme. Higher priority wins. "
+                                + "When not set, the factory's declared priority is used.");
     }
 }

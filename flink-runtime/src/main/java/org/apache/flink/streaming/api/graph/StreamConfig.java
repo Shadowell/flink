@@ -19,36 +19,36 @@ package org.apache.flink.streaming.api.graph;
 
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.annotation.VisibleForTesting;
+import org.apache.flink.api.common.attribute.Attribute;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.functions.KeySelector;
-import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.core.execution.CheckpointingMode;
 import org.apache.flink.core.memory.ManagedMemoryUseCase;
 import org.apache.flink.runtime.jobgraph.JobVertex;
 import org.apache.flink.runtime.jobgraph.OperatorID;
-import org.apache.flink.runtime.operators.util.CorruptConfigurationException;
 import org.apache.flink.runtime.state.CheckpointStorage;
 import org.apache.flink.runtime.state.StateBackend;
 import org.apache.flink.runtime.util.config.memory.ManagedMemoryUtils;
-import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.operators.InternalTimeServiceManager;
 import org.apache.flink.streaming.api.operators.SimpleOperatorFactory;
 import org.apache.flink.streaming.api.operators.StreamOperator;
 import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
 import org.apache.flink.streaming.runtime.tasks.StreamTaskException;
+import org.apache.flink.streaming.runtime.watermark.AbstractInternalWatermarkDeclaration;
 import org.apache.flink.util.ClassLoaderUtil;
 import org.apache.flink.util.InstantiationUtil;
 import org.apache.flink.util.OutputTag;
-import org.apache.flink.util.TernaryBoolean;
+import org.apache.flink.util.SerializedValue;
 import org.apache.flink.util.concurrent.FutureUtils;
+
+import javax.annotation.Nullable;
 
 import java.io.IOException;
 import java.io.Serializable;
-import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -67,6 +67,11 @@ import static org.apache.flink.util.Preconditions.checkState;
 /**
  * Internal configuration for a {@link StreamOperator}. This is created and populated by the {@link
  * StreamingJobGraphGenerator}.
+ *
+ * <p>NOTE TO IMPLEMENTERS: Please do not set public ConfigOption to this class. Use the job
+ * Configuration instead! See {@link
+ * org.apache.flink.configuration.CheckpointingOptions#ENABLE_UNALIGNED} for a reference
+ * implementation.
  */
 @Internal
 public class StreamConfig implements Serializable {
@@ -78,47 +83,63 @@ public class StreamConfig implements Serializable {
     // ------------------------------------------------------------------------
 
     public static final String SERIALIZED_UDF = "serializedUDF";
+
     /**
      * Introduce serializedUdfClassName to avoid unnecessarily heavy {@link
      * #getStreamOperatorFactory}.
      */
     public static final String SERIALIZED_UDF_CLASS = "serializedUdfClass";
 
-    private static final String NUMBER_OF_OUTPUTS = "numberOfOutputs";
-    private static final String NUMBER_OF_NETWORK_INPUTS = "numberOfNetworkInputs";
+    private static final ConfigOption<Integer> NUMBER_OF_OUTPUTS =
+            ConfigOptions.key("numberOfOutputs").intType().defaultValue(0);
+    private static final ConfigOption<Integer> NUMBER_OF_NETWORK_INPUTS =
+            ConfigOptions.key("numberOfNetworkInputs").intType().defaultValue(0);
     private static final String CHAINED_OUTPUTS = "chainedOutputs";
     private static final String CHAINED_TASK_CONFIG = "chainedTaskConfig_";
-    private static final String IS_CHAINED_VERTEX = "isChainedSubtask";
-    private static final String CHAIN_INDEX = "chainIndex";
-    private static final String VERTEX_NAME = "vertexID";
+    private static final ConfigOption<Boolean> IS_CHAINED_VERTEX =
+            ConfigOptions.key("isChainedSubtask").booleanType().defaultValue(false);
+    private static final ConfigOption<Integer> CHAIN_INDEX =
+            ConfigOptions.key("chainIndex").intType().defaultValue(0);
+    private static final ConfigOption<Integer> VERTEX_NAME =
+            ConfigOptions.key("vertexID").intType().defaultValue(-1);
     private static final String ITERATION_ID = "iterationId";
     private static final String INPUTS = "inputs";
     private static final String TYPE_SERIALIZER_OUT_1 = "typeSerializer_out";
     private static final String TYPE_SERIALIZER_SIDEOUT_PREFIX = "typeSerializer_sideout_";
-    private static final String ITERATON_WAIT = "iterationWait";
+    private static final ConfigOption<Long> ITERATON_WAIT =
+            ConfigOptions.key("iterationWait").longType().defaultValue(0L);
     private static final String OP_NONCHAINED_OUTPUTS = "opNonChainedOutputs";
     private static final String VERTEX_NONCHAINED_OUTPUTS = "vertexNonChainedOutputs";
     private static final String IN_STREAM_EDGES = "inStreamEdges";
     private static final String OPERATOR_NAME = "operatorName";
     private static final String OPERATOR_ID = "operatorID";
-    private static final String CHAIN_END = "chainEnd";
-    private static final String GRAPH_CONTAINING_LOOPS = "graphContainingLoops";
+    private static final ConfigOption<Boolean> CHAIN_END =
+            ConfigOptions.key("chainEnd").booleanType().defaultValue(false);
 
-    private static final String CHECKPOINTING_ENABLED = "checkpointing";
-    private static final String CHECKPOINT_MODE = "checkpointMode";
+    private static final ConfigOption<Boolean> GRAPH_CONTAINING_LOOPS =
+            ConfigOptions.key("graphContainingLoops").booleanType().defaultValue(false);
 
-    private static final String SAVEPOINT_DIR = "savepointdir";
+    private static final String ADDITIONAL_METRIC_VARIABLES = "additionalmetricvariables";
     private static final String CHECKPOINT_STORAGE = "checkpointstorage";
     private static final String STATE_BACKEND = "statebackend";
-    private static final String ENABLE_CHANGE_LOG_STATE_BACKEND = "enablechangelog";
     private static final String TIMER_SERVICE_PROVIDER = "timerservice";
     private static final String STATE_PARTITIONER = "statePartitioner";
 
     private static final String STATE_KEY_SERIALIZER = "statekeyser";
 
-    private static final String TIME_CHARACTERISTIC = "timechar";
-
     private static final String MANAGED_MEMORY_FRACTION_PREFIX = "managedMemFraction.";
+
+    private static final String ATTRIBUTE = "attribute";
+
+    private static final String WATERMARK_DECLARATIONS = "watermarkDeclarations";
+
+    /**
+     * To reduce the deserialization overhead of reading the WatermarkDeclaration, we'll store the
+     * result after the first deserialization, and return it directly in subsequent reading
+     * requests.
+     */
+    private Set<AbstractInternalWatermarkDeclaration<?>> deserializedWatermarkDeclarations;
+
     private static final ConfigOption<Boolean> STATE_BACKEND_USE_MANAGED_MEMORY =
             ConfigOptions.key("statebackend.useManagedMemory")
                     .booleanType()
@@ -129,9 +150,6 @@ public class StreamConfig implements Serializable {
     // ------------------------------------------------------------------------
     //  Default Values
     // ------------------------------------------------------------------------
-
-    private static final CheckpointingMode DEFAULT_CHECKPOINTING_MODE =
-            CheckpointingMode.EXACTLY_ONCE;
 
     private static final double DEFAULT_MANAGED_MEMORY_FRACTION = 0.0;
 
@@ -228,11 +246,11 @@ public class StreamConfig implements Serializable {
     // ------------------------------------------------------------------------
 
     public void setVertexID(Integer vertexID) {
-        config.setInteger(VERTEX_NAME, vertexID);
+        config.set(VERTEX_NAME, vertexID);
     }
 
     public Integer getVertexID() {
-        return config.getInteger(VERTEX_NAME, -1);
+        return config.get(VERTEX_NAME);
     }
 
     /** Fraction of managed memory reserved for the given use case that this operator should use. */
@@ -287,19 +305,6 @@ public class StreamConfig implements Serializable {
                 .collect(Collectors.toSet());
     }
 
-    public void setTimeCharacteristic(TimeCharacteristic characteristic) {
-        config.setInteger(TIME_CHARACTERISTIC, characteristic.ordinal());
-    }
-
-    public TimeCharacteristic getTimeCharacteristic() {
-        int ordinal = config.getInteger(TIME_CHARACTERISTIC, -1);
-        if (ordinal >= 0) {
-            return TimeCharacteristic.values()[ordinal];
-        } else {
-            throw new CorruptConfigurationException("time characteristic is not set");
-        }
-    }
-
     public void setTypeSerializerOut(TypeSerializer<?> serializer) {
         setTypeSerializer(TYPE_SERIALIZER_OUT_1, serializer);
     }
@@ -325,6 +330,28 @@ public class StreamConfig implements Serializable {
         try {
             return InstantiationUtil.readObjectFromConfig(
                     this.config, TYPE_SERIALIZER_SIDEOUT_PREFIX + outputTag.getId(), cl);
+        } catch (Exception e) {
+            throw new StreamTaskException("Could not instantiate serializer.", e);
+        }
+    }
+
+    public void setWatermarkDeclarations(byte[] serializedWatermarkDeclarations) {
+        if (serializedWatermarkDeclarations != null) {
+            config.setBytes(WATERMARK_DECLARATIONS, serializedWatermarkDeclarations);
+        }
+    }
+
+    public Set<AbstractInternalWatermarkDeclaration<?>> getWatermarkDeclarations(ClassLoader cl) {
+        if (deserializedWatermarkDeclarations != null) {
+            return deserializedWatermarkDeclarations;
+        }
+
+        try {
+            Set<AbstractInternalWatermarkDeclaration<?>> watermarkDeclarations =
+                    InstantiationUtil.readObjectFromConfig(this.config, WATERMARK_DECLARATIONS, cl);
+            deserializedWatermarkDeclarations =
+                    watermarkDeclarations == null ? Collections.emptySet() : watermarkDeclarations;
+            return deserializedWatermarkDeclarations;
         } catch (Exception e) {
             throw new StreamTaskException("Could not instantiate serializer.", e);
         }
@@ -435,27 +462,27 @@ public class StreamConfig implements Serializable {
     }
 
     public void setIterationWaitTime(long time) {
-        config.setLong(ITERATON_WAIT, time);
+        config.set(ITERATON_WAIT, time);
     }
 
     public long getIterationWaitTime() {
-        return config.getLong(ITERATON_WAIT, 0);
+        return config.get(ITERATON_WAIT);
     }
 
     public void setNumberOfNetworkInputs(int numberOfInputs) {
-        config.setInteger(NUMBER_OF_NETWORK_INPUTS, numberOfInputs);
+        config.set(NUMBER_OF_NETWORK_INPUTS, numberOfInputs);
     }
 
     public int getNumberOfNetworkInputs() {
-        return config.getInteger(NUMBER_OF_NETWORK_INPUTS, 0);
+        return config.get(NUMBER_OF_NETWORK_INPUTS);
     }
 
     public void setNumberOfOutputs(int numberOfOutputs) {
-        config.setInteger(NUMBER_OF_OUTPUTS, numberOfOutputs);
+        config.set(NUMBER_OF_OUTPUTS, numberOfOutputs);
     }
 
     public int getNumberOfOutputs() {
-        return config.getInteger(NUMBER_OF_OUTPUTS, 0);
+        return config.get(NUMBER_OF_OUTPUTS);
     }
 
     /** Sets the operator level non-chained outputs. */
@@ -499,77 +526,6 @@ public class StreamConfig implements Serializable {
         } catch (Exception e) {
             throw new StreamTaskException("Could not instantiate inputs.", e);
         }
-    }
-
-    // --------------------- checkpointing -----------------------
-
-    public void setCheckpointingEnabled(boolean enabled) {
-        config.setBoolean(CHECKPOINTING_ENABLED, enabled);
-    }
-
-    public boolean isCheckpointingEnabled() {
-        return config.getBoolean(CHECKPOINTING_ENABLED, false);
-    }
-
-    public void setCheckpointMode(CheckpointingMode mode) {
-        config.setInteger(CHECKPOINT_MODE, mode.ordinal());
-    }
-
-    public CheckpointingMode getCheckpointMode() {
-        int ordinal = config.getInteger(CHECKPOINT_MODE, -1);
-        if (ordinal >= 0) {
-            return CheckpointingMode.values()[ordinal];
-        } else {
-            return DEFAULT_CHECKPOINTING_MODE;
-        }
-    }
-
-    public void setUnalignedCheckpointsEnabled(boolean enabled) {
-        config.set(CheckpointingOptions.ENABLE_UNALIGNED, enabled);
-    }
-
-    public boolean isUnalignedCheckpointsEnabled() {
-        return config.get(CheckpointingOptions.ENABLE_UNALIGNED, false);
-    }
-
-    public void setUnalignedCheckpointsSplittableTimersEnabled(boolean enabled) {
-        config.setBoolean(CheckpointingOptions.ENABLE_UNALIGNED_INTERRUPTIBLE_TIMERS, enabled);
-    }
-
-    public boolean isUnalignedCheckpointsSplittableTimersEnabled() {
-        return config.get(CheckpointingOptions.ENABLE_UNALIGNED_INTERRUPTIBLE_TIMERS);
-    }
-
-    public boolean isExactlyOnceCheckpointMode() {
-        return getCheckpointMode() == CheckpointingMode.EXACTLY_ONCE;
-    }
-
-    public Duration getAlignedCheckpointTimeout() {
-        return config.get(CheckpointingOptions.ALIGNED_CHECKPOINT_TIMEOUT);
-    }
-
-    public void setAlignedCheckpointTimeout(Duration alignedCheckpointTimeout) {
-        config.set(CheckpointingOptions.ALIGNED_CHECKPOINT_TIMEOUT, alignedCheckpointTimeout);
-    }
-
-    public void setMaxConcurrentCheckpoints(int maxConcurrentCheckpoints) {
-        config.set(CheckpointingOptions.MAX_CONCURRENT_CHECKPOINTS, maxConcurrentCheckpoints);
-    }
-
-    public int getMaxConcurrentCheckpoints() {
-        return config.get(
-                CheckpointingOptions.MAX_CONCURRENT_CHECKPOINTS,
-                CheckpointingOptions.MAX_CONCURRENT_CHECKPOINTS.defaultValue());
-    }
-
-    public int getMaxSubtasksPerChannelStateFile() {
-        return config.get(CheckpointingOptions.UNALIGNED_MAX_SUBTASKS_PER_CHANNEL_STATE_FILE);
-    }
-
-    public void setMaxSubtasksPerChannelStateFile(int maxSubtasksPerChannelStateFile) {
-        config.set(
-                CheckpointingOptions.UNALIGNED_MAX_SUBTASKS_PER_CHANNEL_STATE_FILE,
-                maxSubtasksPerChannelStateFile);
     }
 
     /**
@@ -636,11 +592,11 @@ public class StreamConfig implements Serializable {
     }
 
     public void setChainIndex(int index) {
-        this.config.setInteger(CHAIN_INDEX, index);
+        this.config.set(CHAIN_INDEX, index);
     }
 
     public int getChainIndex() {
-        return this.config.getInteger(CHAIN_INDEX, 0);
+        return this.config.get(CHAIN_INDEX);
     }
 
     // ------------------------------------------------------------------------
@@ -654,13 +610,24 @@ public class StreamConfig implements Serializable {
         }
     }
 
-    public void setChangelogStateBackendEnabled(TernaryBoolean enabled) {
-        toBeSerializedConfigObjects.put(ENABLE_CHANGE_LOG_STATE_BACKEND, enabled);
-    }
-
     @VisibleForTesting
     public void setStateBackendUsesManagedMemory(boolean usesManagedMemory) {
         this.config.set(STATE_BACKEND_USE_MANAGED_MEMORY, usesManagedMemory);
+    }
+
+    public void setSerializedStateBackend(
+            SerializedValue<StateBackend> serializedStateBackend, boolean useManagedMemory) {
+        if (serializedStateBackend != null) {
+            this.config.setBytes(STATE_BACKEND, serializedStateBackend.getByteArray());
+            setStateBackendUsesManagedMemory(useManagedMemory);
+        }
+    }
+
+    public void setSerializedCheckpointStorage(
+            SerializedValue<CheckpointStorage> serializedCheckpointStorage) {
+        if (serializedCheckpointStorage != null) {
+            this.config.setBytes(CHECKPOINT_STORAGE, serializedCheckpointStorage.getByteArray());
+        }
     }
 
     public StateBackend getStateBackend(ClassLoader cl) {
@@ -671,16 +638,29 @@ public class StreamConfig implements Serializable {
         }
     }
 
-    public TernaryBoolean isChangelogStateBackendEnabled(ClassLoader cl) {
-        try {
-            return InstantiationUtil.readObjectFromConfig(
-                    this.config, ENABLE_CHANGE_LOG_STATE_BACKEND, cl);
-        } catch (Exception e) {
-            throw new StreamTaskException(
-                    "Could not instantiate change log state backend enable flag.", e);
+    public void setAdditionalMetricVariables(
+            @Nullable Map<String, String> additionalMetricVariables) {
+        if (additionalMetricVariables != null) {
+            toBeSerializedConfigObjects.put(ADDITIONAL_METRIC_VARIABLES, additionalMetricVariables);
         }
     }
 
+    public Map<String, String> getAdditionalMetricVariables() {
+        try {
+            Map<String, String> additionalMetricVariables =
+                    InstantiationUtil.readObjectFromConfig(
+                            this.config,
+                            ADDITIONAL_METRIC_VARIABLES,
+                            this.getClass().getClassLoader());
+            return additionalMetricVariables == null
+                    ? Collections.emptyMap()
+                    : additionalMetricVariables;
+        } catch (Exception e) {
+            throw new StreamTaskException("Could not instantiate additional metric variables.", e);
+        }
+    }
+
+    @VisibleForTesting
     public void setCheckpointStorage(CheckpointStorage storage) {
         if (storage != null) {
             toBeSerializedConfigObjects.put(CHECKPOINT_STORAGE, storage);
@@ -741,19 +721,19 @@ public class StreamConfig implements Serializable {
     // ------------------------------------------------------------------------
 
     public void setChainStart() {
-        config.setBoolean(IS_CHAINED_VERTEX, true);
+        config.set(IS_CHAINED_VERTEX, true);
     }
 
     public boolean isChainStart() {
-        return config.getBoolean(IS_CHAINED_VERTEX, false);
+        return config.get(IS_CHAINED_VERTEX);
     }
 
     public void setChainEnd() {
-        config.setBoolean(CHAIN_END, true);
+        config.set(CHAIN_END, true);
     }
 
     public boolean isChainEnd() {
-        return config.getBoolean(CHAIN_END, false);
+        return config.get(CHAIN_END);
     }
 
     @Override
@@ -782,7 +762,6 @@ public class StreamConfig implements Serializable {
         } catch (Exception e) {
             builder.append("\nOperator: Missing");
         }
-        builder.append("\nState Monitoring: ").append(isCheckpointingEnabled());
         if (isChainStart() && getChainedOutputs(cl).size() > 0) {
             builder.append(
                     "\n\n\n---------------------\nChained task configs\n---------------------\n");
@@ -793,11 +772,25 @@ public class StreamConfig implements Serializable {
     }
 
     public void setGraphContainingLoops(boolean graphContainingLoops) {
-        config.setBoolean(GRAPH_CONTAINING_LOOPS, graphContainingLoops);
+        config.set(GRAPH_CONTAINING_LOOPS, graphContainingLoops);
     }
 
     public boolean isGraphContainingLoops() {
-        return config.getBoolean(GRAPH_CONTAINING_LOOPS, false);
+        return config.get(GRAPH_CONTAINING_LOOPS);
+    }
+
+    public void setAttribute(Attribute attribute) {
+        if (attribute != null) {
+            toBeSerializedConfigObjects.put(ATTRIBUTE, attribute);
+        }
+    }
+
+    public Attribute getAttribute(ClassLoader cl) {
+        try {
+            return InstantiationUtil.readObjectFromConfig(this.config, ATTRIBUTE, cl);
+        } catch (Exception e) {
+            throw new StreamTaskException("Could not instantiate checkpoint storage.", e);
+        }
     }
 
     /**
@@ -911,9 +904,9 @@ public class StreamConfig implements Serializable {
         }
     }
 
-    public static boolean requiresSorting(StreamConfig.InputConfig inputConfig) {
-        return inputConfig instanceof StreamConfig.NetworkInputConfig
-                && ((StreamConfig.NetworkInputConfig) inputConfig).getInputRequirement()
-                        == StreamConfig.InputRequirement.SORTED;
+    public static boolean requiresSorting(InputConfig inputConfig) {
+        return inputConfig instanceof NetworkInputConfig
+                && ((NetworkInputConfig) inputConfig).getInputRequirement()
+                        == InputRequirement.SORTED;
     }
 }

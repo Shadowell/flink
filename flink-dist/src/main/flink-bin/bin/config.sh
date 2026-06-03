@@ -213,7 +213,7 @@ export FLINK_LIB_DIR
 export FLINK_OPT_DIR
 
 source "${FLINK_BIN_DIR}/bash-java-utils.sh"
-setJavaRun "$FLINK_CONF_DIR"
+setJavaRun "$FLINK_CONF_DIR/config.yaml"
 YAML_CONF=$(updateAndGetFlinkConfiguration "${FLINK_CONF_DIR}" "${FLINK_BIN_DIR}" ${FLINK_LIB_DIR} -flatten)
 
 ########################################################################################################################
@@ -240,6 +240,8 @@ fi
 
 if [ -z "${MAX_LOG_FILE_NUMBER}" ]; then
     MAX_LOG_FILE_NUMBER=$(readFromConfig ${KEY_ENV_LOG_MAX} ${DEFAULT_ENV_LOG_MAX} "${YAML_CONF}")
+    # Remove leading and ending single quotes (if present) of value
+    MAX_LOG_FILE_NUMBER="$( echo "${MAX_LOG_FILE_NUMBER}" | sed -e "s/^'//"  -e "s/'$//" )"
     export MAX_LOG_FILE_NUMBER
 fi
 
@@ -285,7 +287,7 @@ if [ -z "${FLINK_ENV_JAVA_OPTS}" ]; then
     FLINK_ENV_JAVA_OPTS="-XX:+IgnoreUnrecognizedVMOptions $( echo "${FLINK_ENV_JAVA_OPTS}" | sed -e 's/^"//'  -e 's/"$//' )"
 
     JAVA_SPEC_VERSION=`"${JAVA_RUN}" -XshowSettings:properties 2>&1 | grep "java.specification.version" | cut -d "=" -f 2 | tr -d '[:space:]' | rev | cut -d "." -f 1 | rev`
-    if [[ $(( $JAVA_SPEC_VERSION > 17 )) == 1 ]]; then
+    if [[ $JAVA_SPEC_VERSION -gt 17 && $JAVA_SPEC_VERSION -lt 24 ]]; then
       # set security manager property to allow calls to System.setSecurityManager() at runtime
       FLINK_ENV_JAVA_OPTS="$FLINK_ENV_JAVA_OPTS -Djava.security.manager=allow"
     fi

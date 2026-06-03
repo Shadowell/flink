@@ -18,9 +18,11 @@
 package org.apache.flink.table.planner.plan.rules
 
 import org.apache.flink.table.planner.plan.nodes.logical._
+import org.apache.flink.table.planner.plan.rules.FlinkStreamRuleSets.SIMPLIFY_COALESCE_RULES
 import org.apache.flink.table.planner.plan.rules.logical._
 import org.apache.flink.table.planner.plan.rules.physical.FlinkExpandConversionRule
 import org.apache.flink.table.planner.plan.rules.physical.batch._
+import org.apache.flink.table.planner.plan.rules.physical.common.{PhysicalMLPredictTableFunctionRule, PhysicalVectorSearchTableFunctionRule}
 
 import org.apache.calcite.rel.core.RelFactories
 import org.apache.calcite.rel.logical.{LogicalIntersect, LogicalMinus, LogicalUnion}
@@ -36,7 +38,7 @@ object FlinkBatchRuleSets {
     FlinkRewriteSubQueryRule.FILTER,
     FlinkSubQueryRemoveRule.FILTER,
     JoinConditionTypeCoerceRule.INSTANCE,
-    FlinkJoinPushExpressionsRule.INSTANCE
+    CoreRules.JOIN_PUSH_EXPRESSIONS
   )
 
   /** Convert sub-queries before query decorrelation. */
@@ -49,10 +51,16 @@ object FlinkBatchRuleSets {
   /**
    * Expand plan by replacing references to tables into a proper plan sub trees. Those rules can
    * create new plan nodes.
+   *
+   * The lookup join rules run first and rewrite supported temporal joins. The rejection rules then
+   * catch any remaining temporal joins (unsupported in batch) with a clear error message.
    */
   val EXPAND_PLAN_RULES: RuleSet = RuleSets.ofList(
     LogicalCorrelateToJoinFromTemporalTableRule.LOOKUP_JOIN_WITH_FILTER,
-    LogicalCorrelateToJoinFromTemporalTableRule.LOOKUP_JOIN_WITHOUT_FILTER)
+    LogicalCorrelateToJoinFromTemporalTableRule.LOOKUP_JOIN_WITHOUT_FILTER,
+    RejectTemporalJoinInBatchRule.WITH_FILTER,
+    RejectTemporalJoinInBatchRule.WITHOUT_FILTER
+  )
 
   val POST_EXPAND_CLEAN_UP_RULES: RuleSet = RuleSets.ofList(EnumerableToLogicalTableScan.INSTANCE)
 
@@ -71,10 +79,8 @@ object FlinkBatchRuleSets {
 
   /** RuleSet to simplify coalesce invocations */
   private val SIMPLIFY_COALESCE_RULES: RuleSet = RuleSets.ofList(
-    RemoveUnreachableCoalesceArgumentsRule.PROJECT_INSTANCE,
-    RemoveUnreachableCoalesceArgumentsRule.FILTER_INSTANCE,
-    RemoveUnreachableCoalesceArgumentsRule.JOIN_INSTANCE,
-    RemoveUnreachableCoalesceArgumentsRule.CALC_INSTANCE
+    SimplifyCoalesceWithEquiJoinConditionRule.PROJECT_INSTANCE,
+    SimplifyCoalesceWithEquiJoinConditionRule.CALC_INSTANCE
   )
 
   private val LIMIT_RULES: RuleSet = RuleSets.ofList(
@@ -108,21 +114,34 @@ object FlinkBatchRuleSets {
         // let project transpose window operator.
         CoreRules.PROJECT_WINDOW_TRANSPOSE,
         // ensure union set operator have the same row type
-        new CoerceInputsRule(classOf[LogicalUnion], false),
+        CoerceInputsRule.Config.DEFAULT
+          .withCoerceNames(false)
+          .withConsumerRelClass(classOf[LogicalUnion])
+          .toRule,
         // ensure intersect set operator have the same row type
-        new CoerceInputsRule(classOf[LogicalIntersect], false),
+        CoerceInputsRule.Config.DEFAULT
+          .withCoerceNames(false)
+          .withConsumerRelClass(classOf[LogicalIntersect])
+          .toRule,
         // ensure except set operator have the same row type
-        new CoerceInputsRule(classOf[LogicalMinus], false),
+        CoerceInputsRule.Config.DEFAULT
+          .withCoerceNames(false)
+          .withConsumerRelClass(classOf[LogicalMinus])
+          .toRule,
         ConvertToNotInOrInRule.INSTANCE,
         // optimize limit 0
-        FlinkLimit0RemoveRule.INSTANCE,
+        PruneEmptyRules.SORT_FETCH_ZERO_INSTANCE,
         // fix: FLINK-28986 nested filter pattern causes unnest rule mismatch
         CoreRules.FILTER_MERGE,
         // unnest rule
         LogicalUnnestRule.INSTANCE,
         UncollectToTableFunctionScanRule.INSTANCE,
+        // vector search rule.
+        ConstantVectorSearchCallToCorrelateRule.INSTANCE,
         // Wrap arguments for JSON aggregate functions
-        WrapJsonAggFunctionArgumentsRule.INSTANCE
+        WrapJsonAggFunctionArgumentsRule.INSTANCE,
+        // prune COUNT(*) input to project a constant before aggregation
+        PruneCountStarInputRule.INSTANCE
       )).asJava)
 
   /** RuleSet about filter */
@@ -176,13 +195,19 @@ object FlinkBatchRuleSets {
 
   /** RuleSet to prune empty results rules */
   val PRUNE_EMPTY_RULES: RuleSet = RuleSets.ofList(
-    PruneEmptyRules.AGGREGATE_INSTANCE,
-    PruneEmptyRules.FILTER_INSTANCE,
-    PruneEmptyRules.JOIN_LEFT_INSTANCE,
-    FlinkPruneEmptyRules.JOIN_RIGHT_INSTANCE,
+    FlinkPruneEmptyRules.UNION_INSTANCE,
+    PruneEmptyRules.INTERSECT_INSTANCE,
+    FlinkPruneEmptyRules.MINUS_INSTANCE,
     PruneEmptyRules.PROJECT_INSTANCE,
+    PruneEmptyRules.FILTER_INSTANCE,
     PruneEmptyRules.SORT_INSTANCE,
-    PruneEmptyRules.UNION_INSTANCE
+    PruneEmptyRules.AGGREGATE_INSTANCE,
+    PruneEmptyRules.JOIN_LEFT_INSTANCE,
+    PruneEmptyRules.JOIN_RIGHT_INSTANCE,
+    // Replaces global Aggregate over empty Values with default literal values
+    // (e.g. COUNT(*)=0). Handles the plan-time case where the planner can
+    // statically determine the input is empty.
+    CoreRules.AGGREGATE_VALUES
   )
 
   /** RuleSet about project */
@@ -217,7 +242,7 @@ object FlinkBatchRuleSets {
 
   val JOIN_REORDER_PREPARE_RULES: RuleSet = RuleSets.ofList(
     // merge join to MultiJoin
-    FlinkJoinToMultiJoinRule.INSTANCE,
+    JoinToMultiJoinForReorderRule.INSTANCE,
     // merge project to MultiJoin
     CoreRules.PROJECT_MULTI_JOIN_MERGE,
     // merge filter to MultiJoin
@@ -246,7 +271,7 @@ object FlinkBatchRuleSets {
     CoreRules.SORT_REMOVE,
 
     // join rules
-    FlinkJoinPushExpressionsRule.INSTANCE,
+    CoreRules.JOIN_PUSH_EXPRESSIONS,
     SimplifyJoinConditionRule.INSTANCE,
 
     // remove union with only a single child
@@ -266,6 +291,10 @@ object FlinkBatchRuleSets {
     CoreRules.AGGREGATE_UNION_AGGREGATE,
     // expand distinct aggregate to normal aggregate with groupby
     FlinkAggregateExpandDistinctAggregatesRule.INSTANCE,
+    CoreRules.PROJECT_JOIN_JOIN_REMOVE,
+    CoreRules.PROJECT_JOIN_REMOVE,
+    CoreRules.AGGREGATE_JOIN_JOIN_REMOVE,
+    CoreRules.AGGREGATE_JOIN_REMOVE,
 
     // reduce aggregate functions like AVG, STDDEV_POP etc.
     CoreRules.AGGREGATE_REDUCE_FUNCTIONS,
@@ -369,6 +398,25 @@ object FlinkBatchRuleSets {
     PythonCalcSplitRule.REWRITE_PROJECT,
     PythonMapRenameRule.INSTANCE,
     PythonMapMergeRule.INSTANCE,
+    AsyncCalcSplitRule.SPLIT_CONDITION_REX_FIELD,
+    // Avoids accessing a field from an asynchronous result (projection).
+    AsyncCalcSplitRule.SPLIT_PROJECTION_REX_FIELD,
+    // Avoid having async calls in join conditions if they aren't already pushed down
+    AsyncCalcSplitRule.NO_ASYNC_JOIN_CONDITIONS,
+    // Avoids dealing with an async call in the condition.
+    AsyncCalcSplitRule.SPLIT_CONDITION,
+    // Avoids dealing with Java calls in the same Calc as Async calls.
+    AsyncCalcSplitRule.SPLIT_PROJECT,
+    // Avoid accessing a field as input to an async call with a single calc.
+    AsyncCalcSplitRule.EXPAND_PROJECT,
+    // Avoid having any condition in an async calc by pushing it first.
+    AsyncCalcSplitRule.PUSH_CONDITION,
+    // Orders the projections so that input references are first, followed by async calls.
+    AsyncCalcSplitRule.REWRITE_PROJECT,
+    // Avoid async calls which call async calls.
+    AsyncCalcSplitRule.NESTED_SPLIT,
+    // Avoid having async calls in multiple projections in a single calc.
+    AsyncCalcSplitRule.ONE_PER_CALC_SPLIT,
     // remove output of rank number when it is not used by successor calc
     RedundantRankNumberColumnRemoveRule.INSTANCE
   )
@@ -385,6 +433,7 @@ object FlinkBatchRuleSets {
     // calc
     BatchPhysicalCalcRule.INSTANCE,
     BatchPhysicalPythonCalcRule.INSTANCE,
+    BatchPhysicalPythonAsyncCalcRule.INSTANCE,
     // union
     BatchPhysicalUnionRule.INSTANCE,
     // sort
@@ -419,6 +468,9 @@ object FlinkBatchRuleSets {
     BatchPhysicalLookupJoinRule.SNAPSHOT_ON_CALC_TABLESCAN,
     // CEP
     BatchPhysicalMatchRule.INSTANCE,
+    // ml
+    PhysicalVectorSearchTableFunctionRule.BATCH_INSTANCE,
+    PhysicalMLPredictTableFunctionRule.BATCH_INSTANCE,
     // correlate
     BatchPhysicalConstantTableFunctionScanRule.INSTANCE,
     BatchPhysicalCorrelateRule.INSTANCE,

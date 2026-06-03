@@ -26,7 +26,7 @@ under the License.
 	<parent>
 		<groupId>org.apache.flink</groupId>
 		<artifactId>flink-parent</artifactId>
-		<version>2.0-SNAPSHOT</version>
+		<version>2.4-SNAPSHOT</version>
 	</parent>
 
 	<artifactId>flink-tests</artifactId>
@@ -39,7 +39,10 @@ under the License.
 			chill ArraysAsListSerializer
 			-->--add-opens=java.base/java.util=ALL-UNNAMED <!--
 			Kryo File (GroupReduceITCase)
-			-->--add-opens=java.base/java.io=ALL-UNNAMED
+			-->--add-opens=java.base/java.io=ALL-UNNAMED <!--
+			ClusterEntrypointITCase -->--sun-misc-unsafe-memory-access=allow <!--
+			-->--enable-native-access=ALL-UNNAMED <!--
+			-->-Dio.netty.tryReflectionSetAccessible=true
 		</surefire.module.config>
 	</properties>
 
@@ -92,12 +95,6 @@ under the License.
 
 		<dependency>
 			<groupId>org.apache.flink</groupId>
-			<artifactId>flink-shaded-guava</artifactId>
-			<scope>test</scope>
-		</dependency>
-
-		<dependency>
-			<groupId>org.apache.flink</groupId>
 			<artifactId>flink-shaded-jackson</artifactId>
 			<scope>test</scope>
 		</dependency>
@@ -125,13 +122,6 @@ under the License.
 			<scope>test</scope>
 			<type>test-jar</type>
 		</dependency>
-
-		<dependency>
-			<groupId>org.apache.flink</groupId>
-			<artifactId>flink-optimizer</artifactId>
-			<version>${project.version}</version>
-			<scope>test</scope>
-		</dependency>
 		
 		<dependency>
 			<groupId>org.apache.flink</groupId>
@@ -146,28 +136,6 @@ under the License.
 			<version>${project.version}</version>
 			<scope>test</scope>
 		</dependency>
-		
-		<dependency>
-			<groupId>org.apache.flink</groupId>
-			<artifactId>flink-java</artifactId>
-			<version>${project.version}</version>
-			<scope>test</scope>
-		</dependency>
-
-		<dependency>
-			<groupId>org.apache.flink</groupId>
-			<artifactId>flink-scala_${scala.binary.version}</artifactId>
-			<version>${project.version}</version>
-			<scope>test</scope>
-		</dependency>
-
-		<dependency>
-			<groupId>org.apache.flink</groupId>
-			<artifactId>flink-scala_${scala.binary.version}</artifactId>
-			<version>${project.version}</version>
-			<type>test-jar</type>
-			<scope>test</scope>
-		</dependency>
 
 		<dependency>
 			<groupId>org.apache.flink</groupId>
@@ -180,17 +148,43 @@ under the License.
 			<version>${project.version}</version>
 			<scope>test</scope>
 		</dependency>
-		
+
 		<dependency>
 			<groupId>org.apache.flink</groupId>
-			<artifactId>flink-examples-batch</artifactId>
+			<artifactId>flink-test-utils-connector</artifactId>
 			<version>${project.version}</version>
 			<scope>test</scope>
 		</dependency>
 
 		<dependency>
 			<groupId>org.apache.flink</groupId>
-			<artifactId>flink-java</artifactId>
+			<artifactId>flink-examples-streaming</artifactId>
+			<version>${project.version}</version>
+			<scope>test</scope>
+			<exclusions>
+				<!-- Exclude the `flink-connector-kafka` dependency;
+				otherwise, the `org.apache.flink.test.completeness.TypeSerializerTestCoverageTest`
+				will fail because it checks the subclass of `TypeSerializer` within the
+				`flink-connector-kafka` module. The failure message will be: "Could not find test
+				'org.apache.flink.streaming.connectors.kafka.FlinkKafkaProducer$NextTransactionalIdHintSerializerTest'
+				that covers 'org.apache.flink.streaming.connectors.kafka.FlinkKafkaProducer$NextTransactionalIdHintSerializer'." -->
+				<exclusion>
+					<groupId>org.apache.flink</groupId>
+					<artifactId>flink-connector-kafka</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-hadoop-compatibility</artifactId>
+			<version>${project.version}</version>
+			<scope>test</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-hadoop-compatibility</artifactId>
 			<version>${project.version}</version>
 			<type>test-jar</type>
 			<scope>test</scope>
@@ -198,22 +192,14 @@ under the License.
 
 		<dependency>
 			<groupId>org.apache.flink</groupId>
-			<artifactId>flink-hadoop-compatibility_${scala.binary.version}</artifactId>
+			<artifactId>flink-table-runtime</artifactId>
 			<version>${project.version}</version>
 			<scope>test</scope>
 		</dependency>
 
 		<dependency>
 			<groupId>org.apache.flink</groupId>
-			<artifactId>flink-hadoop-compatibility_${scala.binary.version}</artifactId>
-			<version>${project.version}</version>
-			<type>test-jar</type>
-			<scope>test</scope>
-		</dependency>
-
-		<dependency>
-			<groupId>org.apache.flink</groupId>
-			<artifactId>flink-optimizer</artifactId>
+			<artifactId>flink-table-runtime</artifactId>
 			<version>${project.version}</version>
 			<type>test-jar</type>
 			<scope>test</scope>
@@ -237,6 +223,7 @@ under the License.
 		<dependency>
 			<groupId>org.apache.flink</groupId>
 			<artifactId>flink-shaded-guava</artifactId>
+			<scope>test</scope>
 		</dependency>
 
 		<dependency>
@@ -445,6 +432,19 @@ under the License.
 							</sources>
 						</configuration>
 					</execution>
+					<!-- Add generated Avro test sources to build path -->
+					<execution>
+						<id>add-avro-test-source</id>
+						<phase>generate-test-sources</phase>
+						<goals>
+							<goal>add-test-source</goal>
+						</goals>
+						<configuration>
+							<sources>
+								<source>${project.build.directory}/generated-test-sources/avro</source>
+							</sources>
+						</configuration>
+					</execution>
 				</executions>
 			</plugin>
 		
@@ -518,25 +518,6 @@ under the License.
 						</configuration>
 					</execution>
 
-					<execution>
-						<id>create-kmeans-jar</id>
-						<phase>process-test-classes</phase>
-						<goals>
-							<goal>single</goal>
-						</goals>
-						<configuration>
-							<archive>
-								<manifest>
-									<mainClass>org.apache.flink.test.classloading.jar.KMeansForTest</mainClass>
-								</manifest>
-							</archive>
-							<finalName>kmeans</finalName>
-							<attach>false</attach>
-							<descriptors>
-								<descriptor>src/test/assembly/test-kmeans-assembly.xml</descriptor>
-							</descriptors>
-						</configuration>
-					</execution>
 					<execution>
 						<id>create-usercodetype-jar</id>
 						<phase>process-test-classes</phase>
@@ -733,24 +714,6 @@ under the License.
 						<configuration>
 							<testSourceDirectory>${project.basedir}/src/test/resources/avro</testSourceDirectory>
 							<testOutputDirectory>${project.basedir}/target/generated-test-sources/avro</testOutputDirectory>
-						</configuration>
-					</execution>
-				</executions>
-			</plugin>
-			<plugin>
-				<groupId>org.codehaus.mojo</groupId>
-				<artifactId>build-helper-maven-plugin</artifactId>
-				<executions>
-					<execution>
-						<id>add-avro-test-source</id>
-						<phase>generate-test-sources</phase>
-						<goals>
-							<goal>add-test-source</goal>
-						</goals>
-						<configuration>
-							<sources>
-								<source>${project.build.directory}/generated-test-sources/avro</source>
-							</sources>
 						</configuration>
 					</execution>
 				</executions>

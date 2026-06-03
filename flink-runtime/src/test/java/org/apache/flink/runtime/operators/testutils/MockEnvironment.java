@@ -33,6 +33,7 @@ import org.apache.flink.runtime.checkpoint.CheckpointException;
 import org.apache.flink.runtime.checkpoint.CheckpointMetrics;
 import org.apache.flink.runtime.checkpoint.TaskStateSnapshot;
 import org.apache.flink.runtime.checkpoint.channel.ChannelStateWriteRequestExecutorFactory;
+import org.apache.flink.runtime.checkpoint.channel.ChannelStateWriter;
 import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
 import org.apache.flink.runtime.externalresource.ExternalResourceInfoProvider;
@@ -65,6 +66,8 @@ import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.UserCodeClassLoader;
 import org.apache.flink.util.concurrent.Executors;
 
+import javax.annotation.Nullable;
+
 import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
@@ -72,6 +75,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.function.Consumer;
 
 import static org.apache.flink.runtime.executiongraph.ExecutionGraphTestUtils.createExecutionAttemptId;
 import static org.apache.flink.util.Preconditions.checkArgument;
@@ -134,6 +138,8 @@ public class MockEnvironment implements Environment, AutoCloseable {
 
     private Optional<? extends Throwable> actualExternalFailureCause = Optional.empty();
 
+    private Optional<Consumer<Throwable>> externalFailureCauseConsumer = Optional.empty();
+
     private final TaskMetricGroup taskMetricGroup;
 
     private final ExternalResourceInfoProvider externalResourceInfoProvider;
@@ -145,6 +151,8 @@ public class MockEnvironment implements Environment, AutoCloseable {
     private CheckpointStorageAccess checkpointStorageAccess;
 
     private final ChannelStateWriteRequestExecutorFactory channelStateExecutorFactory;
+
+    @Nullable private ChannelStateWriter channelStateWriter;
 
     public static MockEnvironmentBuilder builder() {
         return new MockEnvironmentBuilder();
@@ -413,6 +421,11 @@ public class MockEnvironment implements Environment, AutoCloseable {
 
     @Override
     public void failExternally(Throwable cause) {
+        if (externalFailureCauseConsumer.isPresent()) {
+            externalFailureCauseConsumer.get().accept(cause);
+            return;
+        }
+
         if (!expectedExternalFailureCause.isPresent()) {
             throw new UnsupportedOperationException(
                     "MockEnvironment does not support external task failure.");
@@ -482,5 +495,20 @@ public class MockEnvironment implements Environment, AutoCloseable {
 
     public Optional<? extends Throwable> getActualExternalFailureCause() {
         return actualExternalFailureCause;
+    }
+
+    public void setExternalFailureCauseConsumer(Consumer<Throwable> externalFailureCauseConsumer) {
+        this.externalFailureCauseConsumer = Optional.of(externalFailureCauseConsumer);
+    }
+
+    @Override
+    public void setChannelStateWriter(ChannelStateWriter channelStateWriter) {
+        this.channelStateWriter = channelStateWriter;
+    }
+
+    @Override
+    @Nullable
+    public ChannelStateWriter getChannelStateWriter() {
+        return this.channelStateWriter;
     }
 }

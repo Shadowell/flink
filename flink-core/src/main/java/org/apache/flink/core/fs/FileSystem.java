@@ -26,6 +26,7 @@ package org.apache.flink.core.fs;
 
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.annotation.Public;
+import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.CoreOptions;
 import org.apache.flink.configuration.IllegalConfigurationException;
@@ -34,11 +35,13 @@ import org.apache.flink.core.fs.local.LocalFileSystemFactory;
 import org.apache.flink.core.plugin.PluginManager;
 import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.TemporaryClassLoaderContext;
+import org.apache.flink.util.WrappingProxy;
+import org.apache.flink.util.WrappingProxyUtil;
 
-import org.apache.flink.shaded.guava32.com.google.common.base.Splitter;
-import org.apache.flink.shaded.guava32.com.google.common.collect.ImmutableMultimap;
-import org.apache.flink.shaded.guava32.com.google.common.collect.Iterators;
-import org.apache.flink.shaded.guava32.com.google.common.collect.Multimap;
+import org.apache.flink.shaded.guava33.com.google.common.base.Splitter;
+import org.apache.flink.shaded.guava33.com.google.common.collect.ImmutableMultimap;
+import org.apache.flink.shaded.guava33.com.google.common.collect.Iterators;
+import org.apache.flink.shaded.guava33.com.google.common.collect.Multimap;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -57,6 +60,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.ServiceLoader;
 import java.util.Set;
 import java.util.concurrent.locks.ReentrantLock;
@@ -250,7 +254,9 @@ public abstract class FileSystem implements IFileSystem {
                     .put("oss", "flink-oss-fs-hadoop")
                     .put("s3", "flink-s3-fs-hadoop")
                     .put("s3", "flink-s3-fs-presto")
+                    .put("s3", "flink-s3-fs-native")
                     .put("s3a", "flink-s3-fs-hadoop")
+                    .put("s3a", "flink-s3-fs-native")
                     .put("s3p", "flink-s3-fs-presto")
                     .put("gs", "flink-gs-fs-hadoop")
                     .build();
@@ -296,6 +302,21 @@ public abstract class FileSystem implements IFileSystem {
     }
 
     /**
+     * Returns a list of registered {@link FileSystemFactory FS factories}.
+     *
+     * @return a snapshot of the currently registered file system factories
+     */
+    @Internal
+    public static List<FileSystemFactory> getRegisteredFileSystemFactories() {
+        LOCK.lock();
+        try {
+            return new ArrayList<>(FS_FACTORIES.values());
+        } finally {
+            LOCK.unlock();
+        }
+    }
+
+    /**
      * Initializes the shared file system settings.
      *
      * <p>The given configuration is passed to each file system factory to initialize the respective
@@ -336,14 +357,48 @@ public abstract class FileSystem implements IFileSystem {
             final List<FileSystemFactory> fileSystemFactories =
                     loadFileSystemFactories(factorySuppliers);
 
+            // Track registered priorities for factory selection
+            final Map<String, Integer> registeredPriorities = new HashMap<>();
+
             // configure all file system factories
             for (FileSystemFactory factory : fileSystemFactories) {
                 factory.configure(config);
-                String scheme = factory.getScheme();
+                final String scheme = factory.getScheme();
 
                 FileSystemFactory fsf =
                         ConnectionLimitingFactory.decorateIfLimited(factory, scheme, config);
-                FS_FACTORIES.put(scheme, fsf);
+
+                final String className = resolveFactoryClassName(factory);
+                final int registeredPriority =
+                        registeredPriorities.getOrDefault(scheme, Integer.MIN_VALUE);
+                final int newPriority =
+                        config.getOptional(CoreOptions.fileSystemFactoryPriority(scheme, className))
+                                .orElse(factory.getPriority());
+
+                LOG.info(
+                        "{} filesystem factory {} for scheme '{}' "
+                                + "with priority {} (highest registered priority: {})",
+                        newPriority >= registeredPriority ? "Registering" : "Skipping",
+                        className,
+                        scheme,
+                        newPriority,
+                        registeredPriority);
+                if (newPriority >= registeredPriority) {
+                    FS_FACTORIES.put(scheme, fsf);
+                    registeredPriorities.put(scheme, newPriority);
+                    if (newPriority == registeredPriority) {
+                        LOG.warn(
+                                "Filesystem factory {} overrides a previously registered factory "
+                                        + "for scheme '{}' at the same priority {}. "
+                                        + "The winner depends on classloading order. "
+                                        + "Set fs.{}.priority.<factoryClassName> to assign "
+                                        + "explicit priorities.",
+                                className,
+                                scheme,
+                                newPriority,
+                                scheme);
+                    }
+                }
             }
 
             // configure the default (fallback) factory
@@ -613,14 +668,6 @@ public abstract class FileSystem implements IFileSystem {
     }
 
     /**
-     * Gets a description of the characteristics of this file system.
-     *
-     * @deprecated this method is not used anymore.
-     */
-    @Deprecated
-    public abstract FileSystemKind getKind();
-
-    /**
      * Return the number of bytes that large input files should be optimally be split into to
      * minimize I/O time.
      *
@@ -663,6 +710,16 @@ public abstract class FileSystem implements IFileSystem {
     @Override
     public RecoverableWriter createRecoverableWriter() throws IOException {
         return IFileSystem.super.createRecoverableWriter();
+    }
+
+    @PublicEvolving
+    @Override
+    public RecoverableWriter createRecoverableWriter(Map<String, String> conf) throws IOException {
+        if (conf == null || conf.isEmpty()) {
+            return createRecoverableWriter();
+        } else {
+            return IFileSystem.super.createRecoverableWriter(conf);
+        }
     }
 
     @Override
@@ -940,6 +997,20 @@ public abstract class FileSystem implements IFileSystem {
                 LOG.error("Failed to load a file system via services", t);
             }
         }
+    }
+
+    /**
+     * Resolves the real class name of a {@link FileSystemFactory}, unwrapping {@link
+     * PluginFileSystemFactory}.
+     */
+    private static String resolveFactoryClassName(FileSystemFactory factory) {
+        if (factory instanceof WrappingProxy) {
+            @SuppressWarnings("unchecked")
+            FileSystemFactory unwrapped =
+                    WrappingProxyUtil.stripProxy((WrappingProxy<FileSystemFactory>) factory);
+            return unwrapped.getClass().getName();
+        }
+        return factory.getClass().getName();
     }
 
     /**

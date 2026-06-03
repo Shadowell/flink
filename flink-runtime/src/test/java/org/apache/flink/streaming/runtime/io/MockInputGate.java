@@ -21,6 +21,7 @@ package org.apache.flink.streaming.runtime.io;
 import org.apache.flink.runtime.checkpoint.channel.InputChannelInfo;
 import org.apache.flink.runtime.event.TaskEvent;
 import org.apache.flink.runtime.io.network.api.EndOfPartitionEvent;
+import org.apache.flink.runtime.io.network.partition.ResultPartitionType;
 import org.apache.flink.runtime.io.network.partition.consumer.BufferOrEvent;
 import org.apache.flink.runtime.io.network.partition.consumer.IndexedInputGate;
 import org.apache.flink.runtime.io.network.partition.consumer.InputChannel;
@@ -76,6 +77,11 @@ public class MockInputGate extends IndexedInputGate {
 
     @Override
     public CompletableFuture<Void> getStateConsumedFuture() {
+        return CompletableFuture.completedFuture(null);
+    }
+
+    @Override
+    public CompletableFuture<Void> getBufferFilteringCompleteFuture() {
         return CompletableFuture.completedFuture(null);
     }
 
@@ -150,6 +156,12 @@ public class MockInputGate extends IndexedInputGate {
     public void sendTaskEvent(TaskEvent event) {}
 
     @Override
+    public void resumeGateConsumption() throws IOException {
+        blockedChannels.forEach(
+                channelIdx -> resumeConsumption(new InputChannelInfo(getGateIndex(), channelIdx)));
+    }
+
+    @Override
     public void resumeConsumption(InputChannelInfo channelInfo) {
         lastUnblockedChannels.add(channelInfo.getInputChannelIdx());
         blockedChannels.remove(channelInfo.getInputChannelIdx());
@@ -161,6 +173,11 @@ public class MockInputGate extends IndexedInputGate {
         if (!blockedChannels.add(channelInfo.getInputChannelIdx())) {
             throw new IllegalArgumentException("Blocking the same channel multiple times");
         }
+    }
+
+    @Override
+    public ResultPartitionType getConsumedPartitionType() {
+        return ResultPartitionType.PIPELINED;
     }
 
     @Override
@@ -186,5 +203,13 @@ public class MockInputGate extends IndexedInputGate {
     @Override
     public List<InputChannelInfo> getUnfinishedChannels() {
         return Collections.emptyList();
+    }
+
+    @Override
+    public void setCheckpointingDuringRecoveryEnabled(boolean enabled) {}
+
+    @Override
+    public boolean isCheckpointingDuringRecoveryEnabled() {
+        return false;
     }
 }

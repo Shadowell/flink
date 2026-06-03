@@ -37,11 +37,13 @@ import org.apache.flink.api.common.functions.Partitioner;
 import org.apache.flink.api.common.io.InputFormat;
 import org.apache.flink.api.common.typeinfo.BasicArrayTypeInfo;
 import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
+import org.apache.flink.api.common.typeinfo.BitmapTypeInfo;
 import org.apache.flink.api.common.typeinfo.PrimitiveArrayTypeInfo;
 import org.apache.flink.api.common.typeinfo.SqlTimeTypeInfo;
 import org.apache.flink.api.common.typeinfo.TypeInfo;
 import org.apache.flink.api.common.typeinfo.TypeInfoFactory;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.common.typeinfo.VariantTypeInfo;
 import org.apache.flink.api.common.typeutils.CompositeType;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.tuple.Tuple;
@@ -49,6 +51,8 @@ import org.apache.flink.api.java.tuple.Tuple0;
 import org.apache.flink.api.java.typeutils.TypeExtractionUtils.LambdaExecutable;
 import org.apache.flink.types.Row;
 import org.apache.flink.types.Value;
+import org.apache.flink.types.bitmap.Bitmap;
+import org.apache.flink.types.variant.Variant;
 import org.apache.flink.util.InstantiationUtil;
 import org.apache.flink.util.Preconditions;
 
@@ -66,16 +70,17 @@ import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 import java.lang.reflect.TypeVariable;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.apache.flink.api.java.typeutils.TypeExtractionUtils.checkAndExtractLambda;
 import static org.apache.flink.api.java.typeutils.TypeExtractionUtils.getAllDeclaredMethods;
 import static org.apache.flink.api.java.typeutils.TypeExtractionUtils.getTypeHierarchy;
-import static org.apache.flink.api.java.typeutils.TypeExtractionUtils.hasSuperclass;
 import static org.apache.flink.api.java.typeutils.TypeExtractionUtils.isClassType;
 import static org.apache.flink.api.java.typeutils.TypeExtractionUtils.sameTypeVars;
 import static org.apache.flink.api.java.typeutils.TypeExtractionUtils.typeToClass;
@@ -120,9 +125,6 @@ public class TypeExtractor {
 
     private static final String HADOOP_WRITABLE_TYPEINFO_CLASS =
             "org.apache.flink.api.java.typeutils.WritableTypeInfo";
-
-    private static final String AVRO_SPECIFIC_RECORD_BASE_CLASS =
-            "org.apache.avro.specific.SpecificRecordBase";
 
     private static final Logger LOG = LoggerFactory.getLogger(TypeExtractor.class);
 
@@ -1767,7 +1769,9 @@ public class TypeExtractor {
         return (TypeInfoFactory<OUT>) InstantiationUtil.instantiate(factoryClass);
     }
 
-    /** @return number of items with equal type or same raw type */
+    /**
+     * @return number of items with equal type or same raw type
+     */
     private static int countTypeInHierarchy(List<Type> typeHierarchy, Type type) {
         int count = 0;
         for (Type t : typeHierarchy) {
@@ -1970,8 +1974,50 @@ public class TypeExtractor {
             return new EnumTypeInfo(clazz);
         }
 
+        // check for Variant
+        if (Variant.class.isAssignableFrom(clazz)) {
+            return (TypeInformation<OUT>) VariantTypeInfo.INSTANCE;
+        }
+
+        // check for Bitmap
+        if (Bitmap.class.isAssignableFrom(clazz)) {
+            return (TypeInformation<OUT>) BitmapTypeInfo.INSTANCE;
+        }
+
+        // check for parameterized Collections, requirement:
+        // 1. Interface types: the underlying implementation types are not preserved across
+        // serialization
+        // 2. Concrete type arguments: Flink needs them to dispatch serialization of element types
+        // Example:
+        // - OK: List<String>, Collection<String>
+        // - not OK: LinkedList<String> (implementation type), List (raw type), List<T> (generic
+        // type argument), or List<?> (wildcard type argument)
+        if (parameterizedType != null) {
+            Type[] actualTypeArguments = parameterizedType.getActualTypeArguments();
+            boolean allTypeArgumentsConcrete =
+                    Arrays.stream(actualTypeArguments).allMatch(arg -> arg instanceof Class<?>);
+            if (allTypeArgumentsConcrete) {
+                if (clazz.isAssignableFrom(Map.class)) {
+                    Class<?> keyClass = (Class<?>) actualTypeArguments[0];
+                    Class<?> valueClass = (Class<?>) actualTypeArguments[1];
+                    TypeInformation<?> keyTypeInfo = createTypeInfo(keyClass);
+                    TypeInformation<?> valueTypeInfo = createTypeInfo(valueClass);
+                    return (TypeInformation<OUT>)
+                            new NullableMapTypeInfo<>(keyTypeInfo, valueTypeInfo);
+                } else if (clazz.isAssignableFrom(List.class)) {
+                    Class<?> elementClass = (Class<?>) actualTypeArguments[0];
+                    TypeInformation<?> elementTypeInfo = createTypeInfo(elementClass);
+                    return (TypeInformation<OUT>) new NullableListTypeInfo<>(elementTypeInfo);
+                } else if (clazz.isAssignableFrom(Set.class)) {
+                    Class<?> elementClass = (Class<?>) actualTypeArguments[0];
+                    TypeInformation<?> elementTypeInfo = createTypeInfo(elementClass);
+                    return (TypeInformation<OUT>) new NullableSetTypeInfo<>(elementTypeInfo);
+                }
+            }
+        }
+
         // special case for POJOs generated by Avro.
-        if (hasSuperclass(clazz, AVRO_SPECIFIC_RECORD_BASE_CLASS)) {
+        if (AvroUtils.isAvroSpecificRecord(clazz)) {
             return AvroUtils.getAvroUtils().createAvroTypeInfo(clazz);
         }
 
@@ -2050,7 +2096,9 @@ public class TypeExtractor {
                 }
                 // check for setters (<FieldName>_$eq for scala)
                 if ((methodNameLow.equals("set" + fieldNameLow)
-                                || methodNameLow.equals(fieldNameLow + "_$eq"))
+                                || methodNameLow.equals(fieldNameLow + "_$eq")
+                                || (fieldNameLow.startsWith("is")
+                                        && methodNameLow.equals("set" + fieldNameLow.substring(2))))
                         && m.getParameterCount() == 1
                         && // one parameter of the field's type
                         (m.getGenericParameterTypes()[0].equals(fieldType)

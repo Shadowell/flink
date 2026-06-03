@@ -17,6 +17,7 @@
 
 package org.apache.flink.streaming.util;
 
+import org.apache.flink.runtime.event.WatermarkEvent;
 import org.apache.flink.streaming.api.operators.Output;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.LatencyMarker;
@@ -76,5 +77,14 @@ public class MockOutput<T> implements Output<StreamRecord<T>> {
     }
 
     @Override
+    public void emitWatermark(WatermarkEvent watermark) {
+        throw new RuntimeException("WatermarkEvent is not supported for MockOutput");
+    }
+
+    @Override
     public void close() {}
+
+    public Collection<T> getOutputs() {
+        return outputs;
+    }
 }

@@ -40,16 +40,16 @@ import org.apache.flink.streaming.util.KeyedOneInputStreamOperatorTestHarness;
 import org.apache.flink.util.OutputTag;
 
 import org.junit.jupiter.api.Test;
-import org.mockito.Matchers;
+import org.mockito.ArgumentMatchers;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
 import java.util.Arrays;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Matchers.anyInt;
-import static org.mockito.Matchers.anyLong;
-import static org.mockito.Matchers.eq;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -119,11 +119,7 @@ class RegularWindowOperatorContractTest extends WindowOperatorContractTest {
                             }
                         })
                 .when(mockTrigger)
-                .onElement(
-                        Matchers.<Integer>anyObject(),
-                        anyLong(),
-                        anyTimeWindow(),
-                        anyTriggerContext());
+                .onElement(ArgumentMatchers.any(), anyLong(), anyTimeWindow(), anyTriggerContext());
 
         testHarness.processElement(new StreamRecord<>(1, 0L));
 
@@ -182,8 +178,8 @@ class RegularWindowOperatorContractTest extends WindowOperatorContractTest {
                 };
 
         @SuppressWarnings("unchecked")
-        WindowOperator<Integer, Integer, ACC, OUT, W> operator =
-                new WindowOperator<>(
+        WindowOperatorFactory<Integer, Integer, ACC, OUT, W> operator =
+                new WindowOperatorFactory<>(
                         assigner,
                         assigner.getWindowSerializer(new ExecutionConfig()),
                         keySelector,
@@ -222,8 +218,8 @@ class RegularWindowOperatorContractTest extends WindowOperatorContractTest {
                 new ListStateDescriptor<>("int-list", IntSerializer.INSTANCE);
 
         @SuppressWarnings("unchecked")
-        WindowOperator<Integer, Integer, Iterable<Integer>, OUT, W> operator =
-                new WindowOperator<>(
+        WindowOperatorFactory<Integer, Integer, Iterable<Integer>, OUT, W> operator =
+                new WindowOperatorFactory<>(
                         assigner,
                         assigner.getWindowSerializer(new ExecutionConfig()),
                         keySelector,

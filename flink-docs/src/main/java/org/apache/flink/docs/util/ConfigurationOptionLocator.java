@@ -64,8 +64,13 @@ public class ConfigurationOptionLocator {
                         "flink-metrics/flink-metrics-influxdb",
                         "org.apache.flink.metrics.influxdb"),
                 new OptionsClassLocation(
+                        "flink-metrics/flink-metrics-otel", "org.apache.flink.metrics.otel"),
+                new OptionsClassLocation(
                         "flink-state-backends/flink-statebackend-rocksdb",
-                        "org.apache.flink.contrib.streaming.state"),
+                        "org.apache.flink.state.rocksdb"),
+                new OptionsClassLocation(
+                        "flink-state-backends/flink-statebackend-forst",
+                        "org.apache.flink.state.forst"),
                 new OptionsClassLocation(
                         "flink-table/flink-table-api-java", "org.apache.flink.table.api.config"),
                 new OptionsClassLocation("flink-python", "org.apache.flink.python"),
@@ -83,7 +88,11 @@ public class ConfigurationOptionLocator {
                         "org.apache.flink.table.gateway.rest.util"),
                 new OptionsClassLocation(
                         "flink-external-resources/flink-external-resource-gpu",
-                        "org.apache.flink.externalresource.gpu")
+                        "org.apache.flink.externalresource.gpu"),
+                new OptionsClassLocation(
+                        "flink-models/flink-model-openai", "org.apache.flink.model.openai"),
+                new OptionsClassLocation(
+                        "flink-models/flink-model-triton", "org.apache.flink.model.triton")
             };
 
     private static final Set<String> EXCLUSIONS =
@@ -93,7 +102,7 @@ public class ConfigurationOptionLocator {
                             "org.apache.flink.configuration.WritableConfig",
                             "org.apache.flink.configuration.ConfigOptions",
                             "org.apache.flink.streaming.api.environment.CheckpointConfig",
-                            "org.apache.flink.contrib.streaming.state.PredefinedOptions",
+                            "org.apache.flink.state.rocksdb.PredefinedOptions",
                             "org.apache.flink.python.PythonConfig",
                             "org.apache.flink.cep.configuration.SharedBufferCacheConfig",
                             "org.apache.flink.table.api.config.LookupJoinHintOptions"));

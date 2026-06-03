@@ -26,6 +26,7 @@ import org.apache.flink.streaming.api.transformations.PartitionTransformation;
 import org.apache.flink.streaming.runtime.partitioner.GlobalPartitioner;
 import org.apache.flink.table.api.TableException;
 import org.apache.flink.table.api.config.ExecutionConfigOptions;
+import org.apache.flink.table.connector.ProviderContext;
 import org.apache.flink.table.delegation.Planner;
 import org.apache.flink.table.planner.codegen.CodeGeneratorContext;
 import org.apache.flink.table.planner.delegation.PlannerBase;
@@ -41,11 +42,14 @@ import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonIgn
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonInclude;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonSetter;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.Nulls;
 
 import javax.annotation.Nullable;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 import static org.apache.flink.util.Preconditions.checkArgument;
 import static org.apache.flink.util.Preconditions.checkNotNull;
@@ -71,6 +75,7 @@ public abstract class ExecNodeBase<T> implements ExecNode<T> {
 
     private final LogicalType outputType;
 
+    @JsonSetter(nulls = Nulls.AS_EMPTY)
     private final List<InputProperty> inputProperties;
 
     private List<ExecEdge> inputEdges;
@@ -87,7 +92,7 @@ public abstract class ExecNodeBase<T> implements ExecNode<T> {
      * Retrieves the default context from the {@link ExecNodeMetadata} annotation to be serialized
      * into the JSON plan.
      */
-    @JsonProperty(value = FIELD_NAME_TYPE, access = JsonProperty.Access.READ_ONLY, index = 1)
+    @JsonProperty(value = FIELD_NAME_TYPE, index = 1)
     protected final ExecNodeContext getContextFromAnnotation() {
         return isCompiled ? context : ExecNodeContext.newContext(this.getClass()).withId(getId());
     }
@@ -127,6 +132,16 @@ public abstract class ExecNodeBase<T> implements ExecNode<T> {
     }
 
     @Override
+    public final String getTypeAsString() {
+        return context.getTypeAsString();
+    }
+
+    @Override
+    public final int getVersion() {
+        return context.getVersion();
+    }
+
+    @Override
     public String getDescription() {
         return description;
     }
@@ -145,7 +160,7 @@ public abstract class ExecNodeBase<T> implements ExecNode<T> {
     public List<ExecEdge> getInputEdges() {
         return checkNotNull(
                 inputEdges,
-                "inputEdges should not null, please call `setInputEdges(List<ExecEdge>)` first.");
+                "inputEdges should not be null, please call `setInputEdges(List<ExecEdge>)` first.");
     }
 
     @Override
@@ -321,5 +336,34 @@ public abstract class ExecNodeBase<T> implements ExecNode<T> {
     protected OpFusionCodegenSpecGenerator translateToFusionCodegenSpecInternal(
             PlannerBase planner, ExecNodeConfig config, CodeGeneratorContext parentCtx) {
         throw new TableException("This ExecNode doesn't support operator fusion codegen now.");
+    }
+
+    /** Context for connectors to configure transformations and operators. */
+    protected ProviderContext createProviderContext(
+            TransformationMetadata metadata, ExecNodeConfig config) {
+        return new ProviderContext() {
+            @Override
+            public Optional<String> generateUid(String name) {
+                if (config.shouldSetUid()) {
+                    return Optional.of(createTransformationUid(name, config));
+                }
+                return Optional.empty();
+            }
+
+            @Override
+            public String getContainerNodeType() {
+                return getTypeAsString();
+            }
+
+            @Override
+            public String getName() {
+                return metadata.getName();
+            }
+
+            @Override
+            public String getDescription() {
+                return metadata.getDescription();
+            }
+        };
     }
 }

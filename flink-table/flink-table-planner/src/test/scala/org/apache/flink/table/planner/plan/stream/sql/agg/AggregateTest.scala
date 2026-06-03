@@ -17,12 +17,10 @@
  */
 package org.apache.flink.table.planner.plan.stream.sql.agg
 
-import org.apache.flink.api.common.typeinfo.TypeInformation
-import org.apache.flink.api.scala._
 import org.apache.flink.table.api._
 import org.apache.flink.table.api.config.ExecutionConfigOptions
 import org.apache.flink.table.planner.utils.{StreamTableTestUtil, TableTestBase}
-import org.apache.flink.table.runtime.typeutils.DecimalDataTypeInfo
+import org.apache.flink.table.types.AbstractDataType
 
 import org.assertj.core.api.Assertions.{assertThatExceptionOfType, assertThatThrownBy}
 import org.junit.jupiter.api.Test
@@ -44,20 +42,20 @@ class AggregateTest extends TableTestBase {
   util.addTableSource[(Long, Int, String)]("T2", 'a, 'b, 'c)
   util.addTableSource(
     "MyTable1",
-    Array[TypeInformation[_]](
-      Types.BYTE,
-      Types.SHORT,
-      Types.INT,
-      Types.LONG,
-      Types.FLOAT,
-      Types.DOUBLE,
-      Types.BOOLEAN,
-      Types.STRING,
-      Types.LOCAL_DATE,
-      Types.LOCAL_TIME,
-      Types.LOCAL_DATE_TIME,
-      DecimalDataTypeInfo.of(30, 20),
-      DecimalDataTypeInfo.of(10, 5)
+    Array[AbstractDataType[_]](
+      DataTypes.TINYINT,
+      DataTypes.SMALLINT,
+      DataTypes.INT,
+      DataTypes.BIGINT,
+      DataTypes.FLOAT,
+      DataTypes.DOUBLE,
+      DataTypes.BOOLEAN,
+      DataTypes.STRING,
+      DataTypes.DATE,
+      DataTypes.TIME(0),
+      DataTypes.TIMESTAMP(3),
+      DataTypes.DECIMAL(30, 20),
+      DataTypes.DECIMAL(10, 5)
     ),
     Array(
       "byte",
@@ -370,8 +368,10 @@ class AggregateTest extends TableTestBase {
       """
         |INSERT INTO sink
         |SELECT c, COUNT(*) cnt FROM T GROUP BY c
+        |ON CONFLICT DO DEDUPLICATE
         |""".stripMargin,
-      ExplainDetail.CHANGELOG_MODE)
+      ExplainDetail.CHANGELOG_MODE
+    )
   }
 
   @Test
@@ -415,8 +415,10 @@ class AggregateTest extends TableTestBase {
       """
         |INSERT INTO sink
         |SELECT c, COUNT(*) cnt FROM T GROUP BY a, c
+        |ON CONFLICT DO DEDUPLICATE
         |""".stripMargin,
-      ExplainDetail.CHANGELOG_MODE)
+      ExplainDetail.CHANGELOG_MODE
+    )
   }
 
   @Test
@@ -482,5 +484,26 @@ class AggregateTest extends TableTestBase {
                                |)
                                |""".stripMargin)
     util.verifyExecPlan("SELECT COUNT(*) FROM src")
+  }
+
+  @Test
+  def testGlobalAggOverEmptyInputReplacedByValues(): Unit = {
+    // When the planner can statically determine the input is empty (WHERE 1=0),
+    // AGGREGATE_VALUES rule should replace the global aggregate with literal defaults
+    // (e.g. COUNT(*)=0, SUM=null) and remove the aggregate node entirely.
+    util.verifyExecPlan("SELECT COUNT(*), SUM(a), AVG(a) FROM T WHERE 1=0")
+  }
+
+  @Test
+  def testCountStartWithHaving(): Unit = {
+    util.tableEnv.executeSql("""
+                               |CREATE TABLE src (
+                               | id VARCHAR,
+                               | cnt BIGINT
+                               |) WITH (
+                               | 'connector' = 'values'
+                               |)
+                               |""".stripMargin)
+    util.verifyExecPlan("SELECT COUNT(*) FROM src HAVING COUNT(*) > 1")
   }
 }

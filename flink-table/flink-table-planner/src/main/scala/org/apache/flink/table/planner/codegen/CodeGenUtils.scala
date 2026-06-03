@@ -17,21 +17,20 @@
  */
 package org.apache.flink.table.planner.codegen
 
-import org.apache.flink.api.common.ExecutionConfig
 import org.apache.flink.api.common.functions.RuntimeContext
 import org.apache.flink.api.common.serialization.SerializerConfigImpl
 import org.apache.flink.core.memory.MemorySegment
 import org.apache.flink.table.data._
 import org.apache.flink.table.data.binary._
-import org.apache.flink.table.data.binary.BinaryRowDataUtil.BYTE_ARRAY_BASE_OFFSET
 import org.apache.flink.table.data.util.DataFormatConverters
 import org.apache.flink.table.data.util.DataFormatConverters.IdentityConverter
 import org.apache.flink.table.data.utils.JoinedRowData
 import org.apache.flink.table.functions.UserDefinedFunction
+import org.apache.flink.table.legacy.types.logical.TypeInformationRawType
 import org.apache.flink.table.planner.codegen.GenerateUtils.{generateInputFieldUnboxing, generateNonNullField}
 import org.apache.flink.table.planner.codegen.calls.BuiltInMethods.BINARY_STRING_DATA_FROM_STRING
 import org.apache.flink.table.runtime.dataview.StateDataViewStore
-import org.apache.flink.table.runtime.generated.{AggsHandleFunction, GeneratedHashFunction, HashFunction, NamespaceAggsHandleFunction, TableAggsHandleFunction}
+import org.apache.flink.table.runtime.generated._
 import org.apache.flink.table.runtime.types.LogicalTypeDataTypeConverter.fromDataTypeToLogicalType
 import org.apache.flink.table.runtime.typeutils.TypeCheckUtils
 import org.apache.flink.table.runtime.util.{MurmurHashUtil, TimeWindowUtil}
@@ -43,7 +42,11 @@ import org.apache.flink.table.types.logical.utils.LogicalTypeChecks.{getFieldCou
 import org.apache.flink.table.types.logical.utils.LogicalTypeUtils.toInternalConversionClass
 import org.apache.flink.table.types.utils.DataTypeUtils.isInternal
 import org.apache.flink.table.utils.EncodingUtils
-import org.apache.flink.types.{Row, RowKind}
+import org.apache.flink.types.{ColumnList, Row, RowKind}
+import org.apache.flink.types.bitmap.Bitmap
+import org.apache.flink.types.variant.Variant
+
+import org.apache.calcite.rex.{RexNode, RexProgram}
 
 import java.lang.{Boolean => JBoolean, Byte => JByte, Double => JDouble, Float => JFloat, Integer => JInt, Long => JLong, Object => JObject, Short => JShort}
 import java.lang.reflect.Method
@@ -123,6 +126,8 @@ object CodeGenUtils {
 
   val RUNTIME_CONTEXT: String = className[RuntimeContext]
 
+  val FILTER_CONTEXT: String = className[FilterCondition.Context]
+
   // ----------------------------------------------------------------------------------------
 
   private val nameCounter = new AtomicLong
@@ -191,12 +196,13 @@ object CodeGenUtils {
     name
   }
 
-  // when casting we first need to unbox Primitives, for example,
-  // float a = 1.0f;
-  // byte b = (byte) a;
-  // works, but for boxed types we need this:
-  // Float a = 1.0f;
-  // Byte b = (byte)(float) a;
+  /**
+   * Returns the primitive Java type name for a given logical type.
+   *
+   * <p>For primitive logical types, returns the corresponding Java primitive type name (e.g.,
+   * "byte", "short", "int", "long", "float", "double", "boolean"). For non-primitive types, falls
+   * back to [[boxedTypeTermForType]].
+   */
   @tailrec
   def primitiveTypeTermForType(t: LogicalType): String = t.getTypeRoot match {
     // ordered by type root definition
@@ -270,6 +276,9 @@ object CodeGenUtils {
     case DISTINCT_TYPE => boxedTypeTermForType(t.asInstanceOf[DistinctType].getSourceType)
     case NULL => className[JObject] // special case for untyped null literals
     case RAW => className[BinaryRawValueData[_]]
+    case DESCRIPTOR => className[ColumnList]
+    case VARIANT => className[Variant]
+    case BITMAP => className[Bitmap]
     case SYMBOL | UNRESOLVED =>
       throw new IllegalArgumentException("Illegal type: " + t)
   }
@@ -296,7 +305,9 @@ object CodeGenUtils {
     // ordered by type root definition
     case CHAR | VARCHAR => s"$BINARY_STRING.EMPTY_UTF8"
     case BOOLEAN => "false"
-    case TINYINT | SMALLINT | INTEGER | DATE | TIME_WITHOUT_TIME_ZONE | INTERVAL_YEAR_MONTH => "-1"
+    case TINYINT => "((byte) -1)"
+    case SMALLINT => "((short) -1)"
+    case INTEGER | DATE | TIME_WITHOUT_TIME_ZONE | INTERVAL_YEAR_MONTH => "-1"
     case BIGINT | INTERVAL_DAY_TIME => "-1L"
     case FLOAT => "-1.0f"
     case DOUBLE => "-1.0d"
@@ -315,7 +326,11 @@ object CodeGenUtils {
       case BOOLEAN =>
         s"${className[JBoolean]}.hashCode($term)"
       case BINARY | VARBINARY =>
-        s"${className[MurmurHashUtil]}.hashUnsafeBytes($term, $BYTE_ARRAY_BASE_OFFSET, $term.length)"
+        // Instead of computing the BYTE_ARRAY_BASE_OFFSET value in JM, generate the code
+        // and evaluate it in TM. This is required so that byte array offset will be consistent.
+        // See FLINK-37833 for more details.
+        s"${className[MurmurHashUtil]}.hashUnsafeBytes($term," +
+          s" ${className[BinaryRowDataUtil]}.BYTE_ARRAY_BASE_OFFSET, $term.length)"
       case DECIMAL =>
         s"$term.hashCode()"
       case TINYINT =>
@@ -352,7 +367,6 @@ object CodeGenUtils {
         val genHash =
           HashCodeGenerator.generateMapHash(subCtx, keyType, valueType, "SubHashMap")
         genHashFunction(ctx, subCtx, genHash, term)
-      case INTERVAL_DAY_TIME => s"${className[JLong]}.hashCode($term)"
       case ROW | STRUCTURED_TYPE =>
         val fieldCount = getFieldCount(t)
         val subCtx = new CodeGeneratorContext(ctx.tableConfig, ctx.classLoader, ctx)
@@ -369,7 +383,9 @@ object CodeGenUtils {
             tirt.getTypeInformation.createSerializer(new SerializerConfigImpl)
         }
         val serTerm = ctx.addReusableObject(serializer, "serializer")
-        s"$BINARY_RAW_VALUE.getJavaObjectFromRawValueData($term, $serTerm).hashCode()"
+        s"$term.toObject($serTerm).hashCode()"
+      case BITMAP =>
+        s"$term.hashCode()"
       case NULL | SYMBOL | UNRESOLVED =>
         throw new IllegalArgumentException("Illegal type: " + t)
     }
@@ -518,6 +534,10 @@ object CodeGenUtils {
         rowFieldReadAccess(indexTerm, rowTerm, t.asInstanceOf[DistinctType].getSourceType)
       case RAW =>
         s"(($BINARY_RAW_VALUE) $rowTerm.getRawValue($indexTerm))"
+      case VARIANT =>
+        s"$rowTerm.getVariant($indexTerm)"
+      case BITMAP =>
+        s"$rowTerm.getBitmap($indexTerm)"
       case NULL | SYMBOL | UNRESOLVED =>
         throw new IllegalArgumentException("Illegal type: " + t)
     }
@@ -811,6 +831,10 @@ object CodeGenUtils {
     case RAW =>
       val ser = addSerializer(t)
       s"$writerTerm.writeRawValue($indexTerm, $fieldValTerm, $ser)"
+    case VARIANT =>
+      s"$writerTerm.writeVariant($indexTerm, $fieldValTerm)"
+    case BITMAP =>
+      s"$writerTerm.writeBitmap($indexTerm, $fieldValTerm)"
     case NULL | SYMBOL | UNRESOLVED =>
       throw new IllegalArgumentException("Illegal type: " + t);
   }
@@ -1096,6 +1120,14 @@ object CodeGenUtils {
       // For single operator codegen case, this is needed.
       case None =>
         GenerateUtils.generateFieldAccess(ctx, inputType, inputTerm, index)
+    }
+  }
+
+  def getExprsFromProgramOrNull(rexProgram: RexProgram): java.util.List[RexNode] = {
+    if (rexProgram == null) {
+      null
+    } else {
+      rexProgram.getExprList
     }
   }
 }

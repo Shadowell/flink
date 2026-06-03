@@ -21,18 +21,23 @@ package org.apache.flink.table.catalog;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.Schema;
-import org.apache.flink.table.api.TableColumn;
-import org.apache.flink.table.api.TableSchema;
+import org.apache.flink.table.catalog.CatalogMaterializedTable.LogicalRefreshMode;
+import org.apache.flink.table.catalog.CatalogMaterializedTable.RefreshMode;
+import org.apache.flink.table.catalog.CatalogMaterializedTable.RefreshStatus;
 import org.apache.flink.table.catalog.exceptions.TableNotExistException;
+import org.apache.flink.table.expressions.DefaultSqlFactory;
 import org.apache.flink.table.expressions.ResolvedExpression;
 import org.apache.flink.table.expressions.resolver.ExpressionResolver.ExpressionResolverBuilder;
 import org.apache.flink.table.expressions.utils.ResolvedExpressionMock;
+import org.apache.flink.table.legacy.api.TableColumn;
+import org.apache.flink.table.legacy.api.TableSchema;
 import org.apache.flink.table.refresh.ContinuousRefreshHandler;
 import org.apache.flink.table.refresh.ContinuousRefreshHandlerSerializer;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.utils.CatalogManagerMocks;
 import org.apache.flink.table.utils.ExpressionResolverMocks;
+import org.apache.flink.table.utils.ParserMock;
 
 import org.junit.jupiter.api.Test;
 
@@ -44,13 +49,11 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import static org.apache.flink.core.testutils.FlinkMatchers.containsMessage;
 import static org.apache.flink.table.utils.CatalogManagerMocks.DEFAULT_CATALOG;
 import static org.apache.flink.table.utils.CatalogManagerMocks.DEFAULT_DATABASE;
 import static org.apache.flink.table.utils.EncodingUtils.encodeBytesToBase64;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.fail;
-import static org.assertj.core.api.HamcrestCondition.matching;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Tests for {@link CatalogTable} to {@link ResolvedCatalogTable}, {@link CatalogMaterializedTable}
@@ -85,6 +88,8 @@ class CatalogBaseTableResolutionTest {
                     .withComment("This is a computed column")
                     .watermark("ts", WATERMARK_SQL)
                     .primaryKeyNamed("primary_constraint", "id")
+                    .indexNamed("idx", Collections.singletonList("id"))
+                    .immutableColumnsNamed("imt", Collections.singletonList("region"))
                     .build();
 
     private static final Schema MATERIALIZED_TABLE_SCHEMA =
@@ -96,6 +101,8 @@ class CatalogBaseTableResolutionTest {
                     .column("topic", DataTypes.VARCHAR(200))
                     .withComment("") // empty column comment
                     .primaryKeyNamed("primary_constraint", "id")
+                    .indexNamed("idx", Collections.singletonList("id"))
+                    .immutableColumnsNamed("imt", Collections.singletonList("region"))
                     .build();
 
     private static final TableSchema LEGACY_TABLE_SCHEMA =
@@ -131,7 +138,11 @@ class CatalogBaseTableResolutionTest {
                                     .withComment("This is a computed column")),
                     Collections.singletonList(WatermarkSpec.of("ts", WATERMARK_RESOLVED)),
                     UniqueConstraint.primaryKey(
-                            "primary_constraint", Collections.singletonList("id")));
+                            "primary_constraint", Collections.singletonList("id")),
+                    Collections.singletonList(
+                            DefaultIndex.newIndex("idx", Collections.singletonList("id"))),
+                    ImmutableColumnsConstraint.immutableColumns(
+                            "imt", Collections.singletonList("region")));
 
     private static final ResolvedSchema RESOLVED_MATERIALIZED_TABLE_SCHEMA =
             new ResolvedSchema(
@@ -143,12 +154,18 @@ class CatalogBaseTableResolutionTest {
                             Column.physical("topic", DataTypes.VARCHAR(200)).withComment("")),
                     Collections.emptyList(),
                     UniqueConstraint.primaryKey(
-                            "primary_constraint", Collections.singletonList("id")));
+                            "primary_constraint", Collections.singletonList("id")),
+                    Collections.singletonList(
+                            DefaultIndex.newIndex("idx", Collections.singletonList("id"))),
+                    ImmutableColumnsConstraint.immutableColumns(
+                            "imt", Collections.singletonList("region")));
 
     private static final ContinuousRefreshHandler CONTINUOUS_REFRESH_HANDLER =
-            new ContinuousRefreshHandler("remote", JobID.generate().toHexString());
+            new ContinuousRefreshHandler(
+                    "remote", "StandaloneClusterId", JobID.generate().toHexString());
 
-    private static final String DEFINITION_QUERY =
+    private static final String DEFAULT_ORIGINAL_QUERY = "SELECT id, region, county FROM T";
+    private static final String DEFAULT_EXPANDED_QUERY =
             String.format(
                     "SELECT id, region, county FROM %s.%s.T", DEFAULT_CATALOG, DEFAULT_DATABASE);
 
@@ -158,6 +175,8 @@ class CatalogBaseTableResolutionTest {
                             Column.physical("id", DataTypes.INT().notNull()),
                             Column.physical("region", DataTypes.VARCHAR(200)),
                             Column.physical("county", DataTypes.VARCHAR(200))),
+                    Collections.emptyList(),
+                    null,
                     Collections.emptyList(),
                     null);
 
@@ -187,10 +206,12 @@ class CatalogBaseTableResolutionTest {
         assertThat(resolvedMaterializedTable.getResolvedSchema())
                 .isEqualTo(RESOLVED_MATERIALIZED_TABLE_SCHEMA);
 
-        assertThat(resolvedMaterializedTable.getDefinitionQuery())
-                .isEqualTo(materializedTable.getDefinitionQuery());
-        assertThat(resolvedMaterializedTable.getFreshness())
-                .isEqualTo(materializedTable.getFreshness());
+        assertThat(resolvedMaterializedTable.getOriginalQuery())
+                .isEqualTo(materializedTable.getOriginalQuery());
+        assertThat(resolvedMaterializedTable.getExpandedQuery())
+                .isEqualTo(materializedTable.getExpandedQuery());
+        assertThat(resolvedMaterializedTable.getDefinitionFreshness())
+                .isEqualTo(materializedTable.getDefinitionFreshness());
         assertThat(resolvedMaterializedTable.getLogicalRefreshMode())
                 .isEqualTo(materializedTable.getLogicalRefreshMode());
         assertThat(resolvedMaterializedTable.getRefreshMode())
@@ -216,7 +237,8 @@ class CatalogBaseTableResolutionTest {
         final ResolvedCatalogTable resolvedTable =
                 resolveCatalogBaseTable(ResolvedCatalogTable.class, table);
 
-        assertThat(resolvedTable.toProperties()).isEqualTo(catalogTableAsProperties());
+        assertThat(resolvedTable.toProperties(DefaultSqlFactory.INSTANCE))
+                .isEqualTo(catalogTableAsProperties());
 
         assertThat(resolvedTable.getResolvedSchema()).isEqualTo(RESOLVED_TABLE_SCHEMA);
 
@@ -229,21 +251,23 @@ class CatalogBaseTableResolutionTest {
                         ResolvedCatalogMaterializedTable.class, catalogMaterializedTable);
         assertThat(
                         CatalogPropertiesUtil.serializeCatalogMaterializedTable(
-                                resolvedCatalogMaterializedTable))
+                                resolvedCatalogMaterializedTable, DefaultSqlFactory.INSTANCE))
                 .isEqualTo(catalogMaterializedTableAsProperties());
 
         assertThat(resolvedCatalogMaterializedTable.getResolvedSchema())
                 .isEqualTo(RESOLVED_MATERIALIZED_TABLE_SCHEMA);
         assertThat(resolvedCatalogMaterializedTable.getDefinitionFreshness())
-                .isEqualTo(IntervalFreshness.ofSecond("30"));
-        assertThat(resolvedCatalogMaterializedTable.getDefinitionQuery())
-                .isEqualTo(DEFINITION_QUERY);
+                .isEqualTo(IntervalFreshness.ofSecond(30));
+        assertThat(resolvedCatalogMaterializedTable.getOriginalQuery())
+                .isEqualTo(DEFAULT_ORIGINAL_QUERY);
+        assertThat(resolvedCatalogMaterializedTable.getExpandedQuery())
+                .isEqualTo(DEFAULT_EXPANDED_QUERY);
         assertThat(resolvedCatalogMaterializedTable.getLogicalRefreshMode())
-                .isEqualTo(CatalogMaterializedTable.LogicalRefreshMode.CONTINUOUS);
+                .isSameAs(LogicalRefreshMode.CONTINUOUS);
         assertThat(resolvedCatalogMaterializedTable.getRefreshMode())
-                .isEqualTo(CatalogMaterializedTable.RefreshMode.CONTINUOUS);
+                .isSameAs(RefreshMode.CONTINUOUS);
         assertThat(resolvedCatalogMaterializedTable.getRefreshStatus())
-                .isEqualTo(CatalogMaterializedTable.RefreshStatus.INITIALIZING);
+                .isSameAs(RefreshStatus.INITIALIZING);
         byte[] expectedBytes =
                 ContinuousRefreshHandlerSerializer.INSTANCE.serialize(CONTINUOUS_REFRESH_HANDLER);
         assertThat(resolvedCatalogMaterializedTable.getSerializedRefreshHandler())
@@ -252,41 +276,30 @@ class CatalogBaseTableResolutionTest {
 
     @Test
     void testPropertyDeserializationError() {
-        try {
-            final Map<String, String> properties = catalogTableAsProperties();
-            properties.remove("schema.4.data-type");
-            CatalogTable.fromProperties(properties);
-            fail("unknown failure");
-        } catch (Exception e) {
-            assertThat(e)
-                    .satisfies(
-                            matching(
-                                    containsMessage(
-                                            "Could not find property key 'schema.4.data-type'.")));
-        }
+        assertThatThrownBy(
+                        () -> {
+                            final Map<String, String> properties = catalogTableAsProperties();
+                            properties.remove("schema.4.data-type");
+                            CatalogTable.fromProperties(properties);
+                        })
+                .hasRootCauseMessage("Could not find property key 'schema.4.data-type'.");
     }
 
     @Test
     void testInvalidPartitionKeys() {
         final CatalogTable catalogTable =
-                CatalogTable.of(
-                        TABLE_SCHEMA,
-                        null,
-                        Arrays.asList("region", "countyINVALID"),
-                        Collections.emptyMap());
+                CatalogTable.newBuilder()
+                        .schema(TABLE_SCHEMA)
+                        .comment(null)
+                        .partitionKeys(Arrays.asList("region", "countyINVALID"))
+                        .options(Collections.emptyMap())
+                        .build();
 
-        try {
-            resolveCatalogBaseTable(ResolvedCatalogTable.class, catalogTable);
-            fail("Invalid partition keys expected.");
-        } catch (Exception e) {
-            assertThat(e)
-                    .satisfies(
-                            matching(
-                                    containsMessage(
-                                            "Invalid partition key 'countyINVALID'. A partition key must "
-                                                    + "reference a physical column in the schema. Available "
-                                                    + "columns are: [id, region, county]")));
-        }
+        assertThatThrownBy(() -> resolveCatalogBaseTable(ResolvedCatalogTable.class, catalogTable))
+                .hasRootCauseMessage(
+                        "Invalid partition key 'countyINVALID'. A partition key must "
+                                + "reference a physical column in the schema. Available "
+                                + "columns are: [id, region, county]");
     }
 
     @Test
@@ -317,18 +330,11 @@ class CatalogBaseTableResolutionTest {
                         Collections.emptyMap(),
                         null,
                         TableDistribution.ofHash(Collections.singletonList("countyINVALID"), 6));
-        try {
-            resolveCatalogBaseTable(ResolvedCatalogTable.class, catalogTable);
-            fail("Invalid bucket keys expected.");
-        } catch (Exception e) {
-            assertThat(e)
-                    .satisfies(
-                            matching(
-                                    containsMessage(
-                                            "Invalid bucket key 'countyINVALID'. A bucket key for a distribution must "
-                                                    + "reference a physical column in the schema. "
-                                                    + "Available columns are: [id, region, county]")));
-        }
+        assertThatThrownBy(() -> resolveCatalogBaseTable(ResolvedCatalogTable.class, catalogTable))
+                .hasRootCauseMessage(
+                        "Invalid bucket key 'countyINVALID'. A bucket key for a distribution must "
+                                + "reference a physical column in the schema. "
+                                + "Available columns are: [id, region, county]");
     }
 
     @Test
@@ -342,17 +348,49 @@ class CatalogBaseTableResolutionTest {
                         null,
                         TableDistribution.ofHash(Collections.singletonList("id"), 0));
 
-        try {
-            resolveCatalogBaseTable(ResolvedCatalogTable.class, catalogTable);
-            fail("Invalid bucket keys expected.");
-        } catch (Exception e) {
-            assertThat(e)
-                    .satisfies(
-                            matching(
-                                    containsMessage(
-                                            "Invalid bucket count '0'. The number of buckets for a "
-                                                    + "distributed table must be at least 1.")));
-        }
+        assertThatThrownBy(() -> resolveCatalogBaseTable(ResolvedCatalogTable.class, catalogTable))
+                .hasRootCauseMessage(
+                        "Invalid bucket count '0'. The number of buckets for a "
+                                + "distributed table must be at least 1.");
+    }
+
+    @Test
+    void testCatalogMaterializedTableToCatalogTable() {
+        final CatalogMaterializedTable materializedTable = catalogMaterializedTable();
+
+        final CatalogTable catalogTable = materializedTable.toCatalogTable();
+
+        // Verify the conversion preserves properties
+        assertThat(catalogTable.getUnresolvedSchema())
+                .isEqualTo(materializedTable.getUnresolvedSchema());
+        assertThat(catalogTable.getComment()).isEqualTo(materializedTable.getComment());
+        assertThat(catalogTable.getPartitionKeys()).isEqualTo(materializedTable.getPartitionKeys());
+        assertThat(catalogTable.getOptions()).isEqualTo(materializedTable.getOptions());
+        assertThat(catalogTable.getDistribution()).isEqualTo(materializedTable.getDistribution());
+        assertThat(catalogTable.getSnapshot()).isEqualTo(materializedTable.getSnapshot());
+    }
+
+    @Test
+    void testResolvedCatalogMaterializedTableToResolvedCatalogTable() {
+        final CatalogMaterializedTable materializedTable = catalogMaterializedTable();
+
+        final ResolvedCatalogMaterializedTable resolvedMaterializedTable =
+                resolveCatalogBaseTable(ResolvedCatalogMaterializedTable.class, materializedTable);
+
+        final ResolvedCatalogTable resolvedCatalogTable =
+                resolvedMaterializedTable.toResolvedCatalogTable();
+
+        // Verify schema is preserved
+        assertThat(resolvedCatalogTable.getResolvedSchema())
+                .isEqualTo(resolvedMaterializedTable.getResolvedSchema());
+
+        // Verify origin properties are preserved
+        assertThat(resolvedCatalogTable.getComment())
+                .isEqualTo(resolvedMaterializedTable.getComment());
+        assertThat(resolvedCatalogTable.getPartitionKeys())
+                .isEqualTo(resolvedMaterializedTable.getPartitionKeys());
+        assertThat(resolvedCatalogTable.getOptions())
+                .isEqualTo(resolvedMaterializedTable.getOptions());
     }
 
     // --------------------------------------------------------------------------------------------
@@ -368,7 +406,12 @@ class CatalogBaseTableResolutionTest {
         options.put("connector", "custom");
         options.put("version", "12");
 
-        return CatalogTable.of(TABLE_SCHEMA, comment, partitionKeys, options);
+        return CatalogTable.newBuilder()
+                .schema(TABLE_SCHEMA)
+                .comment(comment)
+                .partitionKeys(partitionKeys)
+                .options(options)
+                .build();
     }
 
     private static Map<String, String> catalogTableAsProperties() {
@@ -398,6 +441,10 @@ class CatalogBaseTableResolutionTest {
         properties.put("schema.watermark.0.strategy.expr", "ts - INTERVAL '5' SECOND");
         properties.put("schema.primary-key.name", "primary_constraint");
         properties.put("schema.primary-key.columns", "id");
+        properties.put("schema.index.0.name", "idx");
+        properties.put("schema.index.0.columns", "id");
+        properties.put("schema.immutable.name", "imt");
+        properties.put("schema.immutable.columns", "region");
         properties.put("partition.keys.0.name", "region");
         properties.put("partition.keys.1.name", "county");
         properties.put("version", "12");
@@ -423,12 +470,17 @@ class CatalogBaseTableResolutionTest {
         properties.put("schema.3.comment", "");
         properties.put("schema.primary-key.name", "primary_constraint");
         properties.put("schema.primary-key.columns", "id");
+        properties.put("schema.index.0.name", "idx");
+        properties.put("schema.index.0.columns", "id");
+        properties.put("schema.immutable.name", "imt");
+        properties.put("schema.immutable.columns", "region");
         properties.put("freshness-interval", "30");
         properties.put("freshness-unit", "SECOND");
         properties.put("logical-refresh-mode", "CONTINUOUS");
         properties.put("refresh-mode", "CONTINUOUS");
         properties.put("refresh-status", "INITIALIZING");
-        properties.put("definition-query", DEFINITION_QUERY);
+        properties.put("original-query", DEFAULT_ORIGINAL_QUERY);
+        properties.put("expanded-query", DEFAULT_EXPANDED_QUERY);
 
         // put refresh handler
         properties.put(
@@ -443,21 +495,17 @@ class CatalogBaseTableResolutionTest {
         final String comment = "This is an example materialized table.";
         final List<String> partitionKeys = Arrays.asList("region", "county");
 
-        final String definitionQuery =
-                String.format(
-                        "SELECT id, region, county FROM %s.%s.T",
-                        DEFAULT_CATALOG, DEFAULT_DATABASE);
-
         CatalogMaterializedTable.Builder builder = CatalogMaterializedTable.newBuilder();
         return builder.schema(MATERIALIZED_TABLE_SCHEMA)
                 .comment(comment)
                 .partitionKeys(partitionKeys)
                 .options(Collections.emptyMap())
-                .definitionQuery(definitionQuery)
-                .freshness(IntervalFreshness.ofSecond("30"))
-                .logicalRefreshMode(CatalogMaterializedTable.LogicalRefreshMode.AUTOMATIC)
-                .refreshMode(CatalogMaterializedTable.RefreshMode.CONTINUOUS)
-                .refreshStatus(CatalogMaterializedTable.RefreshStatus.INITIALIZING)
+                .originalQuery(DEFAULT_ORIGINAL_QUERY)
+                .expandedQuery(DEFAULT_EXPANDED_QUERY)
+                .freshness(IntervalFreshness.ofSecond(30))
+                .logicalRefreshMode(LogicalRefreshMode.AUTOMATIC)
+                .refreshMode(RefreshMode.CONTINUOUS)
+                .refreshStatus(RefreshStatus.INITIALIZING)
                 .build();
     }
 
@@ -482,7 +530,7 @@ class CatalogBaseTableResolutionTest {
                 ExpressionResolverMocks.forSqlExpression(
                         CatalogBaseTableResolutionTest::resolveSqlExpression);
 
-        catalogManager.initSchemaResolver(true, expressionResolverBuilder);
+        catalogManager.initSchemaResolver(true, expressionResolverBuilder, new ParserMock());
 
         return catalogManager;
     }

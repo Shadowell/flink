@@ -18,6 +18,7 @@
 
 package org.apache.flink.runtime.source.coordinator;
 
+import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.connector.source.ReaderInfo;
 import org.apache.flink.api.connector.source.SplitsAssignment;
 import org.apache.flink.api.connector.source.mocks.MockSourceSplit;
@@ -56,6 +57,21 @@ class SourceCoordinatorContextTest extends SourceCoordinatorTestBase {
 
         final TestingSplitEnumerator<?> enumerator = getEnumerator();
         assertThat(enumerator.getRegisteredReaders()).containsExactlyInAnyOrder(0, 1, 2);
+
+        ReaderInfo readerInfoOfSubtask1 =
+                ReaderInfo.createReaderInfo(
+                        1, "subtask_1_location", Collections.singletonList(new MockSourceSplit(1)));
+        sourceCoordinator.subtaskReset(1, 1);
+        sourceCoordinator.handleEventFromOperator(
+                1,
+                1,
+                ReaderRegistrationEvent.createReaderRegistrationEvent(
+                        readerInfoOfSubtask1.getSubtaskId(),
+                        readerInfoOfSubtask1.getLocation(),
+                        readerInfoOfSubtask1.getReportedSplitsOnRegistration(),
+                        new MockSourceSplitSerializer()));
+        waitForCoordinatorToProcessActions();
+        assertThat(context.registeredReaders().get(1)).isEqualTo(readerInfoOfSubtask1);
     }
 
     @Test
@@ -160,6 +176,7 @@ class SourceCoordinatorContextTest extends SourceCoordinatorTestBase {
                 new ManuallyTriggeredScheduledExecutorService();
         SourceCoordinatorContext<MockSourceSplit> testingContext =
                 new SourceCoordinatorContext<>(
+                        new JobID(),
                         coordinatorExecutorWithExceptionHandler,
                         manualWorkerExecutor,
                         new SourceCoordinatorProvider.CoordinatorExecutorThreadFactory(
@@ -195,6 +212,7 @@ class SourceCoordinatorContextTest extends SourceCoordinatorTestBase {
 
         SourceCoordinatorContext<MockSourceSplit> testingContext =
                 new SourceCoordinatorContext<>(
+                        new JobID(),
                         manualCoordinatorExecutor,
                         manualWorkerExecutor,
                         new SourceCoordinatorProvider.CoordinatorExecutorThreadFactory(

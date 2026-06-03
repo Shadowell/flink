@@ -22,7 +22,6 @@ import org.apache.flink.table.planner.analyze.PlanAdvice
 import org.apache.flink.table.planner.calcite.{FlinkPlannerImpl, FlinkTypeFactory}
 import org.apache.flink.table.planner.hint.FlinkHints
 import org.apache.flink.table.planner.plan.`trait`.{MiniBatchInterval, MiniBatchMode}
-import org.apache.flink.table.planner.utils.ShortcutUtils.unwrapTableConfig
 
 import org.apache.calcite.config.NullCollation
 import org.apache.calcite.plan.RelOptUtil
@@ -31,7 +30,7 @@ import org.apache.calcite.rel.RelFieldCollation.{Direction, NullDirection}
 import org.apache.calcite.rel.core.TableScan
 import org.apache.calcite.rel.hint.{Hintable, HintStrategyTable, RelHint}
 import org.apache.calcite.rel.logical.{LogicalFilter, LogicalJoin, LogicalProject}
-import org.apache.calcite.rex.{RexBuilder, RexCall, RexInputRef, RexLiteral, RexNode, RexUtil, RexVisitorImpl}
+import org.apache.calcite.rex._
 import org.apache.calcite.sql.`type`.SqlTypeName._
 import org.apache.calcite.sql.SqlExplainLevel
 import org.apache.calcite.sql.SqlKind._
@@ -78,7 +77,8 @@ object FlinkRelOptUtil {
       withChangelogTraits: Boolean = false,
       withRowType: Boolean = false,
       withUpsertKey: Boolean = false,
-      withQueryBlockAlias: Boolean = false): String = {
+      withQueryBlockAlias: Boolean = false,
+      withDuplicateChangesTrait: Boolean = false): String = {
     if (rel == null) {
       return null
     }
@@ -92,7 +92,8 @@ object FlinkRelOptUtil {
       withTreeStyle = true,
       withUpsertKey,
       withQueryHint = true,
-      withQueryBlockAlias)
+      withQueryBlockAlias,
+      withDuplicateChangesTrait = withDuplicateChangesTrait)
     rel.explain(planWriter)
     sw.toString
   }
@@ -268,11 +269,6 @@ object FlinkRelOptUtil {
       direction: RelFieldCollation.Direction,
       nullDirection: RelFieldCollation.NullDirection): RelFieldCollation = {
     new RelFieldCollation(fieldIndex, direction, nullDirection)
-  }
-
-  /** Get max cnf node limit by context of rel */
-  def getMaxCnfNodeCount(rel: RelNode): Int = {
-    unwrapTableConfig(rel).get(FlinkRexUtil.TABLE_OPTIMIZER_CNF_NODES_LIMIT)
   }
 
   /**

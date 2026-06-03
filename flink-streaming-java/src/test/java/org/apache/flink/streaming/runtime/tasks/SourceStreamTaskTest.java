@@ -27,6 +27,7 @@ import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.typeutils.TupleTypeInfo;
+import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.core.execution.SavepointFormatType;
 import org.apache.flink.core.testutils.MultiShotLatch;
 import org.apache.flink.runtime.checkpoint.CheckpointMetaData;
@@ -50,12 +51,11 @@ import org.apache.flink.runtime.operators.testutils.ExpectedTestException;
 import org.apache.flink.runtime.state.CheckpointStorageLocationReference;
 import org.apache.flink.runtime.taskmanager.CheckpointResponder;
 import org.apache.flink.runtime.taskmanager.TestCheckpointResponder;
-import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.checkpoint.ListCheckpointed;
-import org.apache.flink.streaming.api.functions.source.FromElementsFunction;
-import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunction;
-import org.apache.flink.streaming.api.functions.source.RichSourceFunction;
-import org.apache.flink.streaming.api.functions.source.SourceFunction;
+import org.apache.flink.streaming.api.functions.source.legacy.FromElementsFunction;
+import org.apache.flink.streaming.api.functions.source.legacy.RichParallelSourceFunction;
+import org.apache.flink.streaming.api.functions.source.legacy.RichSourceFunction;
+import org.apache.flink.streaming.api.functions.source.legacy.SourceFunction;
 import org.apache.flink.streaming.api.graph.StreamConfig;
 import org.apache.flink.streaming.api.operators.BoundedOneInput;
 import org.apache.flink.streaming.api.operators.SimpleOperatorFactory;
@@ -74,6 +74,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.io.Serializable;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -236,7 +237,6 @@ class SourceStreamTaskTest extends SourceStreamTaskTestBase {
                 .finish();
 
         StreamConfig streamConfig = testHarness.getStreamConfig();
-        streamConfig.setTimeCharacteristic(TimeCharacteristic.ProcessingTime);
 
         testHarness.invoke();
         testHarness.waitForTaskCompletion();
@@ -275,7 +275,6 @@ class SourceStreamTaskTest extends SourceStreamTaskTestBase {
                 .finish();
 
         StreamConfig streamConfig = testHarness.getStreamConfig();
-        streamConfig.setTimeCharacteristic(TimeCharacteristic.ProcessingTime);
 
         ConcurrentLinkedQueue<Object> expectedOutput = new ConcurrentLinkedQueue<>();
 
@@ -340,7 +339,6 @@ class SourceStreamTaskTest extends SourceStreamTaskTestBase {
                 .finish();
 
         StreamConfig streamConfig = testHarness.getStreamConfig();
-        streamConfig.setTimeCharacteristic(TimeCharacteristic.ProcessingTime);
 
         testHarness.invoke();
         CancelLockingSource.awaitRunning();
@@ -354,7 +352,8 @@ class SourceStreamTaskTest extends SourceStreamTaskTestBase {
                     .execute(
                             () ->
                                     assertThat(testHarness.getTask().isRunning())
-                                            .as("This should never execute before task cancelation")
+                                            .as(
+                                                    "This should never execute before task cancellation")
                                             .isFalse(),
                             "Test");
         }
@@ -452,9 +451,6 @@ class SourceStreamTaskTest extends SourceStreamTaskTestBase {
                         STRING_TYPE_INFO.createSerializer(new SerializerConfigImpl()))
                 .finish();
 
-        StreamConfig streamConfig = testHarness.getStreamConfig();
-        streamConfig.setTimeCharacteristic(TimeCharacteristic.ProcessingTime);
-
         testHarness.invoke();
         try {
             testHarness.waitForTaskCompletion();
@@ -535,7 +531,9 @@ class SourceStreamTaskTest extends SourceStreamTaskTestBase {
             try (StreamTaskMailboxTestHarness<String> testHarness =
                     new StreamTaskMailboxTestHarnessBuilder<>(
                                     SourceStreamTask::new, BasicTypeInfo.STRING_TYPE_INFO)
-                            .modifyStreamConfig(config -> config.setCheckpointingEnabled(true))
+                            .addJobConfig(
+                                    CheckpointingOptions.CHECKPOINTING_INTERVAL,
+                                    Duration.ofSeconds(1))
                             .setCheckpointResponder(
                                     new TestCheckpointResponder() {
                                         @Override

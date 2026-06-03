@@ -36,6 +36,25 @@ import static org.apache.flink.configuration.description.TextElement.text;
 @PublicEvolving
 public class ClusterOptions {
 
+    @Documentation.Section(Documentation.Sections.EXPERT_CLUSTER)
+    public static final ConfigOption<String> CLUSTER_ID =
+            key("cluster.id")
+                    .stringType()
+                    .defaultValue("00000000000000000000000000000000")
+                    .withDescription(
+                            Description.builder()
+                                    .text(
+                                            "The ID of the Flink cluster, used to separate multiple Flink clusters from each other. "
+                                                    + "Currently, this option is primarily used to determine the archive path, "
+                                                    + "and may also be used as the fixed application/job id (if not specified by the user) in high availability mode."
+                                                    + "The expected format is [0-9a-fA-F]{32}, e.g. fd72014d4c864993a2e5a9287b4a9c5d.")
+                                    .linebreak()
+                                    .text(
+                                            "If this option is not configured but %s is configured, the value will be derived from the value of %s.",
+                                            code(HighAvailabilityOptions.HA_CLUSTER_ID.key()),
+                                            code(HighAvailabilityOptions.HA_CLUSTER_ID.key()))
+                                    .build());
+
     @Documentation.Section(Documentation.Sections.EXPERT_FAULT_TOLERANCE)
     public static final ConfigOption<Duration> INITIAL_REGISTRATION_TIMEOUT =
             ConfigOptions.key("cluster.registration.initial-timeout")
@@ -82,26 +101,6 @@ public class ClusterOptions {
                                     + "By default it will use 4 * the number of CPU cores (hardware contexts) that the cluster process has access to. "
                                     + "Increasing the pool size allows to run more IO operations concurrently.");
 
-    /**
-     * @deprecated Please use {@link TaskManagerOptions#TASK_MANAGER_LOAD_BALANCE_MODE} instead.
-     *     Note: The 'taskmanager.load-balance.mode: SLOTS' is equal to
-     *     'cluster.evenly-spread-out-slots: true'. The 'taskmanager.load-balance.mode: NONE' is
-     *     equal to 'cluster.evenly-spread-out-slots: false'.
-     */
-    @Deprecated
-    @Documentation.Section(Documentation.Sections.EXPERT_SCHEDULING)
-    public static final ConfigOption<Boolean> EVENLY_SPREAD_OUT_SLOTS_STRATEGY =
-            ConfigOptions.key("cluster.evenly-spread-out-slots")
-                    .booleanType()
-                    .defaultValue(false)
-                    .withDescription(
-                            Description.builder()
-                                    .text(
-                                            "Enable the slot spread out allocation strategy. This strategy tries to spread out "
-                                                    + "the slots evenly across all available %s.",
-                                            code("TaskExecutors"))
-                                    .build());
-
     @Documentation.Section(Documentation.Sections.EXPERT_CLUSTER)
     public static final ConfigOption<Boolean> HALT_ON_FATAL_ERROR =
             key("cluster.processes.halt-on-fatal-error")
@@ -140,17 +139,6 @@ public class ClusterOptions {
                     .defaultValue(50)
                     .withDescription(
                             "The maximum stacktrace depth of TaskManager and JobManager's thread dump web-frontend displayed.");
-
-    /**
-     * @deprecated The option is unnecessary. It is deprecated in 1.20 and will be removed in 2.0.
-     */
-    @Deprecated
-    public static final ConfigOption<Boolean> FINE_GRAINED_SHUFFLE_MODE_ALL_BLOCKING =
-            ConfigOptions.key("fine-grained.shuffle-mode.all-blocking")
-                    .booleanType()
-                    .defaultValue(false)
-                    .withDescription(
-                            "Whether to convert all PIPELINE edges to BLOCKING when apply fine-grained resource management in batch jobs.");
 
     @Documentation.Section(Documentation.Sections.EXPERT_CLUSTER)
     public static final ConfigOption<UncaughtExceptionHandleMode> UNCAUGHT_EXCEPTION_HANDLING =
@@ -245,7 +233,9 @@ public class ClusterOptions {
         }
     }
 
-    /** @see ClusterOptions#UNCAUGHT_EXCEPTION_HANDLING */
+    /**
+     * @see ClusterOptions#UNCAUGHT_EXCEPTION_HANDLING
+     */
     public enum UncaughtExceptionHandleMode {
         LOG,
         FAIL

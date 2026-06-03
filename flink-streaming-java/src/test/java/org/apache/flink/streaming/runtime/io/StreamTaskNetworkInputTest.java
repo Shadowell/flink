@@ -24,6 +24,7 @@ import org.apache.flink.runtime.checkpoint.CheckpointException;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.checkpoint.channel.ChannelStateWriter;
 import org.apache.flink.runtime.checkpoint.channel.InputChannelInfo;
+import org.apache.flink.runtime.event.WatermarkEvent;
 import org.apache.flink.runtime.io.disk.iomanager.IOManager;
 import org.apache.flink.runtime.io.disk.iomanager.IOManagerAsync;
 import org.apache.flink.runtime.io.network.api.CheckpointBarrier;
@@ -33,9 +34,10 @@ import org.apache.flink.runtime.io.network.api.writer.RecordWriter;
 import org.apache.flink.runtime.io.network.buffer.BufferBuilder;
 import org.apache.flink.runtime.io.network.buffer.BufferBuilderTestUtils;
 import org.apache.flink.runtime.io.network.buffer.BufferConsumer;
+import org.apache.flink.runtime.io.network.netty.exception.RemoteTransportException;
 import org.apache.flink.runtime.io.network.partition.consumer.BufferOrEvent;
 import org.apache.flink.runtime.io.network.partition.consumer.CheckpointableInput;
-import org.apache.flink.runtime.io.network.partition.consumer.EndOfChannelStateEvent;
+import org.apache.flink.runtime.io.network.partition.consumer.EndOfOutputChannelStateEvent;
 import org.apache.flink.runtime.io.network.partition.consumer.InputGate;
 import org.apache.flink.runtime.io.network.partition.consumer.StreamTestSingleInputGate;
 import org.apache.flink.runtime.mailbox.SyncMailboxExecutor;
@@ -63,7 +65,10 @@ import org.apache.flink.util.clock.SystemClock;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import javax.annotation.Nullable;
+
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -77,9 +82,16 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Tests for {@link StreamTaskNetworkInput}. */
 class StreamTaskNetworkInputTest {
+
+    private static final RuntimeException WRAPPED_TRANSPORT_EXCEPTION =
+            new RuntimeException(
+                    new RemoteTransportException(
+                            "simulated release failure",
+                            InetSocketAddress.createUnresolved("localhost", 8080)));
 
     private static final int PAGE_SIZE = 1000;
 
@@ -228,9 +240,9 @@ class StreamTaskNetworkInputTest {
 
         inputGate.sendElement(new StreamRecord<>(42L), 0);
         assertThat(input.emitNext(output)).isEqualTo(DataInputStatus.MORE_AVAILABLE);
-        inputGate.sendEvent(EndOfChannelStateEvent.INSTANCE, 0);
+        inputGate.sendEvent(EndOfOutputChannelStateEvent.INSTANCE, 0);
         assertThat(input.emitNext(output)).isEqualTo(DataInputStatus.MORE_AVAILABLE);
-        inputGate.sendEvent(EndOfChannelStateEvent.INSTANCE, 1);
+        inputGate.sendEvent(EndOfOutputChannelStateEvent.INSTANCE, 1);
         assertThat(input.emitNext(output)).isEqualTo(DataInputStatus.END_OF_RECOVERY);
     }
 
@@ -453,6 +465,9 @@ class StreamTaskNetworkInputTest {
 
         @Override
         public void emitRecordAttributes(RecordAttributes recordAttributes) {}
+
+        @Override
+        public void emitWatermark(WatermarkEvent watermark) {}
     }
 
     private static class VerifyRecordsDataOutput<T> extends NoOpDataOutput<T> {
@@ -466,6 +481,55 @@ class StreamTaskNetworkInputTest {
 
         int getNumberOfEmittedRecords() {
             return numberOfEmittedRecords;
+        }
+    }
+
+    @Test
+    void testCloseIgnoresReleaseFailureFromChannelWithError() throws Exception {
+        testErrorHandlingOnClose(WRAPPED_TRANSPORT_EXCEPTION, WRAPPED_TRANSPORT_EXCEPTION, null);
+    }
+
+    @Test
+    void testCloseThrowsReleaseFailureFromChannelWithoutError() throws Exception {
+        testErrorHandlingOnClose(WRAPPED_TRANSPORT_EXCEPTION, null, RuntimeException.class);
+    }
+
+    @Test
+    void testCloseThrowsReleaseFailureFromChannelWithNonTransportError() throws Exception {
+        RuntimeException error = new RuntimeException("something else broke");
+        testErrorHandlingOnClose(error, error, RuntimeException.class);
+    }
+
+    private void testErrorHandlingOnClose(
+            RuntimeException error,
+            @Nullable RuntimeException channelError,
+            Class<? extends Exception> expectedException)
+            throws Exception {
+        int numInputChannels = 2;
+        LongSerializer inSerializer = LongSerializer.INSTANCE;
+        StreamTestSingleInputGate<Long> inputGate =
+                new StreamTestSingleInputGate<>(numInputChannels, 0, inSerializer, 1024);
+
+        Map<InputChannelInfo, TestRecordDeserializer> deserializers =
+                createDeserializers(inputGate.getInputGate());
+
+        // Replace the deserializer for channel 0 with one that throws on clear()
+        InputChannelInfo channel0 = new InputChannelInfo(0, 0);
+        deserializers.put(
+                channel0,
+                new ThrowingTestRecordDeserializer(ioManager.getSpillingDirectoriesPaths(), error));
+
+        StreamTaskInput<Long> input =
+                new TestStreamTaskNetworkInput(
+                        inputGate, inSerializer, numInputChannels, deserializers);
+
+        if (channelError != null) {
+            inputGate.setChannelError(0, error);
+        }
+        if (expectedException == null) {
+            input.close();
+        } else {
+            assertThatThrownBy(input::close).isInstanceOf(RuntimeException.class);
         }
     }
 
@@ -490,6 +554,21 @@ class StreamTaskNetworkInputTest {
                 ChannelStateWriter channelStateWriter, long checkpointId)
                 throws CheckpointException {
             throw new UnsupportedOperationException();
+        }
+    }
+
+    private static class ThrowingTestRecordDeserializer extends TestRecordDeserializer {
+
+        private final RuntimeException error;
+
+        public ThrowingTestRecordDeserializer(String[] tmpDirectories, RuntimeException error) {
+            super(tmpDirectories);
+            this.error = error;
+        }
+
+        @Override
+        public void clear() {
+            throw error;
         }
     }
 }

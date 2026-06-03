@@ -17,9 +17,12 @@
 
 package org.apache.flink.runtime.scheduler.adaptive;
 
-import org.apache.flink.api.common.time.Time;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.DeploymentOptions;
+import org.apache.flink.configuration.JobManagerOptions;
 import org.apache.flink.configuration.StateRecoveryOptions;
+import org.apache.flink.configuration.TaskManagerOptions;
+import org.apache.flink.configuration.TraceOptions;
 import org.apache.flink.core.failure.FailureEnricher;
 import org.apache.flink.runtime.blob.BlobWriter;
 import org.apache.flink.runtime.blob.VoidBlobWriter;
@@ -98,13 +101,17 @@ public class AdaptiveSchedulerBuilder {
     /**
      * {@code null} indicates that the default factory will be used based on the set configuration.
      */
-    @Nullable private StateTransitionManager.Factory stateTransitionManagerFactory = null;
+    @Nullable
+    private AdaptiveScheduler.StateTransitionManagerFactory stateTransitionManagerFactory = null;
 
     private BiFunction<JobManagerJobMetricGroup, CheckpointStatsListener, CheckpointStatsTracker>
             checkpointStatsTrackerFactory =
                     (metricGroup, checkpointStatsListener) ->
                             new DefaultCheckpointStatsTracker(
-                                    10, metricGroup, checkpointStatsListener);
+                                    10,
+                                    metricGroup,
+                                    TraceOptions.CheckpointSpanDetailLevel.SPAN_PER_CHECKPOINT,
+                                    checkpointStatsListener);
 
     public AdaptiveSchedulerBuilder(
             final JobGraph jobGraph,
@@ -160,8 +167,8 @@ public class AdaptiveSchedulerBuilder {
         return this;
     }
 
-    public AdaptiveSchedulerBuilder setRpcTimeout(final Time rpcTimeout) {
-        this.rpcTimeout = rpcTimeout.toDuration();
+    public AdaptiveSchedulerBuilder setRpcTimeout(final Duration rpcTimeout) {
+        this.rpcTimeout = rpcTimeout;
         return this;
     }
 
@@ -226,7 +233,8 @@ public class AdaptiveSchedulerBuilder {
     }
 
     public AdaptiveSchedulerBuilder setStateTransitionManagerFactory(
-            @Nullable StateTransitionManager.Factory stateTransitionManagerFactory) {
+            @Nullable
+                    AdaptiveScheduler.StateTransitionManagerFactory stateTransitionManagerFactory) {
         this.stateTransitionManagerFactory = stateTransitionManagerFactory;
         return this;
     }
@@ -250,7 +258,7 @@ public class AdaptiveSchedulerBuilder {
                         new DefaultExecutionDeploymentTracker(),
                         executorService,
                         executorService,
-                        Time.fromDuration(rpcTimeout),
+                        rpcTimeout,
                         jobManagerJobMetricGroup,
                         blobWriter,
                         shuffleMaster,
@@ -261,7 +269,7 @@ public class AdaptiveSchedulerBuilder {
         return new AdaptiveScheduler(
                 settings,
                 stateTransitionManagerFactory == null
-                        ? DefaultStateTransitionManager.Factory.fromSettings(settings)
+                        ? DefaultStateTransitionManager::new
                         : stateTransitionManagerFactory,
                 checkpointStatsTrackerFactory,
                 jobGraph,
@@ -271,7 +279,13 @@ public class AdaptiveSchedulerBuilder {
                 slotAllocator == null
                         ? AdaptiveSchedulerFactory.createSlotSharingSlotAllocator(
                                 declarativeSlotPool,
-                                jobMasterConfiguration.get(StateRecoveryOptions.LOCAL_RECOVERY))
+                                jobMasterConfiguration.get(StateRecoveryOptions.LOCAL_RECOVERY),
+                                jobMasterConfiguration.get(DeploymentOptions.TARGET),
+                                jobMasterConfiguration.get(
+                                        JobManagerOptions
+                                                .SCHEDULER_PREFER_MINIMAL_TASKMANAGERS_ENABLED),
+                                jobMasterConfiguration.get(
+                                        TaskManagerOptions.TASK_MANAGER_LOAD_BALANCE_MODE))
                         : slotAllocator,
                 executorService,
                 userCodeLoader,

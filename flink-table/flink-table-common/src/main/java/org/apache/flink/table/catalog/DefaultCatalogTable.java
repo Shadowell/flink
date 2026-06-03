@@ -19,6 +19,7 @@
 package org.apache.flink.table.catalog;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.configuration.ConfigurationUtils;
 import org.apache.flink.table.api.Schema;
 
 import javax.annotation.Nullable;
@@ -128,12 +129,6 @@ public class DefaultCatalogTable implements CatalogTable {
     }
 
     @Override
-    public Map<String, String> toProperties() {
-        throw new UnsupportedOperationException(
-                "Only a resolved catalog table can be serialized into a map of string properties.");
-    }
-
-    @Override
     public boolean equals(Object o) {
         if (this == o) {
             return true;
@@ -168,7 +163,7 @@ public class DefaultCatalogTable implements CatalogTable {
                 + ", partitionKeys="
                 + partitionKeys
                 + ", options="
-                + options
+                + ConfigurationUtils.hideSensitiveValues(options, List.of())
                 + ", snapshot="
                 + snapshot
                 + '}';

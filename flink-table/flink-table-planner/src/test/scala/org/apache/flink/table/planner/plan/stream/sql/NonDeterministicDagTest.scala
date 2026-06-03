@@ -19,21 +19,19 @@ package org.apache.flink.table.planner.plan.stream.sql
 
 import org.apache.flink.api.common.typeinfo.TypeInformation
 import org.apache.flink.api.java.tuple
-import org.apache.flink.api.scala._
+import org.apache.flink.legacy.table.sinks.UpsertStreamTableSink
 import org.apache.flink.streaming.api.datastream.{DataStream, DataStreamSink}
 import org.apache.flink.table.api._
 import org.apache.flink.table.api.config.{ExecutionConfigOptions, OptimizerConfigOptions}
 import org.apache.flink.table.api.config.OptimizerConfigOptions.NonDeterministicUpdateStrategy
-import org.apache.flink.table.api.internal.TableEnvironmentInternal
 import org.apache.flink.table.data.RowData
+import org.apache.flink.table.legacy.api.TableSchema
 import org.apache.flink.table.planner.JBoolean
 import org.apache.flink.table.planner.expressions.utils.{TestNonDeterministicUdaf, TestNonDeterministicUdf, TestNonDeterministicUdtf}
 import org.apache.flink.table.planner.runtime.utils.JavaUserDefinedTableFunctions.StringSplit
 import org.apache.flink.table.planner.utils.{StreamTableTestUtil, TableTestBase}
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo
-import org.apache.flink.table.sinks.UpsertStreamTableSink
 import org.apache.flink.table.types.DataType
-import org.apache.flink.table.types.logical.{BigIntType, IntType, VarCharType}
 import org.apache.flink.table.types.utils.TypeConversions
 import org.apache.flink.testutils.junit.extensions.parameterized.{ParameterizedTestExtension, Parameters}
 
@@ -97,7 +95,8 @@ class NonDeterministicDagTest(nonDeterministicUpdateStrategy: NonDeterministicUp
                                | primary key (a) not enforced
                                |) with (
                                | 'connector' = 'values',
-                               | 'changelog-mode' = 'I,UA,D'
+                               | 'changelog-mode' = 'I,UA,D',
+                               | 'source.produces-delete-by-key' = 'true'
                                |)""".stripMargin)
     util.tableEnv.executeSql("""
                                |create temporary table upsert_src_with_meta (
@@ -111,6 +110,7 @@ class NonDeterministicDagTest(nonDeterministicUpdateStrategy: NonDeterministicUp
                                |) with (
                                | 'connector' = 'values',
                                | 'changelog-mode' = 'I,UA,D',
+                               | 'source.produces-delete-by-key' = 'true',
                                | 'readable-metadata' = 'metadata_1:INT, metadata_2:STRING'
                                |)""".stripMargin)
 
@@ -290,52 +290,6 @@ class NonDeterministicDagTest(nonDeterministicUpdateStrategy: NonDeterministicUp
   }
 
   @TestTemplate
-  def testCdcWithMetaLegacySinkWithPk(): Unit = {
-    val sinkWithPk = new TestingUpsertSink(
-      Array("a"),
-      Array("a", "b", "c"),
-      // pk column requires non-null type
-      Array(DataTypes.INT().notNull(), DataTypes.BIGINT(), DataTypes.VARCHAR(100)))
-
-    util.tableEnv
-      .asInstanceOf[TableEnvironmentInternal]
-      .registerTableSinkInternal("legacy_upsert_sink", sinkWithPk)
-
-    util.verifyExecPlanInsert(s"""
-                                 |insert into legacy_upsert_sink
-                                 |select a, metadata_3, c
-                                 |from cdc_with_meta
-                                 |""".stripMargin)
-  }
-
-  @TestTemplate
-  def testCdcWithMetaLegacySinkWithoutPk(): Unit = {
-    val retractSink =
-      util.createRetractTableSink(
-        Array("a", "b", "c"),
-        Array(new IntType(), new BigIntType(), VarCharType.STRING_TYPE))
-    util.tableEnv
-      .asInstanceOf[TableEnvironmentInternal]
-      .registerTableSinkInternal("legacy_retract_sink", retractSink)
-
-    val callable: ThrowingCallable = () =>
-      util.verifyExecPlanInsert(s"""
-                                   |insert into legacy_retract_sink
-                                   |select a, metadata_3, c
-                                   |from cdc_with_meta
-                                   |""".stripMargin)
-
-    if (tryResolve) {
-      assertThatThrownBy(callable)
-        .hasMessageContaining(
-          "metadata column(s): 'metadata_3' in cdc source may cause wrong result or error")
-        .isInstanceOf[TableException]
-    } else {
-      assertThatCode(callable).doesNotThrowAnyException()
-    }
-  }
-
-  @TestTemplate
   def testCdcWithMetaSinkWithCompositePk(): Unit = {
     val callable: ThrowingCallable = () =>
       util.verifyExecPlanInsert(s"""
@@ -395,6 +349,7 @@ class NonDeterministicDagTest(nonDeterministicUpdateStrategy: NonDeterministicUp
                                                                         |select a, b, `day`
                                                                         |from cdc_with_computed_col
                                                                         |where b > 100
+                                                                        |ON CONFLICT DO DEDUPLICATE
                                                                         |""".stripMargin)
 
     if (tryResolve) {
@@ -421,6 +376,7 @@ class NonDeterministicDagTest(nonDeterministicUpdateStrategy: NonDeterministicUp
                             |select a, b, `day`
                             |from cdc_with_computed_col
                             |where b > 100
+                            |ON CONFLICT DO DEDUPLICATE
                             |""".stripMargin)
 
     val callable: ThrowingCallable = () => util.verifyExecPlan(stmtSet)
@@ -443,6 +399,7 @@ class NonDeterministicDagTest(nonDeterministicUpdateStrategy: NonDeterministicUp
                                    |select
                                    |  t1.a, t1.b, a1
                                    |from cdc t1, lateral table(ndTableFunc(a)) as T(a1)
+                                   |ON CONFLICT DO DEDUPLICATE
                                    |""".stripMargin)
 
     if (tryResolve) {
@@ -463,6 +420,7 @@ class NonDeterministicDagTest(nonDeterministicUpdateStrategy: NonDeterministicUp
                                    |select
                                    |  cast(a1 as integer) a
                                    |from cdc t1, lateral table(ndTableFunc(a)) as T(a1)
+                                   |ON CONFLICT DO DEDUPLICATE
                                    |""".stripMargin)
 
     if (tryResolve) {
@@ -481,6 +439,7 @@ class NonDeterministicDagTest(nonDeterministicUpdateStrategy: NonDeterministicUp
                                  |insert into sink_with_pk
                                  |select a, b, c
                                  |from cdc t1 join lateral table(ndTableFunc(a)) as T(a1) on true
+                                 |ON CONFLICT DO DEDUPLICATE
                                  |""".stripMargin)
   }
 
@@ -508,6 +467,7 @@ class NonDeterministicDagTest(nonDeterministicUpdateStrategy: NonDeterministicUp
                                    |insert into sink_with_pk
                                    |select t1.a, t1.metadata_1, T.c1
                                    |from cdc_with_meta t1, lateral table(str_split(c)) as T(c1)
+                                   |ON CONFLICT DO DEDUPLICATE
                                    |""".stripMargin)
 
     // Under ignore mode, the generated execution plan may cause wrong result though
@@ -585,6 +545,7 @@ class NonDeterministicDagTest(nonDeterministicUpdateStrategy: NonDeterministicUp
                                  |  select *, proctime() proctime from cdc
                                  |) t1 join dim_without_pk for system_time as of t1.proctime as t2
                                  |on t1.a = t2.a
+                                 |ON CONFLICT DO DEDUPLICATE
                                  |""".stripMargin)
   }
 
@@ -724,6 +685,7 @@ class NonDeterministicDagTest(nonDeterministicUpdateStrategy: NonDeterministicUp
                                    |on t1.a = t2.a
                                    |  -- check dim table data's freshness
                                    |  and t2.b > UNIX_TIMESTAMP() - 300
+                                   |ON CONFLICT DO DEDUPLICATE
                                    |""".stripMargin)
 
     if (tryResolve) {
@@ -748,6 +710,7 @@ class NonDeterministicDagTest(nonDeterministicUpdateStrategy: NonDeterministicUp
                                    |on t1.a = t2.a
                                    |  -- non deterministic function in remaining condition
                                    |  and t1.b > ndFunc(t2.b)
+                                   |ON CONFLICT DO DEDUPLICATE
                                    |""".stripMargin)
 
     if (tryResolve) {
@@ -772,6 +735,7 @@ class NonDeterministicDagTest(nonDeterministicUpdateStrategy: NonDeterministicUp
            |) t1 left join dim_with_pk for system_time as of t1.proctime as t2
            |on t1.a = t2.a
            |  and t1.b > UNIX_TIMESTAMP() - 300
+           |ON CONFLICT DO DEDUPLICATE
            |""".stripMargin)
 
     // use builtin temporal function
@@ -797,6 +761,7 @@ class NonDeterministicDagTest(nonDeterministicUpdateStrategy: NonDeterministicUp
            |  select *, DATE_FORMAT(CURRENT_TIMESTAMP, 'yyMMdd') `day` from cdc
            |) t
            |group by `day`, a
+           |on conflict do deduplicate
            |""".stripMargin)
 
     if (tryResolve) {
@@ -817,6 +782,7 @@ class NonDeterministicDagTest(nonDeterministicUpdateStrategy: NonDeterministicUp
                                                                         |  ndFunc(a), count(*) cnt, c
                                                                         |from cdc
                                                                         |group by ndFunc(a), c
+                                                                        |ON CONFLICT DO DEDUPLICATE
                                                                         |""".stripMargin)
 
     if (tryResolve) {
@@ -842,6 +808,7 @@ class NonDeterministicDagTest(nonDeterministicUpdateStrategy: NonDeterministicUp
            |) t
            |where rn = 1
            |group by a, DATE_FORMAT(CURRENT_TIMESTAMP, 'yyMMdd')
+           |ON CONFLICT DO DEDUPLICATE
            |""".stripMargin)
 
     if (tryResolve) {
@@ -1036,6 +1003,7 @@ class NonDeterministicDagTest(nonDeterministicUpdateStrategy: NonDeterministicUp
                                  |insert into sink_with_pk
                                  |select metadata_1, b, metadata_2
                                  |from upsert_src_with_meta
+                                 |ON CONFLICT DO DEDUPLICATE
                                  |""".stripMargin)
   }
 
@@ -1136,6 +1104,7 @@ class NonDeterministicDagTest(nonDeterministicUpdateStrategy: NonDeterministicUp
         |  ,ndAggFunc(a) OVER (PARTITION BY a ORDER BY proctime
         |    ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) nd
         |FROM T1
+        |ON CONFLICT DO DEDUPLICATE
       """.stripMargin
     )
   }
@@ -1274,6 +1243,7 @@ class NonDeterministicDagTest(nonDeterministicUpdateStrategy: NonDeterministicUp
                                    |union
                                    |select a, b, c, metadata_3
                                    |from cdc_with_meta
+                                   |ON CONFLICT DO DEDUPLICATE
                                    |""".stripMargin)
 
     if (tryResolve) {
@@ -1296,6 +1266,7 @@ class NonDeterministicDagTest(nonDeterministicUpdateStrategy: NonDeterministicUp
                                    |union all
                                    |select a, b, c, metadata_3
                                    |from cdc_with_meta
+                                   |ON CONFLICT DO DEDUPLICATE
                                    |""".stripMargin)
 
     if (tryResolve) {
@@ -1462,6 +1433,7 @@ class NonDeterministicDagTest(nonDeterministicUpdateStrategy: NonDeterministicUp
            |  from cdc
            |) t2
            |  on t1.b = t2.b
+           |ON CONFLICT DO DEDUPLICATE
            |""".stripMargin)
 
     if (tryResolve) {
@@ -1612,6 +1584,7 @@ class NonDeterministicDagTest(nonDeterministicUpdateStrategy: NonDeterministicUp
            |now()
            |FROM t_order AS ord
            |LEFT JOIN t_logistics AS logistics ON ord.order_id=logistics.order_id
+           |ON CONFLICT DO DEDUPLICATE
            |""".stripMargin)
 
     if (tryResolve) {
@@ -1626,68 +1599,80 @@ class NonDeterministicDagTest(nonDeterministicUpdateStrategy: NonDeterministicUp
 
   @TestTemplate
   def testProctimeDedupOnCdcWithMetadataSinkWithPk(): Unit = {
-    // TODO this should be updated after StreamPhysicalDeduplicate supports consuming update
-    assertThatThrownBy(
-      () =>
-        util.verifyExecPlanInsert(
-          """
-            |insert into sink_with_pk
-            |SELECT a, metadata_3, c
-            |FROM (
-            |  SELECT *,
-            |    ROW_NUMBER() OVER (PARTITION BY a ORDER BY PROCTIME() ASC) as rowNum
-            |  FROM cdc_with_meta
-            |)
-            |WHERE rowNum = 1
-      """.stripMargin))
-      .hasMessageContaining(
-        "StreamPhysicalDeduplicate doesn't support consuming update and delete changes")
-      .isInstanceOf[TableException]
+    // now deduplicate query with updating will translate to retract rank
+    val callable: ThrowingCallable = () =>
+      util.verifyExecPlanInsert(
+        """
+          |insert into sink_with_pk
+          |SELECT a, metadata_3, c
+          |FROM (
+          |  SELECT *,
+          |    ROW_NUMBER() OVER (PARTITION BY a ORDER BY PROCTIME() ASC) as rowNum
+          |  FROM cdc_with_meta
+          |)
+          |WHERE rowNum = 1
+      """.stripMargin)
+
+    if (tryResolve) {
+      assertThatThrownBy(callable)
+        .hasMessageContaining(
+          "The column(s): $7(generated by non-deterministic function: PROCTIME ) can not satisfy the determinism requirement")
+        .isInstanceOf[TableException]
+    } else {
+      assertThatCode(callable).doesNotThrowAnyException()
+    }
   }
 
   @TestTemplate
   def testProctimeDedupOnCdcWithMetadataSinkWithoutPk(): Unit = {
-    // TODO this should be updated after StreamPhysicalDeduplicate supports consuming update
-    assertThatThrownBy(
-      () =>
-        util.verifyExecPlanInsert(
-          """
-            |insert into sink_without_pk
-            |SELECT a, metadata_3, c
-            |FROM (
-            |  SELECT *,
-            |    ROW_NUMBER() OVER (PARTITION BY a ORDER BY PROCTIME() ASC) as rowNum
-            |  FROM cdc_with_meta
-            |)
-            |WHERE rowNum = 1
-      """.stripMargin
-        ))
-      .hasMessageContaining(
-        "StreamPhysicalDeduplicate doesn't support consuming update and delete changes")
-      .isInstanceOf[TableException]
+    // now deduplicate query with updating will translate to retract rank
+    val callable: ThrowingCallable = () =>
+      util.verifyExecPlanInsert(
+        """
+          |insert into sink_without_pk
+          |SELECT a, metadata_3, c
+          |FROM (
+          |  SELECT *,
+          |    ROW_NUMBER() OVER (PARTITION BY a ORDER BY PROCTIME() ASC) as rowNum
+          |  FROM cdc_with_meta
+          |)
+          |WHERE rowNum = 1
+      """.stripMargin)
 
+    if (tryResolve) {
+      assertThatThrownBy(callable)
+        .hasMessageContaining(
+          "The column(s): $7(generated by non-deterministic function: PROCTIME ) can not satisfy the determinism requirement")
+        .isInstanceOf[TableException]
+    } else {
+      assertThatCode(callable).doesNotThrowAnyException()
+    }
   }
 
   @TestTemplate
   def testRowtimeDedupOnCdcWithMetadataSinkWithPk(): Unit = {
-    // TODO this should be updated after StreamPhysicalDeduplicate supports consuming update
-    assertThatThrownBy(
-      () =>
-        util.verifyExecPlanInsert(
-          """
-            |insert into sink_with_pk
-            |SELECT a, b, c
-            |FROM (
-            |  SELECT *,
-            |    ROW_NUMBER() OVER (PARTITION BY a ORDER BY op_ts ASC) as rowNum
-            |  FROM cdc_with_meta_and_wm
-            |)
-            |WHERE rowNum = 1
-      """.stripMargin
-        ))
-      .hasMessageContaining(
-        "StreamPhysicalDeduplicate doesn't support consuming update and delete changes")
-      .isInstanceOf[TableException]
+    // now deduplicate query with updating will translate to retract rank
+    val callable: ThrowingCallable = () =>
+      util.verifyExecPlanInsert(
+        """
+          |insert into sink_with_pk
+          |SELECT a, b, c
+          |FROM (
+          |  SELECT *,
+          |    ROW_NUMBER() OVER (PARTITION BY a ORDER BY op_ts ASC) as rowNum
+          |  FROM cdc_with_meta_and_wm
+          |)
+          |WHERE rowNum = 1
+      """.stripMargin)
+
+    if (tryResolve) {
+      assertThatThrownBy(callable)
+        .hasMessageContaining(
+          "The metadata column(s): 'op_ts' in cdc source may cause wrong result or error on downstream operators")
+        .isInstanceOf[TableException]
+    } else {
+      assertThatCode(callable).doesNotThrowAnyException()
+    }
   }
 
   @TestTemplate
@@ -1915,6 +1900,7 @@ class NonDeterministicDagTest(nonDeterministicUpdateStrategy: NonDeterministicUp
         |DEFINE
         |  A AS A.a > 1
         |) AS T1
+        |ON CONFLICT DO DEDUPLICATE
         |""".stripMargin
     )
   }

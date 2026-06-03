@@ -18,13 +18,14 @@
 
 package org.apache.flink.runtime.taskexecutor.slot;
 
+import org.apache.flink.api.common.ApplicationID;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.clusterframework.types.SlotID;
 
-import org.apache.flink.shaded.guava32.com.google.common.collect.Iterables;
+import org.apache.flink.shaded.guava33.com.google.common.collect.Iterables;
 
 import org.apache.commons.io.FileUtils;
 import org.junit.jupiter.api.Test;
@@ -144,6 +145,7 @@ class FileSlotAllocationSnapshotPersistenceServiceTest {
                     new SlotAllocationSnapshot(
                             new SlotID(resourceId, slotIndex),
                             new JobID(),
+                            new ApplicationID(),
                             "foobar",
                             new AllocationID(),
                             ResourceProfile.UNKNOWN));

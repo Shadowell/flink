@@ -24,7 +24,7 @@ import org.apache.flink.api.common.TaskInfo;
 import org.apache.flink.api.common.functions.AggregateFunction;
 import org.apache.flink.api.common.functions.ReduceFunction;
 import org.apache.flink.api.common.functions.SerializerFactory;
-import org.apache.flink.api.common.serialization.SerializerConfig;
+import org.apache.flink.api.common.serialization.SerializerConfigImpl;
 import org.apache.flink.api.common.state.AggregatingStateDescriptor;
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
@@ -59,9 +59,8 @@ import org.apache.flink.runtime.state.KeyedStateBackend;
 import org.apache.flink.runtime.state.KeyedStateBackendParametersImpl;
 import org.apache.flink.runtime.state.VoidNamespace;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
-import org.apache.flink.runtime.state.memory.MemoryStateBackend;
+import org.apache.flink.runtime.state.hashmap.HashMapStateBackend;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
-import org.apache.flink.runtime.state.v2.DefaultKeyedStateStoreV2;
 import org.apache.flink.streaming.api.graph.StreamConfig;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.tasks.StreamTask;
@@ -70,7 +69,7 @@ import org.apache.flink.streaming.util.CollectorOutput;
 import org.apache.flink.streaming.util.MockStreamTaskBuilder;
 
 import org.junit.jupiter.api.Test;
-import org.mockito.Matchers;
+import org.mockito.ArgumentMatchers;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
@@ -92,11 +91,11 @@ class StreamingRuntimeContextTest {
     void testValueStateInstantiation() throws Exception {
 
         final ExecutionConfig config = new ExecutionConfig();
-        config.getSerializerConfig().registerKryoType(Path.class);
+        ((SerializerConfigImpl) config.getSerializerConfig()).registerKryoType(Path.class);
 
         final AtomicReference<Object> descriptorCapture = new AtomicReference<>();
 
-        StreamingRuntimeContext context = createRuntimeContext(descriptorCapture, config);
+        StreamingRuntimeContext context = createRuntimeContext(descriptorCapture, config, false);
         ValueStateDescriptor<TaskInfo> descr = new ValueStateDescriptor<>("name", TaskInfo.class);
         context.getState(descr);
 
@@ -113,11 +112,11 @@ class StreamingRuntimeContextTest {
     void testReducingStateInstantiation() throws Exception {
 
         final ExecutionConfig config = new ExecutionConfig();
-        config.getSerializerConfig().registerKryoType(Path.class);
+        ((SerializerConfigImpl) config.getSerializerConfig()).registerKryoType(Path.class);
 
         final AtomicReference<Object> descriptorCapture = new AtomicReference<>();
 
-        StreamingRuntimeContext context = createRuntimeContext(descriptorCapture, config);
+        StreamingRuntimeContext context = createRuntimeContext(descriptorCapture, config, false);
 
         @SuppressWarnings("unchecked")
         ReduceFunction<TaskInfo> reducer = (ReduceFunction<TaskInfo>) mock(ReduceFunction.class);
@@ -139,11 +138,11 @@ class StreamingRuntimeContextTest {
     @Test
     void testAggregatingStateInstantiation() throws Exception {
         final ExecutionConfig config = new ExecutionConfig();
-        config.getSerializerConfig().registerKryoType(Path.class);
+        ((SerializerConfigImpl) config.getSerializerConfig()).registerKryoType(Path.class);
 
         final AtomicReference<Object> descriptorCapture = new AtomicReference<>();
 
-        StreamingRuntimeContext context = createRuntimeContext(descriptorCapture, config);
+        StreamingRuntimeContext context = createRuntimeContext(descriptorCapture, config, false);
 
         @SuppressWarnings("unchecked")
         AggregateFunction<String, TaskInfo, String> aggregate =
@@ -168,11 +167,11 @@ class StreamingRuntimeContextTest {
     void testListStateInstantiation() throws Exception {
 
         final ExecutionConfig config = new ExecutionConfig();
-        config.getSerializerConfig().registerKryoType(Path.class);
+        ((SerializerConfigImpl) config.getSerializerConfig()).registerKryoType(Path.class);
 
         final AtomicReference<Object> descriptorCapture = new AtomicReference<>();
 
-        StreamingRuntimeContext context = createRuntimeContext(descriptorCapture, config);
+        StreamingRuntimeContext context = createRuntimeContext(descriptorCapture, config, false);
 
         ListStateDescriptor<TaskInfo> descr = new ListStateDescriptor<>("name", TaskInfo.class);
         context.getListState(descr);
@@ -209,11 +208,11 @@ class StreamingRuntimeContextTest {
     void testMapStateInstantiation() throws Exception {
 
         final ExecutionConfig config = new ExecutionConfig();
-        config.getSerializerConfig().registerKryoType(Path.class);
+        ((SerializerConfigImpl) config.getSerializerConfig()).registerKryoType(Path.class);
 
         final AtomicReference<Object> descriptorCapture = new AtomicReference<>();
 
-        StreamingRuntimeContext context = createRuntimeContext(descriptorCapture, config);
+        StreamingRuntimeContext context = createRuntimeContext(descriptorCapture, config, false);
 
         MapStateDescriptor<String, TaskInfo> descr =
                 new MapStateDescriptor<>("name", String.class, TaskInfo.class);
@@ -252,19 +251,20 @@ class StreamingRuntimeContextTest {
     void testV2ValueStateInstantiation() throws Exception {
 
         final ExecutionConfig config = new ExecutionConfig();
-        SerializerConfig serializerConfig = config.getSerializerConfig();
+        SerializerConfigImpl serializerConfig = (SerializerConfigImpl) config.getSerializerConfig();
         serializerConfig.registerKryoType(Path.class);
 
         final AtomicReference<Object> descriptorCapture = new AtomicReference<>();
 
-        StreamingRuntimeContext context = createRuntimeContext(descriptorCapture, config);
-        org.apache.flink.runtime.state.v2.ValueStateDescriptor<TaskInfo> descr =
-                new org.apache.flink.runtime.state.v2.ValueStateDescriptor<>(
-                        "name", TypeInformation.of(TaskInfo.class), serializerConfig);
+        StreamingRuntimeContext context = createRuntimeContext(descriptorCapture, config, true);
+        org.apache.flink.api.common.state.v2.ValueStateDescriptor<TaskInfo> descr =
+                new org.apache.flink.api.common.state.v2.ValueStateDescriptor<>(
+                        "name", TypeInformation.of(TaskInfo.class));
         context.getValueState(descr);
 
-        org.apache.flink.runtime.state.v2.ValueStateDescriptor<?> descrIntercepted =
-                (org.apache.flink.runtime.state.v2.ValueStateDescriptor<?>) descriptorCapture.get();
+        org.apache.flink.api.common.state.v2.ValueStateDescriptor<?> descrIntercepted =
+                (org.apache.flink.api.common.state.v2.ValueStateDescriptor<?>)
+                        descriptorCapture.get();
         TypeSerializer<?> serializer = descrIntercepted.getSerializer();
 
         // check that the Path class is really registered, i.e., the execution config was applied
@@ -276,19 +276,20 @@ class StreamingRuntimeContextTest {
     @Test
     void testV2ListStateInstantiation() throws Exception {
         final ExecutionConfig config = new ExecutionConfig();
-        SerializerConfig serializerConfig = config.getSerializerConfig();
+        SerializerConfigImpl serializerConfig = (SerializerConfigImpl) config.getSerializerConfig();
         serializerConfig.registerKryoType(Path.class);
 
         final AtomicReference<Object> descriptorCapture = new AtomicReference<>();
 
-        StreamingRuntimeContext context = createRuntimeContext(descriptorCapture, config);
-        org.apache.flink.runtime.state.v2.ListStateDescriptor<TaskInfo> descr =
-                new org.apache.flink.runtime.state.v2.ListStateDescriptor<>(
-                        "name", TypeInformation.of(TaskInfo.class), serializerConfig);
+        StreamingRuntimeContext context = createRuntimeContext(descriptorCapture, config, true);
+        org.apache.flink.api.common.state.v2.ListStateDescriptor<TaskInfo> descr =
+                new org.apache.flink.api.common.state.v2.ListStateDescriptor<>(
+                        "name", TypeInformation.of(TaskInfo.class));
         context.getListState(descr);
 
-        org.apache.flink.runtime.state.v2.ListStateDescriptor<?> descrIntercepted =
-                (org.apache.flink.runtime.state.v2.ListStateDescriptor<?>) descriptorCapture.get();
+        org.apache.flink.api.common.state.v2.ListStateDescriptor<?> descrIntercepted =
+                (org.apache.flink.api.common.state.v2.ListStateDescriptor<?>)
+                        descriptorCapture.get();
         TypeSerializer<?> serializer = descrIntercepted.getSerializer();
 
         // check that the Path class is really registered, i.e., the execution config was applied
@@ -300,22 +301,21 @@ class StreamingRuntimeContextTest {
     @Test
     void testV2MapStateInstantiation() throws Exception {
         final ExecutionConfig config = new ExecutionConfig();
-        SerializerConfig serializerConfig = config.getSerializerConfig();
+        SerializerConfigImpl serializerConfig = (SerializerConfigImpl) config.getSerializerConfig();
         serializerConfig.registerKryoType(Path.class);
 
         final AtomicReference<Object> descriptorCapture = new AtomicReference<>();
 
-        StreamingRuntimeContext context = createRuntimeContext(descriptorCapture, config);
-        org.apache.flink.runtime.state.v2.MapStateDescriptor<String, TaskInfo> descr =
-                new org.apache.flink.runtime.state.v2.MapStateDescriptor<>(
+        StreamingRuntimeContext context = createRuntimeContext(descriptorCapture, config, true);
+        org.apache.flink.api.common.state.v2.MapStateDescriptor<String, TaskInfo> descr =
+                new org.apache.flink.api.common.state.v2.MapStateDescriptor<>(
                         "name",
                         TypeInformation.of(String.class),
-                        TypeInformation.of(TaskInfo.class),
-                        serializerConfig);
+                        TypeInformation.of(TaskInfo.class));
         context.getMapState(descr);
 
-        org.apache.flink.runtime.state.v2.MapStateDescriptor<?, ?> descrIntercepted =
-                (org.apache.flink.runtime.state.v2.MapStateDescriptor<?, ?>)
+        org.apache.flink.api.common.state.v2.MapStateDescriptor<?, ?> descrIntercepted =
+                (org.apache.flink.api.common.state.v2.MapStateDescriptor<?, ?>)
                         descriptorCapture.get();
         TypeSerializer<?> serializer = descrIntercepted.getSerializer();
 
@@ -328,24 +328,24 @@ class StreamingRuntimeContextTest {
     @Test
     void testV2ReducingStateInstantiation() throws Exception {
         final ExecutionConfig config = new ExecutionConfig();
-        SerializerConfig serializerConfig = config.getSerializerConfig();
+        SerializerConfigImpl serializerConfig = (SerializerConfigImpl) config.getSerializerConfig();
         serializerConfig.registerKryoType(Path.class);
 
         final AtomicReference<Object> descriptorCapture = new AtomicReference<>();
 
-        StreamingRuntimeContext context = createRuntimeContext(descriptorCapture, config);
+        StreamingRuntimeContext context = createRuntimeContext(descriptorCapture, config, true);
 
         @SuppressWarnings("unchecked")
         ReduceFunction<TaskInfo> reducer = (ReduceFunction<TaskInfo>) mock(ReduceFunction.class);
 
-        org.apache.flink.runtime.state.v2.ReducingStateDescriptor<TaskInfo> descr =
-                new org.apache.flink.runtime.state.v2.ReducingStateDescriptor<>(
-                        "name", reducer, TypeInformation.of(TaskInfo.class), serializerConfig);
+        org.apache.flink.api.common.state.v2.ReducingStateDescriptor<TaskInfo> descr =
+                new org.apache.flink.api.common.state.v2.ReducingStateDescriptor<>(
+                        "name", reducer, TypeInformation.of(TaskInfo.class));
 
         context.getReducingState(descr);
 
-        org.apache.flink.runtime.state.v2.ReducingStateDescriptor<?> descrIntercepted =
-                (org.apache.flink.runtime.state.v2.ReducingStateDescriptor<?>)
+        org.apache.flink.api.common.state.v2.ReducingStateDescriptor<?> descrIntercepted =
+                (org.apache.flink.api.common.state.v2.ReducingStateDescriptor<?>)
                         descriptorCapture.get();
         TypeSerializer<?> serializer = descrIntercepted.getSerializer();
 
@@ -358,29 +358,26 @@ class StreamingRuntimeContextTest {
     @Test
     void testV2AggregatingStateInstantiation() throws Exception {
         final ExecutionConfig config = new ExecutionConfig();
-        SerializerConfig serializerConfig = config.getSerializerConfig();
+        SerializerConfigImpl serializerConfig = (SerializerConfigImpl) config.getSerializerConfig();
         serializerConfig.registerKryoType(Path.class);
 
         final AtomicReference<Object> descriptorCapture = new AtomicReference<>();
 
-        StreamingRuntimeContext context = createRuntimeContext(descriptorCapture, config);
+        StreamingRuntimeContext context = createRuntimeContext(descriptorCapture, config, true);
 
         @SuppressWarnings("unchecked")
         AggregateFunction<String, TaskInfo, String> aggregate =
                 (AggregateFunction<String, TaskInfo, String>) mock(AggregateFunction.class);
 
-        org.apache.flink.runtime.state.v2.AggregatingStateDescriptor<String, TaskInfo, String>
+        org.apache.flink.api.common.state.v2.AggregatingStateDescriptor<String, TaskInfo, String>
                 descr =
-                        new org.apache.flink.runtime.state.v2.AggregatingStateDescriptor<>(
-                                "name",
-                                aggregate,
-                                TypeInformation.of(TaskInfo.class),
-                                serializerConfig);
+                        new org.apache.flink.api.common.state.v2.AggregatingStateDescriptor<>(
+                                "name", aggregate, TypeInformation.of(TaskInfo.class));
 
         context.getAggregatingState(descr);
 
-        org.apache.flink.runtime.state.v2.AggregatingStateDescriptor<?, ?, ?> descrIntercepted =
-                (org.apache.flink.runtime.state.v2.AggregatingStateDescriptor<?, ?, ?>)
+        org.apache.flink.api.common.state.v2.AggregatingStateDescriptor<?, ?, ?> descrIntercepted =
+                (org.apache.flink.api.common.state.v2.AggregatingStateDescriptor<?, ?, ?>)
                         descriptorCapture.get();
         TypeSerializer<?> serializer = descrIntercepted.getSerializer();
 
@@ -405,11 +402,13 @@ class StreamingRuntimeContextTest {
     }
 
     private StreamingRuntimeContext createRuntimeContext(
-            AtomicReference<Object> descriptorCapture, ExecutionConfig config) throws Exception {
+            AtomicReference<Object> descriptorCapture, ExecutionConfig config, boolean stateV2)
+            throws Exception {
         return createDescriptorCapturingMockOp(
                         descriptorCapture,
                         config,
-                        MockEnvironment.builder().setExecutionConfig(config).build())
+                        MockEnvironment.builder().setExecutionConfig(config).build(),
+                        stateV2)
                 .getRuntimeContext();
     }
 
@@ -428,28 +427,34 @@ class StreamingRuntimeContextTest {
     private static AbstractStreamOperator<?> createDescriptorCapturingMockOp(
             final AtomicReference<Object> ref,
             final ExecutionConfig config,
-            Environment environment)
+            Environment environment,
+            boolean stateV2)
             throws Exception {
 
+        StreamConfig streamConfig = new StreamConfig(new Configuration());
+        streamConfig.setOperatorID(new OperatorID());
         AbstractStreamOperator<?> operator =
-                new AbstractStreamOperator<Object>() {
+                new AbstractStreamOperator<Object>(
+                        new StreamOperatorParameters<>(
+                                new MockStreamTaskBuilder(environment)
+                                        .setExecutionConfig(config)
+                                        .build(),
+                                streamConfig,
+                                new CollectorOutput<>(new ArrayList<>()),
+                                TestProcessingTimeService::new,
+                                null,
+                                null)) {
                     @Override
-                    public void setup(
+                    protected void setup(
                             StreamTask<?, ?> containingTask,
                             StreamConfig config,
                             Output<StreamRecord<Object>> output) {
                         super.setup(containingTask, config, output);
                     }
                 };
-        StreamConfig streamConfig = new StreamConfig(new Configuration());
-        streamConfig.setOperatorID(new OperatorID());
-        operator.setup(
-                new MockStreamTaskBuilder(environment).setExecutionConfig(config).build(),
-                streamConfig,
-                new CollectorOutput<>(new ArrayList<>()));
 
         StreamTaskStateInitializer streamTaskStateManager =
-                new StreamTaskStateInitializerImpl(environment, new MemoryStateBackend());
+                new StreamTaskStateInitializerImpl(environment, new HashMapStateBackend());
 
         KeyedStateBackend keyedStateBackend = mock(KeyedStateBackend.class);
 
@@ -458,6 +463,7 @@ class StreamingRuntimeContextTest {
         DefaultKeyedStateStore keyedStateStore =
                 new DefaultKeyedStateStore(
                         keyedStateBackend,
+                        asyncKeyedStateBackend,
                         new SerializerFactory() {
                             @Override
                             public <T> TypeSerializer<T> createSerializer(
@@ -475,7 +481,9 @@ class StreamingRuntimeContextTest {
                                 })
                 .when(keyedStateBackend)
                 .getPartitionedState(
-                        Matchers.any(), any(TypeSerializer.class), any(StateDescriptor.class));
+                        ArgumentMatchers.any(),
+                        any(TypeSerializer.class),
+                        any(StateDescriptor.class));
 
         doAnswer(
                         (Answer<Object>)
@@ -484,15 +492,16 @@ class StreamingRuntimeContextTest {
                                     return null;
                                 })
                 .when(asyncKeyedStateBackend)
-                .createState(
+                .getOrCreateKeyedState(
                         any(),
                         any(TypeSerializer.class),
-                        any(org.apache.flink.runtime.state.v2.StateDescriptor.class));
+                        any(org.apache.flink.api.common.state.v2.StateDescriptor.class));
 
         operator.initializeState(streamTaskStateManager);
+        if (stateV2) {
+            keyedStateStore.setSupportKeyedStateApiSetV2();
+        }
         operator.getRuntimeContext().setKeyedStateStore(keyedStateStore);
-        operator.getRuntimeContext()
-                .setKeyedStateStoreV2(new DefaultKeyedStateStoreV2(asyncKeyedStateBackend));
 
         return operator;
     }
@@ -530,7 +539,7 @@ class StreamingRuntimeContextTest {
                                                 invocationOnMock.getArguments()[2];
 
                                 AbstractStateBackend abstractStateBackend =
-                                        new MemoryStateBackend();
+                                        new HashMapStateBackend();
                                 Environment env = new DummyEnvironment("test_task", 1, 0);
                                 JobID jobID = new JobID();
                                 KeyGroupRange keyGroupRange = new KeyGroupRange(0, 0);
@@ -561,7 +570,9 @@ class StreamingRuntimeContextTest {
                         })
                 .when(keyedStateBackend)
                 .getPartitionedState(
-                        Matchers.any(), any(TypeSerializer.class), any(ListStateDescriptor.class));
+                        ArgumentMatchers.any(),
+                        any(TypeSerializer.class),
+                        any(ListStateDescriptor.class));
 
         when(operatorMock.getKeyedStateStore()).thenReturn(keyedStateStore);
         when(operatorMock.getOperatorID()).thenReturn(new OperatorID());
@@ -601,7 +612,7 @@ class StreamingRuntimeContextTest {
                                                 invocationOnMock.getArguments()[2];
 
                                 AbstractStateBackend abstractStateBackend =
-                                        new MemoryStateBackend();
+                                        new HashMapStateBackend();
                                 Environment env = new DummyEnvironment("test_task", 1, 0);
                                 JobID jobID = new JobID();
                                 KeyGroupRange keyGroupRange = new KeyGroupRange(0, 0);
@@ -632,7 +643,9 @@ class StreamingRuntimeContextTest {
                         })
                 .when(keyedStateBackend)
                 .getPartitionedState(
-                        Matchers.any(), any(TypeSerializer.class), any(MapStateDescriptor.class));
+                        ArgumentMatchers.any(),
+                        any(TypeSerializer.class),
+                        any(MapStateDescriptor.class));
 
         when(operatorMock.getKeyedStateStore()).thenReturn(keyedStateStore);
         when(operatorMock.getOperatorID()).thenReturn(new OperatorID());

@@ -42,7 +42,7 @@ import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
 import org.apache.flink.runtime.state.AbstractStateBackend;
 import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.state.KeyedStateBackendParametersImpl;
-import org.apache.flink.runtime.state.memory.MemoryStateBackend;
+import org.apache.flink.runtime.state.hashmap.HashMapStateBackend;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 
 import org.apache.flink.shaded.netty4.io.netty.bootstrap.Bootstrap;
@@ -53,7 +53,8 @@ import org.apache.flink.shaded.netty4.io.netty.channel.ChannelHandlerContext;
 import org.apache.flink.shaded.netty4.io.netty.channel.ChannelInboundHandlerAdapter;
 import org.apache.flink.shaded.netty4.io.netty.channel.ChannelInitializer;
 import org.apache.flink.shaded.netty4.io.netty.channel.EventLoopGroup;
-import org.apache.flink.shaded.netty4.io.netty.channel.nio.NioEventLoopGroup;
+import org.apache.flink.shaded.netty4.io.netty.channel.MultiThreadIoEventLoopGroup;
+import org.apache.flink.shaded.netty4.io.netty.channel.nio.NioIoHandler;
 import org.apache.flink.shaded.netty4.io.netty.channel.socket.SocketChannel;
 import org.apache.flink.shaded.netty4.io.netty.channel.socket.nio.NioSocketChannel;
 import org.apache.flink.shaded.netty4.io.netty.handler.codec.LengthFieldBasedFrameDecoder;
@@ -74,7 +75,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 class KvStateServerTest {
 
     // Thread pool for client bootstrap (shared between tests)
-    private static final NioEventLoopGroup NIO_GROUP = new NioEventLoopGroup();
+    private static final MultiThreadIoEventLoopGroup NIO_GROUP =
+            new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
 
     private static final int TIMEOUT_MILLIS = 10000;
 
@@ -107,7 +109,7 @@ class KvStateServerTest {
 
             InetSocketAddress serverAddress = server.getServerAddress();
             int numKeyGroups = 1;
-            AbstractStateBackend abstractBackend = new MemoryStateBackend();
+            AbstractStateBackend abstractBackend = new HashMapStateBackend();
             DummyEnvironment dummyEnv = new DummyEnvironment("test", 1, 0);
             dummyEnv.setKvStateRegistry(registry);
             final JobID jobId = new JobID();

@@ -36,6 +36,7 @@ import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.common.utils.Bytes;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.Logger;
@@ -61,7 +62,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /** E2E Test for SqlClient. */
 @Testcontainers
-public class SqlClientITCase {
+class SqlClientITCase {
 
     private static final Logger LOG = LoggerFactory.getLogger(SqlClientITCase.class);
 
@@ -75,16 +76,16 @@ public class SqlClientITCase {
     private final Path sqlConnectorUpsertTestJar =
             ResourceTestUtils.getResource(".*flink-test-utils.*\\.jar");
 
-    public static final Network NETWORK = Network.newNetwork();
+    private static final Network NETWORK = Network.newNetwork();
 
     @Container
-    public static final KafkaContainer KAFKA =
+    private static final KafkaContainer KAFKA =
             new KafkaContainer(DockerImageName.parse(DockerImageVersions.KAFKA))
                     .withNetwork(NETWORK)
                     .withNetworkAliases(INTER_CONTAINER_KAFKA_ALIAS)
                     .withLogConsumer(LOG_CONSUMER);
 
-    public final FlinkContainers flink =
+    private final FlinkContainers flink =
             FlinkContainers.builder()
                     .withFlinkContainersSettings(
                             FlinkContainersSettings.builder()
@@ -188,6 +189,7 @@ public class SqlClientITCase {
     }
 
     @Test
+    @Disabled("Disable due to Kafka connector need to release a new version 2.0.")
     void testMatchRecognize() throws Exception {
         String outputFilepath = "/flink/records-matchrecognize.out";
 

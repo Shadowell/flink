@@ -28,8 +28,10 @@ import org.apache.flink.kubernetes.utils.KubernetesUtils;
 import org.apache.flink.runtime.blob.BlobStoreService;
 import org.apache.flink.runtime.checkpoint.CheckpointRecoveryFactory;
 import org.apache.flink.runtime.highavailability.AbstractHaServices;
+import org.apache.flink.runtime.highavailability.FileSystemApplicationResultStore;
 import org.apache.flink.runtime.highavailability.FileSystemJobResultStore;
-import org.apache.flink.runtime.jobmanager.JobGraphStore;
+import org.apache.flink.runtime.jobmanager.ApplicationStore;
+import org.apache.flink.runtime.jobmanager.ExecutionPlanStore;
 import org.apache.flink.runtime.leaderelection.LeaderElectionDriverFactory;
 import org.apache.flink.runtime.leaderretrieval.DefaultLeaderRetrievalService;
 import org.apache.flink.runtime.leaderretrieval.LeaderRetrievalService;
@@ -104,7 +106,8 @@ public class KubernetesLeaderElectionHaServices extends AbstractHaServices {
                         configuration),
                 ioExecutor,
                 blobStoreService,
-                FileSystemJobResultStore.fromConfiguration(configuration, ioExecutor));
+                FileSystemJobResultStore.fromConfiguration(configuration, ioExecutor),
+                FileSystemApplicationResultStore.fromConfiguration(configuration, ioExecutor));
 
         this.kubeClient = checkNotNull(kubeClient);
         this.clusterId = checkNotNull(clusterId);
@@ -151,8 +154,14 @@ public class KubernetesLeaderElectionHaServices extends AbstractHaServices {
     }
 
     @Override
-    protected JobGraphStore createJobGraphStore() throws Exception {
-        return KubernetesUtils.createJobGraphStore(
+    protected ExecutionPlanStore createExecutionPlanStore() throws Exception {
+        return KubernetesUtils.createExecutionPlanStore(
+                configuration, kubeClient, getClusterConfigMap(), lockIdentity);
+    }
+
+    @Override
+    protected ApplicationStore createApplicationStore() throws Exception {
+        return KubernetesUtils.createApplicationStore(
                 configuration, kubeClient, getClusterConfigMap(), lockIdentity);
     }
 

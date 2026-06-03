@@ -17,7 +17,6 @@
  */
 package org.apache.flink.table.planner.plan.rules.logical
 
-import org.apache.flink.api.scala._
 import org.apache.flink.table.api._
 import org.apache.flink.table.planner.plan.nodes.FlinkConventions
 import org.apache.flink.table.planner.plan.optimize.program._
@@ -227,6 +226,12 @@ class PythonCalcSplitRuleTest extends TableTestBase {
   @Test
   def testPythonFunctionWithCompositeWhereClause(): Unit = {
     val sqlQuery = "SELECT a + 1 FROM MyTable where RowJavaFunc(pyFunc5(a).f0).f0 is NULL and b > 0"
+    util.verifyRelPlan(sqlQuery)
+  }
+
+  @Test
+  def testSamePythonFunctionUsedInBothSelectAndWhere(): Unit = {
+    val sqlQuery = "SELECT a, pyFunc1(a, c) FROM MyTable where pyFunc1(a, c) > 0"
     util.verifyRelPlan(sqlQuery)
   }
 }

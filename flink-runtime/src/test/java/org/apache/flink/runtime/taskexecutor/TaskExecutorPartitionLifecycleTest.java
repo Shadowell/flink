@@ -17,9 +17,9 @@
 
 package org.apache.flink.runtime.taskexecutor;
 
+import org.apache.flink.api.common.ApplicationID;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.JobID;
-import org.apache.flink.api.common.time.Time;
 import org.apache.flink.configuration.BatchExecutionOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.TaskManagerOptions;
@@ -109,7 +109,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** Tests for the partition-lifecycle logic in the {@link TaskExecutor}. */
 class TaskExecutorPartitionLifecycleTest {
 
-    private static final Time timeout = Time.seconds(10L);
+    private static final Duration timeout = Duration.ofSeconds(10L);
 
     private static TestingRpcService rpc;
 
@@ -120,6 +120,7 @@ class TaskExecutorPartitionLifecycleTest {
     private final SettableLeaderRetrievalService resourceManagerLeaderRetriever =
             new SettableLeaderRetrievalService();
     private final JobID jobId = new JobID();
+    private final ApplicationID applicationId = new ApplicationID();
 
     private Configuration configuration;
 
@@ -612,6 +613,7 @@ class TaskExecutorPartitionLifecycleTest {
                             .requestSlot(
                                     slotStatus.getSlotID(),
                                     jobId,
+                                    applicationId,
                                     taskDeploymentDescriptor.getAllocationId(),
                                     ResourceProfile.ZERO,
                                     jobMasterAddress,
@@ -649,7 +651,7 @@ class TaskExecutorPartitionLifecycleTest {
                                     .getResultPartitionID());
 
             TestingInvokable.sync.releaseBlocker();
-            taskFinishedFuture.get(timeout.getSize(), timeout.getUnit());
+            taskFinishedFuture.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
 
             testAction.accept(
                     jobId, taskResultPartitionDescriptor, taskExecutor, taskExecutorGateway);

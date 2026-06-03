@@ -23,7 +23,7 @@ import org.apache.flink.api.common.functions.RuntimeContext;
 import org.apache.flink.api.common.state.CheckpointListener;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.streaming.api.checkpoint.ListCheckpointed;
-import org.apache.flink.streaming.api.functions.source.RichSourceFunction;
+import org.apache.flink.streaming.api.functions.source.legacy.RichSourceFunction;
 
 import javax.annotation.Nonnegative;
 import javax.annotation.Nonnull;
@@ -33,7 +33,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
-import static org.junit.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 /** Source for window checkpointing IT cases that can introduce artificial failures. */
 public class FailingSource extends RichSourceFunction<Tuple2<Long, IntType>>
@@ -79,7 +79,7 @@ public class FailingSource extends RichSourceFunction<Tuple2<Long, IntType>>
     @Override
     public void open(OpenContext openContext) {
         // non-parallel source
-        assertEquals(1, getRuntimeContext().getTaskInfo().getNumberOfParallelSubtasks());
+        assertThat(getRuntimeContext().getTaskInfo().getNumberOfParallelSubtasks()).isEqualTo(1);
     }
 
     @Override

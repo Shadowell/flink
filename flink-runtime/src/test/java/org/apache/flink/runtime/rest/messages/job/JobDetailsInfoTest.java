@@ -18,6 +18,7 @@
 
 package org.apache.flink.runtime.rest.messages.job;
 
+import org.apache.flink.api.common.ApplicationID;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.runtime.execution.ExecutionState;
@@ -50,7 +51,7 @@ class JobDetailsInfoTest extends RestResponseMarshallingTestBase<JobDetailsInfo>
     protected JobDetailsInfo getTestResponseInstance() throws Exception {
         final Random random = new Random();
         final int numJobVertexDetailsInfos = 4;
-        final String jsonPlan = "{\"id\":\"1234\"}";
+        final JobPlanInfo.Plan plan = new JobPlanInfo.Plan("1234", "", "", new ArrayList<>());
 
         final Map<JobStatus, Long> timestamps = new HashMap<>(JobStatus.values().length);
         final Collection<JobDetailsInfo.JobVertexDetailsInfo> jobVertexInfos =
@@ -72,10 +73,12 @@ class JobDetailsInfoTest extends RestResponseMarshallingTestBase<JobDetailsInfo>
 
         return new JobDetailsInfo(
                 new JobID(),
+                new ApplicationID(),
                 "foobar",
                 true,
                 JobStatus.values()[random.nextInt(JobStatus.values().length)],
                 JobType.STREAMING,
+                null,
                 1L,
                 2L,
                 1L,
@@ -84,7 +87,9 @@ class JobDetailsInfoTest extends RestResponseMarshallingTestBase<JobDetailsInfo>
                 timestamps,
                 jobVertexInfos,
                 jobVerticesPerState,
-                new JobPlanInfo.RawJson(jsonPlan));
+                plan,
+                null,
+                0);
     }
 
     private JobDetailsInfo.JobVertexDetailsInfo createJobVertexDetailsInfo(Random random) {

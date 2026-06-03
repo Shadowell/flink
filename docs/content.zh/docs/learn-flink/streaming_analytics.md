@@ -1,6 +1,6 @@
 ---
 title: 流式分析
-weight: 5
+weight: 2
 type: docs
 ---
 <!--
@@ -83,7 +83,7 @@ Flink 中事件时间的处理取决于 *watermark 生成器*，后者将带有�
 <a name="latency-vs-completeness"></a>
 ### 延迟 VS 正确性
 
-watermarks 给了开发者流处理的一种选择，它们使开发人员在开发应用程序时可以控制延迟和完整性之间的权衡。与批处理不同，批处理中的奢侈之处在于可以在产生任何结果之前完全了解输入，而使用流式传输，我们不被允许等待所有的时间都产生了，才输出排序好的数据，这与流相违背。
+watermarks 给了开发者流处理的一种选择，它们使开发人员可以在延迟和完整性之间进行权衡。与批处理不同，批处理可以在产生结果之前完全了解输入，流处理则需要及时的输出结果，而无法等待所有数据的到来。
 
 我们可以把 watermarks 的边界时间配置的相对较短，从而冒着在输入了解不完全的情况下产生结果的风险-即可能会很快产生错误结果。或者，你可以等待更长的时间，并利用对输入流的更全面的了解来产生结果。
 
@@ -169,18 +169,18 @@ Flink 有一些内置的窗口分配器，如下所示：
 
 * 滚动时间窗口
   * _每分钟页面浏览量_
-  * `TumblingEventTimeWindows.of(Time.minutes(1))`
+  * `TumblingEventTimeWindows.of(Duration.ofMinutes(1))`
 * 滑动时间窗口
   * _每10秒钟计算前1分钟的页面浏览量_
-  * `SlidingEventTimeWindows.of(Time.minutes(1), Time.seconds(10))`
+  * `SlidingEventTimeWindows.of(Duration.ofMinutes(1), Duration.ofSeconds(10))`
 * 会话窗口
   * _每个会话的网页浏览量，其中会话之间的间隔至少为30分钟_
-  * `EventTimeSessionWindows.withGap(Time.minutes(30))`
+  * `EventTimeSessionWindows.withGap(Duration.ofMinutes(30))`
 
-以下都是一些可以使用的间隔时间 `Time.milliseconds(n)`, `Time.seconds(n)`, `Time.minutes(n)`,
- `Time.hours(n)`, 和 `Time.days(n)`。
+以下都是一些可以使用的间隔时间 `Duration.ofMillis(n)`, `Duration.ofSeconds(n)`, `Duration.ofMinutes(n)`,
+ `Duration.ofHours(n)`, 和 `Duration.ofDays(n)`。
 
-基于时间的窗口分配器（包括会话时间）既可以处理 `事件时间`，也可以处理 `处理时间`。这两种基于时间的处理没有哪一个更好，我们必须折衷。使用 `处理时间`，我们必须接受以下限制：
+基于时间的窗口分配器（包括会话窗口）既可以处理 `事件时间`，也可以处理 `处理时间`。这两种基于时间的处理没有哪一个更好，我们必须折中。使用 `处理时间`，我们必须接受以下限制：
 
 * 无法正确处理历史数据,
 * 无法正确处理超过最大无序边界的数据,
@@ -214,7 +214,7 @@ DataStream<SensorReading> input = ...;
 
 input
     .keyBy(x -> x.key)
-    .window(TumblingEventTimeWindows.of(Time.minutes(1)))
+    .window(TumblingEventTimeWindows.of(Duration.ofMinutes(1)))
     .process(new MyWastefulMax());
 
 public static class MyWastefulMax extends ProcessWindowFunction<
@@ -270,7 +270,7 @@ DataStream<SensorReading> input = ...;
 
 input
     .keyBy(x -> x.key)
-    .window(TumblingEventTimeWindows.of(Time.minutes(1)))
+    .window(TumblingEventTimeWindows.of(Duration.ofMinutes(1)))
     .reduce(new MyReducingMax(), new MyWindowFunction());
 
 private static class MyReducingMax implements ReduceFunction<SensorReading> {
@@ -327,7 +327,7 @@ DataStream<Event> lateStream = result.getSideOutput(lateTag);
 stream
     .keyBy(...)
     .window(...)
-    .allowedLateness(Time.seconds(10))
+    .allowedLateness(Duration.ofSeconds(10))
     .process(...);
 ```
 

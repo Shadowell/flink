@@ -23,6 +23,7 @@ import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.functions.KeySelector;
+import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.checkpoint.TaskStateSnapshot;
 import org.apache.flink.runtime.execution.Environment;
@@ -45,7 +46,6 @@ import org.apache.flink.runtime.taskmanager.TaskManagerRuntimeInfo;
 import org.apache.flink.runtime.taskmanager.TestCheckpointResponder;
 import org.apache.flink.runtime.throughput.BufferDebloatConfiguration;
 import org.apache.flink.runtime.util.TestingTaskManagerRuntimeInfo;
-import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.graph.NonChainedOutput;
 import org.apache.flink.streaming.api.graph.StreamConfig;
 import org.apache.flink.streaming.api.graph.StreamConfig.InputConfig;
@@ -117,7 +117,6 @@ public class StreamTaskMailboxTestHarnessBuilder<OUT> {
             TypeInformation<OUT> outputType) {
         this.taskFactory = checkNotNull(taskFactory);
         outputSerializer = outputType.createSerializer(executionConfig.getSerializerConfig());
-        streamConfig.setTimeCharacteristic(TimeCharacteristic.EventTime);
     }
 
     public <T> StreamTaskMailboxTestHarnessBuilder<OUT> modifyExecutionConfig(
@@ -129,6 +128,12 @@ public class StreamTaskMailboxTestHarnessBuilder<OUT> {
     public <T> StreamTaskMailboxTestHarnessBuilder<OUT> modifyStreamConfig(
             Consumer<StreamConfig> action) {
         action.accept(streamConfig);
+        return this;
+    }
+
+    public <T> StreamTaskMailboxTestHarnessBuilder<OUT> addJobConfig(
+            ConfigOption<T> option, T value) {
+        jobConfig.set(option, value);
         return this;
     }
 
@@ -381,7 +386,6 @@ public class StreamTaskMailboxTestHarnessBuilder<OUT> {
                         ResultPartitionType.PIPELINED_BOUNDED));
 
         StreamConfig sourceConfig = new StreamConfig(new Configuration());
-        sourceConfig.setTimeCharacteristic(streamConfig.getTimeCharacteristic());
         sourceConfig.setVertexNonChainedOutputs(streamOutputsInOrder);
         sourceConfig.setChainedOutputs(chainedOutputs);
         sourceConfig.setTypeSerializerOut(sourceInput.getSourceSerializer());

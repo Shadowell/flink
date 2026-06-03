@@ -18,26 +18,38 @@
 package org.apache.flink.streaming.runtime.io;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.api.common.watermark.Watermark;
 import org.apache.flink.runtime.checkpoint.channel.InputChannelInfo;
 import org.apache.flink.runtime.event.AbstractEvent;
+import org.apache.flink.runtime.event.WatermarkEvent;
 import org.apache.flink.runtime.io.network.api.EndOfData;
 import org.apache.flink.runtime.io.network.api.EndOfPartitionEvent;
 import org.apache.flink.runtime.io.network.api.serialization.RecordDeserializer;
+import org.apache.flink.runtime.io.network.netty.exception.RemoteTransportException;
 import org.apache.flink.runtime.io.network.partition.consumer.BufferOrEvent;
-import org.apache.flink.runtime.io.network.partition.consumer.EndOfChannelStateEvent;
+import org.apache.flink.runtime.io.network.partition.consumer.EndOfOutputChannelStateEvent;
 import org.apache.flink.runtime.plugable.DeserializationDelegate;
 import org.apache.flink.runtime.plugable.NonReusingDeserializationDelegate;
 import org.apache.flink.streaming.runtime.io.checkpointing.CheckpointedInputGate;
 import org.apache.flink.streaming.runtime.streamrecord.StreamElement;
 import org.apache.flink.streaming.runtime.streamrecord.StreamElementSerializer;
 import org.apache.flink.streaming.runtime.tasks.StreamTask.CanEmitBatchOfRecordsChecker;
+import org.apache.flink.streaming.runtime.watermark.AbstractInternalWatermarkDeclaration;
+import org.apache.flink.streaming.runtime.watermark.WatermarkCombiner;
 import org.apache.flink.streaming.runtime.watermarkstatus.StatusWatermarkValve;
+import org.apache.flink.streaming.util.watermark.WatermarkUtils;
+import org.apache.flink.util.ExceptionUtils;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
@@ -51,11 +63,15 @@ import static org.apache.flink.util.Preconditions.checkState;
 public abstract class AbstractStreamTaskNetworkInput<
                 T, R extends RecordDeserializer<DeserializationDelegate<StreamElement>>>
         implements StreamTaskInput<T> {
+
+    private static final Logger LOG = LoggerFactory.getLogger(AbstractStreamTaskNetworkInput.class);
+
     protected final CheckpointedInputGate checkpointedInputGate;
     protected final DeserializationDelegate<StreamElement> deserializationDelegate;
     protected final TypeSerializer<T> inputSerializer;
     protected final Map<InputChannelInfo, R> recordDeserializers;
     protected final Map<InputChannelInfo, Integer> flattenedChannelIndices = new HashMap<>();
+
     /** Valve that controls how watermarks and watermark statuses are forwarded. */
     protected final StatusWatermarkValve statusWatermarkValve;
 
@@ -63,6 +79,7 @@ public abstract class AbstractStreamTaskNetworkInput<
     private final RecordAttributesCombiner recordAttributesCombiner;
     private InputChannelInfo lastChannel = null;
     private R currentRecordDeserializer = null;
+    protected final Map<String, WatermarkCombiner> watermarkCombiners = new HashMap<>();
 
     protected final CanEmitBatchOfRecordsChecker canEmitBatchOfRecords;
 
@@ -73,6 +90,24 @@ public abstract class AbstractStreamTaskNetworkInput<
             int inputIndex,
             Map<InputChannelInfo, R> recordDeserializers,
             CanEmitBatchOfRecordsChecker canEmitBatchOfRecords) {
+        this(
+                checkpointedInputGate,
+                inputSerializer,
+                statusWatermarkValve,
+                inputIndex,
+                recordDeserializers,
+                canEmitBatchOfRecords,
+                Collections.emptySet());
+    }
+
+    public AbstractStreamTaskNetworkInput(
+            CheckpointedInputGate checkpointedInputGate,
+            TypeSerializer<T> inputSerializer,
+            StatusWatermarkValve statusWatermarkValve,
+            int inputIndex,
+            Map<InputChannelInfo, R> recordDeserializers,
+            CanEmitBatchOfRecordsChecker canEmitBatchOfRecords,
+            Set<AbstractInternalWatermarkDeclaration<?>> watermarkDeclarationSet) {
         super();
         this.checkpointedInputGate = checkpointedInputGate;
         deserializationDelegate =
@@ -90,6 +125,27 @@ public abstract class AbstractStreamTaskNetworkInput<
         this.canEmitBatchOfRecords = checkNotNull(canEmitBatchOfRecords);
         this.recordAttributesCombiner =
                 new RecordAttributesCombiner(checkpointedInputGate.getNumberOfInputChannels());
+
+        WatermarkUtils.addEventTimeWatermarkCombinerIfNeeded(
+                watermarkDeclarationSet, watermarkCombiners, flattenedChannelIndices.size());
+        for (AbstractInternalWatermarkDeclaration<?> watermarkDeclaration :
+                watermarkDeclarationSet) {
+            if (watermarkCombiners.containsKey(watermarkDeclaration.getIdentifier())) {
+                continue;
+            }
+
+            watermarkCombiners.put(
+                    watermarkDeclaration.getIdentifier(),
+                    watermarkDeclaration.createWatermarkCombiner(
+                            flattenedChannelIndices.size(),
+                            () -> {
+                                try {
+                                    checkpointedInputGate.resumeGateConsumption();
+                                } catch (IOException e) {
+                                    throw new RuntimeException(e);
+                                }
+                            }));
+        }
     }
 
     @Override
@@ -127,7 +183,7 @@ public abstract class AbstractStreamTaskNetworkInput<
                 if (bufferOrEvent.get().isBuffer()) {
                     processBuffer(bufferOrEvent.get());
                 } else {
-                    DataInputStatus status = processEvent(bufferOrEvent.get());
+                    DataInputStatus status = processEvent(bufferOrEvent.get(), output);
                     if (status == DataInputStatus.MORE_AVAILABLE && canEmitBatchOfRecords.check()) {
                         continue;
                     }
@@ -180,7 +236,28 @@ public abstract class AbstractStreamTaskNetworkInput<
         }
     }
 
-    protected DataInputStatus processEvent(BufferOrEvent bufferOrEvent) {
+    private void processWatermarkEvent(
+            InputChannelInfo inputChannelInfo,
+            WatermarkEvent generalizedWatermarkEvent,
+            DataOutput<T> output)
+            throws Exception {
+        Watermark watermark = generalizedWatermarkEvent.getWatermark();
+        WatermarkCombiner combiner = watermarkCombiners.get(watermark.getIdentifier());
+        combiner.combineWatermark(
+                watermark,
+                inputChannelInfo.getInputChannelIdx(),
+                outputWatermark -> {
+                    try {
+                        output.emitWatermark(
+                                new WatermarkEvent(
+                                        outputWatermark, generalizedWatermarkEvent.isAligned()));
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+    }
+
+    protected DataInputStatus processEvent(BufferOrEvent bufferOrEvent, DataOutput<T> output) {
         // Event received
         final AbstractEvent event = bufferOrEvent.getEvent();
         if (event.getClass() == EndOfData.class) {
@@ -200,9 +277,16 @@ public abstract class AbstractStreamTaskNetworkInput<
             if (checkpointedInputGate.isFinished()) {
                 return DataInputStatus.END_OF_INPUT;
             }
-        } else if (event.getClass() == EndOfChannelStateEvent.class) {
+        } else if (event.getClass() == EndOfOutputChannelStateEvent.class) {
             if (checkpointedInputGate.allChannelsRecovered()) {
                 return DataInputStatus.END_OF_RECOVERY;
+            }
+        } else if (event.getClass() == WatermarkEvent.class) {
+            try {
+                processWatermarkEvent(
+                        bufferOrEvent.getChannelInfo(), (WatermarkEvent) event, output);
+            } catch (Exception e) {
+                ExceptionUtils.rethrow(e);
             }
         }
         return DataInputStatus.MORE_AVAILABLE;
@@ -238,9 +322,29 @@ public abstract class AbstractStreamTaskNetworkInput<
 
     @Override
     public void close() throws IOException {
-        // release the deserializers . this part should not ever fail
+        // WARNING: throwing an exception from this method might fail Task closing procedure and
+        // terminate the TM
+        Exception err = null;
         for (InputChannelInfo channelInfo : new ArrayList<>(recordDeserializers.keySet())) {
-            releaseDeserializer(channelInfo);
+            final boolean hadError =
+                    checkpointedInputGate.getChannel(channelInfo.getInputChannelIdx()).hasError();
+            try {
+                releaseDeserializer(channelInfo);
+            } catch (Exception e) {
+                if (hadError
+                        && ExceptionUtils.findThrowable(e, RemoteTransportException.class)
+                                .isPresent()) {
+                    LOG.warn(
+                            "Ignoring deserializer release failure - the channel {} has encountered a transport error before: {}",
+                            channelInfo,
+                            e.getMessage());
+                } else {
+                    err = ExceptionUtils.firstOrSuppressed(e, err);
+                }
+            }
+        }
+        if (err != null) {
+            ExceptionUtils.rethrowIOException(err);
         }
     }
 

@@ -18,17 +18,19 @@
 
 package org.apache.flink.table.planner.operations.converters;
 
-import org.apache.flink.sql.parser.ddl.SqlAlterView;
+import org.apache.flink.sql.parser.ddl.view.SqlAlterView;
 import org.apache.flink.sql.parser.error.SqlValidateException;
 import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.catalog.CatalogBaseTable;
-import org.apache.flink.table.catalog.CatalogTable;
+import org.apache.flink.table.catalog.CatalogBaseTable.TableKind;
 import org.apache.flink.table.catalog.CatalogView;
 import org.apache.flink.table.catalog.ContextResolvedTable;
 import org.apache.flink.table.catalog.ObjectIdentifier;
+import org.apache.flink.table.catalog.ResolvedCatalogView;
 import org.apache.flink.table.catalog.ResolvedSchema;
 import org.apache.flink.table.catalog.UnresolvedIdentifier;
+import org.apache.flink.table.operations.utils.ValidationUtils;
 import org.apache.flink.table.planner.operations.PlannerQueryOperation;
 import org.apache.flink.table.planner.operations.converters.SqlNodeConverter.ConvertContext;
 
@@ -75,19 +77,17 @@ class SqlNodeConvertUtils {
         // This bug is fixed in CALCITE-3877 of Calcite 1.23.0.
         String originalQuery = context.toQuotedSqlString(query);
         SqlNode validateQuery = context.getSqlValidator().validate(query);
+        // FLINK-38950: SqlValidator.validate() mutates its input parameter. Always use the
+        // returned validateQuery instead of the mutated query for all subsequent operations.
 
         // Check name is unique.
         // Don't rely on the calcite because if the field names are duplicate, calcite will add
         // index to identify the duplicate names.
         SqlValidatorNamespace validatedNamespace =
                 context.getSqlValidator().getNamespace(validateQuery);
-        validateDuplicatedColumnNames(query, viewFields, validatedNamespace);
+        validateDuplicatedColumnNames(validateQuery, viewFields, validatedNamespace);
 
-        // The LATERAL operator was eliminated during sql validation, thus the unparsed SQL
-        // does not contain LATERAL which is problematic,
-        // the issue was resolved in CALCITE-4077
-        // (always treat the table function as implicitly LATERAL).
-        String expandedQuery = context.expandSqlIdentifiers(originalQuery);
+        String expandedQuery = context.toQuotedSqlString(validateQuery);
 
         PlannerQueryOperation operation = toQueryOperation(validateQuery, context);
         ResolvedSchema schema = operation.getResolvedSchema();
@@ -110,12 +110,14 @@ class SqlNodeConvertUtils {
             schema = ResolvedSchema.physical(aliasFieldNames, schema.getColumnDataTypes());
         }
 
-        return CatalogView.of(
-                Schema.newBuilder().fromResolvedSchema(schema).build(),
-                viewComment,
-                originalQuery,
-                expandedQuery,
-                viewOptions);
+        return new ResolvedCatalogView(
+                CatalogView.of(
+                        Schema.newBuilder().fromResolvedSchema(schema).build(),
+                        viewComment,
+                        originalQuery,
+                        expandedQuery,
+                        viewOptions),
+                schema);
     }
 
     /**
@@ -123,21 +125,20 @@ class SqlNodeConvertUtils {
      */
     static CatalogView validateAlterView(SqlAlterView alterView, ConvertContext context) {
         UnresolvedIdentifier unresolvedIdentifier =
-                UnresolvedIdentifier.of(alterView.fullViewName());
+                UnresolvedIdentifier.of(alterView.getFullName());
         ObjectIdentifier viewIdentifier =
                 context.getCatalogManager().qualifyIdentifier(unresolvedIdentifier);
         Optional<ContextResolvedTable> optionalCatalogTable =
                 context.getCatalogManager().getTable(viewIdentifier);
         // check the view exist and is not a temporary view
-        if (!optionalCatalogTable.isPresent() || optionalCatalogTable.get().isTemporary()) {
+        if (optionalCatalogTable.isEmpty() || optionalCatalogTable.get().isTemporary()) {
             throw new ValidationException(
                     String.format("View %s doesn't exist or is a temporary view.", viewIdentifier));
         }
         // check the view is exactly a view
         CatalogBaseTable baseTable = optionalCatalogTable.get().getResolvedTable();
-        if (baseTable instanceof CatalogTable) {
-            throw new ValidationException("ALTER VIEW for a table is not allowed");
-        }
+        ValidationUtils.validateTableKind(baseTable, TableKind.VIEW, "alter view");
+
         return (CatalogView) baseTable;
     }
 

@@ -24,7 +24,7 @@ import org.apache.flink.api.common.eventtime.WatermarkGeneratorSupplier;
 import org.apache.flink.api.common.eventtime.WatermarkOutput;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.metrics.MetricGroup;
-import org.apache.flink.streaming.api.functions.source.SourceFunction;
+import org.apache.flink.streaming.api.functions.source.legacy.SourceFunction;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
@@ -86,12 +86,10 @@ public class TestSourceFunction implements SourceFunction<RowData> {
             for (int i = 0; i < rowDataSize; i++) {
                 row.setField(i, list.get(i));
             }
+            ctx.collect(row);
+            index++;
             generator.onEvent(row, Long.MIN_VALUE, output);
             generator.onPeriodicEmit(output);
-
-            ctx.collect(row);
-
-            index++;
         }
         ctx.close();
     }

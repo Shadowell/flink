@@ -38,7 +38,7 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamElement;
 import org.apache.flink.streaming.runtime.streamrecord.StreamElementSerializer;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 
-import org.apache.flink.shaded.guava32.com.google.common.collect.Iterables;
+import org.apache.flink.shaded.guava33.com.google.common.collect.Iterables;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -95,7 +95,7 @@ class DemultiplexingRecordDeserializerTest {
                         unused ->
                                 new SpillingAdaptiveSpanningRecordDeserializer<>(
                                         ioManager.getSpillingDirectoriesPaths()),
-                        unused -> RecordFilter.all());
+                        unused -> RecordFilter.acceptAll());
 
         assertThat(deserializer.getVirtualChannelSelectors())
                 .containsOnly(
@@ -136,7 +136,9 @@ class DemultiplexingRecordDeserializerTest {
                         unused ->
                                 new SpillingAdaptiveSpanningRecordDeserializer<>(
                                         ioManager.getSpillingDirectoriesPaths()),
-                        unused -> new RecordFilter(new ModSelector(2), LongSerializer.INSTANCE, 1));
+                        unused ->
+                                new PartitionerRecordFilter<>(
+                                        new ModSelector(2), LongSerializer.INSTANCE, 1));
 
         assertThat(deserializer.getVirtualChannelSelectors())
                 .containsOnly(
@@ -179,7 +181,7 @@ class DemultiplexingRecordDeserializerTest {
                         unused ->
                                 new SpillingAdaptiveSpanningRecordDeserializer<>(
                                         ioManager.getSpillingDirectoriesPaths()),
-                        unused -> RecordFilter.all());
+                        unused -> RecordFilter.acceptAll());
 
         assertThat(deserializer.getVirtualChannelSelectors()).hasSize(4);
 

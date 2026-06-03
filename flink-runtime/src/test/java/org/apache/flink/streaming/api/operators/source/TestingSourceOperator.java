@@ -27,7 +27,6 @@ import org.apache.flink.api.connector.source.mocks.MockSourceSplitSerializer;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.runtime.execution.Environment;
-import org.apache.flink.runtime.metrics.groups.UnregisteredMetricGroups;
 import org.apache.flink.runtime.operators.coordination.MockOperatorEventGateway;
 import org.apache.flink.runtime.operators.coordination.OperatorEventGateway;
 import org.apache.flink.runtime.operators.testutils.MockEnvironmentBuilder;
@@ -39,6 +38,7 @@ import org.apache.flink.runtime.state.StateInitializationContextImpl;
 import org.apache.flink.runtime.state.TestTaskStateManager;
 import org.apache.flink.runtime.state.hashmap.HashMapStateBackend;
 import org.apache.flink.streaming.api.operators.SourceOperator;
+import org.apache.flink.streaming.api.operators.StreamOperatorParameters;
 import org.apache.flink.streaming.api.operators.StreamingRuntimeContext;
 import org.apache.flink.streaming.runtime.tasks.ProcessingTimeService;
 import org.apache.flink.streaming.runtime.tasks.SourceOperatorStreamTask;
@@ -60,44 +60,57 @@ public class TestingSourceOperator<T> extends SourceOperator<T, MockSourceSplit>
     private final int parallelism;
 
     public TestingSourceOperator(
+            StreamOperatorParameters<T> parameters,
             SourceReader<T, MockSourceSplit> reader,
             WatermarkStrategy<T> watermarkStrategy,
             ProcessingTimeService timeService,
-            boolean emitProgressiveWatermarks) {
+            boolean emitProgressiveWatermarks,
+            boolean supportsSplitReassignmentOnRecovery) {
 
         this(
+                parameters,
                 reader,
                 watermarkStrategy,
                 timeService,
+                new Configuration(),
                 new MockOperatorEventGateway(),
                 1,
                 5,
-                emitProgressiveWatermarks);
+                emitProgressiveWatermarks,
+                supportsSplitReassignmentOnRecovery,
+                false);
     }
 
     public TestingSourceOperator(
+            StreamOperatorParameters<T> parameters,
             SourceReader<T, MockSourceSplit> reader,
             WatermarkStrategy<T> watermarkStrategy,
             ProcessingTimeService timeService,
+            Configuration configuration,
             OperatorEventGateway eventGateway,
             int subtaskIndex,
             int parallelism,
-            boolean emitProgressiveWatermarks) {
+            boolean emitProgressiveWatermarks,
+            boolean supportsSplitReassignmentOnRecovery,
+            boolean pauseSourcesUntilFirstCheckpoint) {
 
         super(
+                parameters,
                 (context) -> reader,
                 eventGateway,
                 new MockSourceSplitSerializer(),
                 watermarkStrategy,
                 timeService,
-                new Configuration(),
+                configuration,
                 "localhost",
                 emitProgressiveWatermarks,
-                () -> false);
+                () -> false,
+                Collections.emptyMap(),
+                supportsSplitReassignmentOnRecovery,
+                pauseSourcesUntilFirstCheckpoint);
 
         this.subtaskIndex = subtaskIndex;
         this.parallelism = parallelism;
-        this.metrics = UnregisteredMetricGroups.createUnregisteredOperatorMetricGroup();
         initSourceMetricGroup();
 
         // unchecked wrapping is okay to keep tests simpler
@@ -110,7 +123,7 @@ public class TestingSourceOperator<T> extends SourceOperator<T, MockSourceSplit>
 
     @Override
     public StreamingRuntimeContext getRuntimeContext() {
-        return new MockStreamingRuntimeContext(false, parallelism, subtaskIndex);
+        return new MockStreamingRuntimeContext(parallelism, subtaskIndex);
     }
 
     // this is overridden to avoid complex mock injection through the "containingTask"
@@ -125,6 +138,15 @@ public class TestingSourceOperator<T> extends SourceOperator<T, MockSourceSplit>
             SourceReader<T, MockSourceSplit> reader,
             WatermarkStrategy<T> watermarkStrategy,
             boolean emitProgressiveWatermarks)
+            throws Exception {
+        return createTestOperator(reader, watermarkStrategy, emitProgressiveWatermarks, false);
+    }
+
+    public static <T> SourceOperator<T, MockSourceSplit> createTestOperator(
+            SourceReader<T, MockSourceSplit> reader,
+            WatermarkStrategy<T> watermarkStrategy,
+            boolean emitProgressiveWatermarks,
+            boolean supportsSplitReassignmentOnRecovery)
             throws Exception {
 
         AbstractStateBackend abstractStateBackend = new HashMapStateBackend();
@@ -146,20 +168,26 @@ public class TestingSourceOperator<T> extends SourceOperator<T, MockSourceSplit>
 
         final SourceOperator<T, MockSourceSplit> sourceOperator =
                 new TestingSourceOperator<>(
-                        reader, watermarkStrategy, timeService, emitProgressiveWatermarks);
-
-        sourceOperator.setup(
-                new SourceOperatorStreamTask<Integer>(
-                        new StreamMockEnvironment(
-                                new Configuration(),
-                                new Configuration(),
-                                new ExecutionConfig(),
-                                1L,
-                                new MockInputSplitProvider(),
-                                1,
-                                new TestTaskStateManager())),
-                new MockStreamConfig(new Configuration(), 1),
-                new MockOutput<>(new ArrayList<>()));
+                        new StreamOperatorParameters<>(
+                                new SourceOperatorStreamTask<Integer>(
+                                        new StreamMockEnvironment(
+                                                new Configuration(),
+                                                new Configuration(),
+                                                new ExecutionConfig(),
+                                                1L,
+                                                new MockInputSplitProvider(),
+                                                1,
+                                                new TestTaskStateManager())),
+                                new MockStreamConfig(new Configuration(), 1),
+                                new MockOutput<>(new ArrayList<>()),
+                                () -> timeService,
+                                null,
+                                null),
+                        reader,
+                        watermarkStrategy,
+                        timeService,
+                        emitProgressiveWatermarks,
+                        supportsSplitReassignmentOnRecovery);
         sourceOperator.initializeState(stateContext);
         sourceOperator.open();
 

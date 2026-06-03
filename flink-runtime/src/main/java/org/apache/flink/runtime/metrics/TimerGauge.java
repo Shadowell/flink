@@ -44,8 +44,10 @@ public class TimerGauge implements Gauge<Long>, View {
 
     /** The time-span over which the average is calculated. */
     private final int timeSpanInSeconds;
+
     /** Circular array containing the history of values. */
     private final long[] values;
+
     /** The index in the array for the current time. */
     private int idx = 0;
 
@@ -54,6 +56,7 @@ public class TimerGauge implements Gauge<Long>, View {
     private long currentValue;
     private long currentCount;
     private long currentMeasurementStartTS;
+
     /**
      * This differ from {@link #currentMeasurementStartTS} that {@link #currentUpdateTS} is bumped
      * on every {@link #update()} call, while {@link #currentMeasurementStartTS} always marks the
@@ -116,9 +119,11 @@ public class TimerGauge implements Gauge<Long>, View {
         if (currentMeasurementStartTS == 0) {
             return;
         }
-        long currentMeasurement = clock.absoluteTimeMillis() - currentMeasurementStartTS;
-        currentCount += currentMeasurement;
-        accumulatedCount += currentMeasurement;
+        long now = clock.absoluteTimeMillis();
+        long currentMeasurement = now - currentMeasurementStartTS;
+        long currentIncrement = now - currentUpdateTS;
+        currentCount += currentIncrement;
+        accumulatedCount += currentIncrement;
         currentMaxSingleMeasurement = Math.max(currentMaxSingleMeasurement, currentMeasurement);
         currentUpdateTS = 0;
         currentMeasurementStartTS = 0;
@@ -177,7 +182,9 @@ public class TimerGauge implements Gauge<Long>, View {
         return previousMaxSingleMeasurement;
     }
 
-    /** @return the accumulated period by the given * TimerGauge. */
+    /**
+     * @return the accumulated period by the given * TimerGauge.
+     */
     public synchronized long getAccumulatedCount() {
         return accumulatedCount;
     }
@@ -187,7 +194,6 @@ public class TimerGauge implements Gauge<Long>, View {
         return currentCount;
     }
 
-    @VisibleForTesting
     public synchronized boolean isMeasuring() {
         return currentMeasurementStartTS != 0;
     }

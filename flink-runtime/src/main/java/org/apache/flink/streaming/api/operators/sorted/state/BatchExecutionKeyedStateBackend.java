@@ -126,6 +126,11 @@ public class BatchExecutionKeyedStateBackend<K> implements CheckpointableKeyedSt
     }
 
     @Override
+    public void setCurrentKeyAndKeyGroup(K newKey, int newKeyGroupIndex) {
+        setCurrentKey(newKey);
+    }
+
+    @Override
     public TypeSerializer<K> getKeySerializer() {
         return keySerializer;
     }
@@ -144,6 +149,15 @@ public class BatchExecutionKeyedStateBackend<K> implements CheckpointableKeyedSt
 
     @Override
     public <N> Stream<K> getKeys(String state, N namespace) {
+        LOG.debug("Returning an empty stream in BATCH execution mode in getKeys().");
+        // We return an empty Stream here. This is correct because the BATCH broadcast operators
+        // process the broadcast side first, meaning we know that the keyed side will always be
+        // empty when this is called
+        return Stream.empty();
+    }
+
+    @Override
+    public <N> Stream<K> getKeys(List<String> states, N namespace) {
         LOG.debug("Returning an empty stream in BATCH execution mode in getKeys().");
         // We return an empty Stream here. This is correct because the BATCH broadcast operators
         // process the broadcast side first, meaning we know that the keyed side will always be
@@ -213,6 +227,11 @@ public class BatchExecutionKeyedStateBackend<K> implements CheckpointableKeyedSt
     @Override
     public boolean deregisterKeySelectionListener(KeySelectionListener<K> listener) {
         return keySelectionListeners.remove(listener);
+    }
+
+    @Override
+    public String getBackendTypeIdentifier() {
+        return "batch";
     }
 
     @Nonnull

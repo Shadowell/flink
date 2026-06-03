@@ -18,11 +18,11 @@
 
 package org.apache.flink.state.forst;
 
-import org.apache.flink.core.state.InternalStateFuture;
+import org.apache.flink.core.asyncprocessing.InternalAsyncFuture;
 
-import org.rocksdb.RocksDB;
-import org.rocksdb.RocksDBException;
-import org.rocksdb.RocksIterator;
+import org.forstdb.RocksDB;
+import org.forstdb.RocksDBException;
+import org.forstdb.RocksIterator;
 
 import java.io.IOException;
 
@@ -37,6 +37,8 @@ import static org.apache.flink.state.forst.ForStDBIterRequest.startWithKeyPrefix
  */
 public class ForStDBMapCheckRequest<K, N, V> extends ForStDBGetRequest<K, N, V, Boolean> {
 
+    private static final byte[] VALID_PLACEHOLDER = new byte[0];
+
     /** Number of bytes required to prefix the key groups. */
     private final int keyGroupPrefixBytes;
 
@@ -46,7 +48,7 @@ public class ForStDBMapCheckRequest<K, N, V> extends ForStDBGetRequest<K, N, V, 
     public ForStDBMapCheckRequest(
             ContextKey<K, N> key,
             ForStInnerTable<K, N, V> table,
-            InternalStateFuture<Boolean> future,
+            InternalAsyncFuture<Boolean> future,
             boolean checkEmpty) {
         super(key, table, future);
         this.keyGroupPrefixBytes = ((ForStMapState) table).getKeyGroupPrefixBytes();
@@ -60,7 +62,7 @@ public class ForStDBMapCheckRequest<K, N, V> extends ForStDBGetRequest<K, N, V, 
             try (RocksIterator iter = db.newIterator(getColumnFamilyHandle())) {
                 iter.seek(key);
                 if (iter.isValid() && startWithKeyPrefix(key, iter.key(), keyGroupPrefixBytes)) {
-                    completeStateFuture(new byte[0]);
+                    completeStateFuture(VALID_PLACEHOLDER);
                 } else {
                     completeStateFuture(null);
                 }

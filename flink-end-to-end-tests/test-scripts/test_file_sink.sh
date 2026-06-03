@@ -74,7 +74,7 @@ elif [ "${OUT_TYPE}" == "s3" ]; then
   # overwrites implementation for local runs
   function get_complete_result {
     # copies the data from S3 to the local LOCAL_JOB_OUTPUT_PATH
-    s3_get_by_full_path_and_filename_prefix "$LOCAL_JOB_OUTPUT_PATH" "$S3_DATA_PREFIX" "part-" true
+    s3_get_by_full_path_and_filename_prefix "$LOCAL_JOB_OUTPUT_PATH" "$S3_DATA_PREFIX" true "part-"
 
     # and prints the sorted output
     find "${LOCAL_JOB_OUTPUT_PATH}" -type f \( -iname "part-*" \) -exec cat {} + | sort -g
@@ -101,7 +101,8 @@ fi
 OPENSSL_LINKAGE=$(if (( RANDOM % 2 )) ; then echo "dynamic"; else echo "static"; fi)
 echo "Executing test with ${OPENSSL_LINKAGE} openSSL linkage (random selection between 'dynamic' and 'static')"
 
-set_conf_ssl "mutual" "OPENSSL" "${OPENSSL_LINKAGE}"
+# Temporarily disable SSL in test_file_sink (see FLINK-39002 )
+#set_conf_ssl "mutual" "OPENSSL" "${OPENSSL_LINKAGE}"
 # set_conf_ssl moves netty libraries into FLINK_DIR which we want to rollback at the end of the test run
 on_exit rollback_openssl_lib
 

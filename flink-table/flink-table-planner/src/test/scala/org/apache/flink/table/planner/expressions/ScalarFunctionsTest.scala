@@ -19,6 +19,7 @@ package org.apache.flink.table.planner.expressions
 
 import org.apache.flink.table.api._
 import org.apache.flink.table.expressions.{Expression, TimeIntervalUnit, TimePointUnit}
+import org.apache.flink.table.legacy.api.Types
 import org.apache.flink.table.planner.expressions.utils.ScalarTypesTestBase
 
 import org.junit.jupiter.api.Test
@@ -407,11 +408,13 @@ class ScalarFunctionsTest extends ScalarTypesTestBase {
     testAllApis("abcxxxdef".like("%abc%qef%"), "'abcxxxdef' LIKE '%abc%qef%'", "FALSE")
     testAllApis("abcxxxdef".like("abc%qef"), "'abcxxxdef' LIKE 'abc%qef'", "FALSE")
 
-    // reported in FLINK-36100
+    // reported in FLINK-36100 - without ESCAPE clause, '\' is a literal character
     testAllApis("TE_ST".like("%E_S%"), "'TE_ST' LIKE '%E_S%'", "TRUE")
     testAllApis("TE-ST".like("%E_S%"), "'TE-ST' LIKE '%E_S%'", "TRUE")
-    testAllApis("TE_ST".like("%E\\_S%"), "'TE_ST' LIKE '%E\\_S%'", "TRUE")
+    testAllApis("TE_ST".like("%E\\_S%"), "'TE_ST' LIKE '%E\\_S%'", "FALSE")
     testAllApis("TE-ST".like("%E\\_S%"), "'TE-ST' LIKE '%E\\_S%'", "FALSE")
+    testAllApis("\u0000".like("\u0000"), "'\u0000' LIKE '\u0000'", "TRUE")
+    testAllApis("a".like("\u0000_"), "'a' LIKE '\u0000_'", "FALSE")
   }
 
   @Test
@@ -419,10 +422,10 @@ class ScalarFunctionsTest extends ScalarTypesTestBase {
     testAllApis(!'f0.like("Th_s%"), "f0 NOT LIKE 'Th_s%'", "FALSE")
     testAllApis(!'f0.like("%is a%"), "f0 NOT LIKE '%is a%'", "FALSE")
 
-    // reported in FLINK-36100
+    // reported in FLINK-36100 - without ESCAPE clause, '\' is a literal character
     testSqlApi("'TE_ST' NOT LIKE '%E_S%'", "FALSE")
     testSqlApi("'TE-ST' NOT LIKE '%E_S%'", "FALSE")
-    testSqlApi("'TE_ST' NOT LIKE '%E\\_S%'", "FALSE")
+    testSqlApi("'TE_ST' NOT LIKE '%E\\_S%'", "TRUE")
     testSqlApi("'TE-ST' NOT LIKE '%E\\_S%'", "TRUE")
   }
 
@@ -442,6 +445,8 @@ class ScalarFunctionsTest extends ScalarTypesTestBase {
     testAllApis("TE_ST".like("%E__S%", "_"), "'TE_ST' LIKE '%E__S%' ESCAPE '_'", "TRUE")
     testAllApis("TE-ST".like("TE%_ST", "%"), "'TE-ST' LIKE 'TE%_ST' ESCAPE '%'", "FALSE")
     testAllApis("TE_ST".like("TE%_ST", "%"), "'TE_ST' LIKE 'TE%_ST' ESCAPE '%'", "TRUE")
+    testAllApis("TE-ST".like("%E*_S%", "*"), "'TE-ST' LIKE '%E*_S%' ESCAPE '*'", "FALSE")
+    testAllApis("TE_ST".like("%E*_S%", "*"), "'TE_ST' LIKE '%E*_S%' ESCAPE '*'", "TRUE")
 
     // special character in Java Regex
     testAllApis("TE-ST".like("%E\\_S%", "\\"), "'TE-ST' LIKE '%E\\_S%' ESCAPE '\\'", "FALSE")
@@ -497,6 +502,8 @@ class ScalarFunctionsTest extends ScalarTypesTestBase {
     testSqlApi("'TE_ST' NOT LIKE '%E__S%' ESCAPE '_'", "FALSE")
     testSqlApi("'TE-ST' NOT LIKE 'TE%_ST' ESCAPE '%'", "TRUE")
     testSqlApi("'TE_ST' NOT LIKE 'TE%_ST' ESCAPE '%'", "FALSE")
+    testSqlApi("'TE-ST' NOT LIKE '%E*_S%' ESCAPE '*'", "TRUE")
+    testSqlApi("'TE_ST' NOT LIKE '%E*_S%' ESCAPE '*'", "FALSE")
 
     // special character in Java Regex
     testSqlApi("'TE-ST' NOT LIKE '%E\\_S%' ESCAPE '\\'", "TRUE")

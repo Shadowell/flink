@@ -17,7 +17,6 @@
  */
 package org.apache.flink.table.planner.plan.stream.sql.join
 
-import org.apache.flink.api.scala._
 import org.apache.flink.table.api._
 import org.apache.flink.table.planner.plan.utils.IntervalJoinUtil
 import org.apache.flink.table.planner.runtime.utils.JavaUserDefinedScalarFunctions.PythonScalarFunction
@@ -108,7 +107,7 @@ class IntervalJoinTest extends TableTestBase {
 
   /** The time conditions should be an And condition * */
   @Test
-  def testInteravalNotCnfCondition(): Unit = {
+  def testIntervalNotCnfCondition(): Unit = {
     val sql =
       """
         |SELECT t2.a FROM MyTable t1 JOIN MyTable2 t2 ON

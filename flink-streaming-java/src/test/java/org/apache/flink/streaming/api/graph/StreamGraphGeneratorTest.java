@@ -27,7 +27,6 @@ import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.dag.Transformation;
-import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.StateRecoveryOptions;
 import org.apache.flink.core.memory.ManagedMemoryUseCase;
@@ -37,14 +36,13 @@ import org.apache.flink.streaming.api.datastream.BroadcastStream;
 import org.apache.flink.streaming.api.datastream.CachedDataStream;
 import org.apache.flink.streaming.api.datastream.ConnectedStreams;
 import org.apache.flink.streaming.api.datastream.DataStream;
-import org.apache.flink.streaming.api.datastream.IterativeStream;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.co.BroadcastProcessFunction;
 import org.apache.flink.streaming.api.functions.co.CoMapFunction;
 import org.apache.flink.streaming.api.functions.co.KeyedBroadcastProcessFunction;
-import org.apache.flink.streaming.api.functions.sink.SinkFunction;
+import org.apache.flink.streaming.api.functions.sink.legacy.SinkFunction;
 import org.apache.flink.streaming.api.functions.sink.v2.DiscardingSink;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.AbstractUdfStreamOperator;
@@ -52,6 +50,7 @@ import org.apache.flink.streaming.api.operators.ChainingStrategy;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.operators.Output;
 import org.apache.flink.streaming.api.operators.OutputTypeConfigurable;
+import org.apache.flink.streaming.api.operators.SimpleUdfStreamOperatorFactory;
 import org.apache.flink.streaming.api.operators.SourceOperatorFactory;
 import org.apache.flink.streaming.api.operators.StreamOperator;
 import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
@@ -61,7 +60,9 @@ import org.apache.flink.streaming.api.transformations.CacheTransformation;
 import org.apache.flink.streaming.api.transformations.MultipleInputTransformation;
 import org.apache.flink.streaming.api.transformations.PartitionTransformation;
 import org.apache.flink.streaming.api.transformations.StreamExchangeMode;
+import org.apache.flink.streaming.api.transformations.StubTransformation;
 import org.apache.flink.streaming.api.watermark.Watermark;
+import org.apache.flink.streaming.runtime.operators.sink.SinkWriterOperatorFactory;
 import org.apache.flink.streaming.runtime.partitioner.BroadcastPartitioner;
 import org.apache.flink.streaming.runtime.partitioner.ForwardPartitioner;
 import org.apache.flink.streaming.runtime.partitioner.GlobalPartitioner;
@@ -74,11 +75,12 @@ import org.apache.flink.streaming.runtime.tasks.StreamTask;
 import org.apache.flink.streaming.runtime.translators.CacheTransformationTranslator;
 import org.apache.flink.streaming.util.NoOpIntMap;
 import org.apache.flink.streaming.util.TestExpandingSink;
-import org.apache.flink.streaming.util.TestExpandingSinkDeprecated;
 import org.apache.flink.util.AbstractID;
 import org.apache.flink.util.Collector;
 import org.apache.flink.util.OutputTag;
 
+import org.assertj.core.api.Assertions;
+import org.assertj.core.api.InstanceOfAssertFactories;
 import org.hamcrest.Description;
 import org.hamcrest.FeatureMatcher;
 import org.hamcrest.Matcher;
@@ -606,44 +608,6 @@ class StreamGraphGeneratorTest {
         env.getStreamGraph().getStreamingPlanAsJSON();
     }
 
-    /** Test iteration job, check slot sharing group and co-location group. */
-    @Test
-    void testIteration() {
-        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-
-        DataStream<Integer> source = env.fromData(1, 2, 3).name("source");
-        IterativeStream<Integer> iteration = source.iterate(3000);
-        iteration.name("iteration").setParallelism(2);
-        DataStream<Integer> map = iteration.map(x -> x + 1).name("map").setParallelism(2);
-        DataStream<Integer> filter = map.filter((x) -> false).name("filter").setParallelism(2);
-        iteration.closeWith(filter).print();
-
-        final ResourceSpec resources = ResourceSpec.newBuilder(1.0, 100).build();
-        iteration.getTransformation().setResources(resources, resources);
-
-        StreamGraph streamGraph = env.getStreamGraph();
-        for (Tuple2<StreamNode, StreamNode> iterationPair :
-                streamGraph.getIterationSourceSinkPairs()) {
-            assertThat(iterationPair.f0.getCoLocationGroup()).isNotNull();
-            assertThat(iterationPair.f1.getCoLocationGroup())
-                    .isEqualTo(iterationPair.f0.getCoLocationGroup());
-
-            assertThat(iterationPair.f0.getSlotSharingGroup())
-                    .isEqualTo(StreamGraphGenerator.DEFAULT_SLOT_SHARING_GROUP);
-            assertThat(iterationPair.f1.getSlotSharingGroup())
-                    .isEqualTo(iterationPair.f0.getSlotSharingGroup());
-
-            final ResourceSpec sourceMinResources = iterationPair.f0.getMinResources();
-            final ResourceSpec sinkMinResources = iterationPair.f1.getMinResources();
-            final ResourceSpec iterationResources = sourceMinResources.merge(sinkMinResources);
-            assertThat(iterationResources).is(matching(equalsResourceSpec(resources)));
-        }
-    }
-
-    private Matcher<ResourceSpec> equalsResourceSpec(ResourceSpec resources) {
-        return new EqualsResourceSpecMatcher(resources);
-    }
-
     /** Test slot sharing is enabled. */
     @Test
     void testEnableSlotSharing() {
@@ -868,32 +832,6 @@ class StreamGraphGeneratorTest {
                                         .isEqualTo(StreamExchangeMode.UNDEFINED));
     }
 
-    /**
-     * Should be removed along {@link org.apache.flink.api.connector.sink2.TwoPhaseCommittingSink}.
-     */
-    @Deprecated
-    @Test
-    void testAutoParallelismForExpandedTransformationsDeprecated() {
-        final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-
-        env.setParallelism(2);
-
-        DataStream<Integer> sourceDataStream = env.fromData(1, 2, 3);
-        // Parallelism is set to -1 (default parallelism identifier) to imitate the behavior of
-        // the table planner. Parallelism should be set automatically after translating.
-        sourceDataStream.sinkTo(new TestExpandingSinkDeprecated()).setParallelism(-1);
-
-        StreamGraph graph = env.getStreamGraph();
-
-        graph.getStreamNodes()
-                .forEach(
-                        node -> {
-                            if (!node.getOperatorName().startsWith("Source")) {
-                                assertThat(node.getParallelism()).isEqualTo(2);
-                            }
-                        });
-    }
-
     @Test
     void testAutoParallelismForExpandedTransformations() {
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
@@ -965,6 +903,106 @@ class StreamGraphGeneratorTest {
         sideOutputCache.print();
 
         verifyCacheConsumeNode(env, upstreamParallelism, cacheTransformation);
+    }
+
+    @Test
+    void testStubTransformation() {
+        final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        env.setParallelism(2);
+
+        env.fromData(1, 2, 3)
+                .setParallelism(2)
+                .name("source")
+                .map(i -> i)
+                .name("mapper")
+                .sinkTo(new DiscardingSink<>())
+                .name("primary output");
+        new DataStream<>(
+                        env,
+                        StubTransformation.create(
+                                BasicTypeInfo.INT_TYPE_INFO, t -> t.getName().equals("mapper")))
+                .sinkTo(new DiscardingSink<>())
+                .name("secondary output");
+        new DataStream<>(
+                        env,
+                        StubTransformation.create(
+                                BasicTypeInfo.INT_TYPE_INFO, t -> t.getName().equals("mapper")))
+                .sinkTo(new DiscardingSink<>())
+                .name("tertiary output");
+
+        final StreamGraph streamGraph = env.getStreamGraph();
+        Assertions.assertThat(streamGraph.getStreamNodes()).hasSize(5);
+        Assertions
+                // source node
+                .assertThat(streamGraph.getSourceIDs())
+                .singleElement()
+                .extracting(streamGraph::getStreamNode)
+                .returns(SourceOperatorFactory.class, node -> node.getOperatorFactory().getClass())
+                .returns(2, StreamNode::getParallelism)
+                .extracting(
+                        StreamNode::getOutEdges, InstanceOfAssertFactories.list(StreamEdge.class))
+                // connection to mapper
+                .singleElement()
+                .returns(ForwardPartitioner.class, edge -> edge.getPartitioner().getClass())
+                .extracting(edge -> streamGraph.getStreamNode(edge.getTargetId()))
+                // mapper node
+                .returns(
+                        SimpleUdfStreamOperatorFactory.class,
+                        node -> node.getOperatorFactory().getClass())
+                .returns(2, StreamNode::getParallelism)
+                .extracting(
+                        StreamNode::getOutEdges, InstanceOfAssertFactories.list(StreamEdge.class))
+                // connection to outputs
+                .hasSize(3)
+                .allMatch(edge -> edge.getPartitioner() instanceof ForwardPartitioner)
+                // sinks
+                .map(edge -> streamGraph.getStreamNode(edge.getTargetId()))
+                .allMatch(sink -> sink.getOperatorFactory() instanceof SinkWriterOperatorFactory);
+    }
+
+    @Test
+    void testStubTransformationFailsWithoutMatch() {
+        final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        env.setParallelism(2);
+
+        new DataStream<>(
+                        env,
+                        StubTransformation.create(
+                                BasicTypeInfo.INT_TYPE_INFO, t -> t.getName().equals("mapper")))
+                .sinkTo(new DiscardingSink<>())
+                .name("secondary output");
+
+        assertThatThrownBy(env::getStreamGraph)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("No upstream transformation found for StubTransformation");
+    }
+
+    @Test
+    void testStubTransformationFailWithTypeMismatch() {
+        final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        env.setParallelism(2);
+
+        env.fromData(1, 2, 3)
+                .setParallelism(2)
+                .name("source")
+                .map(i -> i)
+                .name("mapper")
+                .sinkTo(new DiscardingSink<>())
+                .name("primary output");
+        new DataStream<>(
+                        env,
+                        StubTransformation.create(
+                                BasicTypeInfo.LONG_TYPE_INFO, t -> t.getName().equals("mapper")))
+                .sinkTo(new DiscardingSink<>())
+                .name("secondary output");
+
+        assertThatThrownBy(env::getStreamGraph)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining(
+                        "The output type of the input transformation does not match the expected output type of the StubTransformation");
     }
 
     private void verifyCacheProduceNode(
@@ -1117,7 +1155,7 @@ class StreamGraphGeneratorTest {
         }
 
         @Override
-        public void setup(
+        protected void setup(
                 StreamTask<?, ?> containingTask,
                 StreamConfig config,
                 Output<StreamRecord<Integer>> output) {}

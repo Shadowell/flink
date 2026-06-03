@@ -20,6 +20,7 @@
 package org.apache.flink.test.checkpointing;
 
 import org.apache.flink.api.common.JobExecutionResult;
+import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.common.accumulators.LongCounter;
 import org.apache.flink.api.common.functions.FilterFunction;
 import org.apache.flink.api.common.functions.MapFunction;
@@ -46,32 +47,44 @@ import org.apache.flink.streaming.api.functions.co.BroadcastProcessFunction;
 import org.apache.flink.streaming.api.functions.co.CoMapFunction;
 import org.apache.flink.streaming.api.functions.co.KeyedBroadcastProcessFunction;
 import org.apache.flink.streaming.api.functions.co.KeyedCoProcessFunction;
-import org.apache.flink.streaming.api.functions.sink.SinkFunction;
+import org.apache.flink.streaming.api.functions.sink.legacy.SinkFunction;
+import org.apache.flink.testutils.junit.extensions.parameterized.Parameter;
+import org.apache.flink.testutils.junit.extensions.parameterized.ParameterizedTestExtension;
+import org.apache.flink.testutils.junit.extensions.parameterized.Parameters;
 import org.apache.flink.util.Collector;
 
 import org.apache.commons.lang3.ArrayUtils;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.junit.jupiter.api.TestInfo;
+import org.junit.jupiter.api.TestTemplate;
+import org.junit.jupiter.api.extension.ExtendWith;
 
-import java.io.File;
 import java.util.Arrays;
 import java.util.BitSet;
 import java.util.Collections;
+import java.util.concurrent.ThreadLocalRandom;
 
 import static org.apache.flink.api.common.eventtime.WatermarkStrategy.noWatermarks;
 import static org.apache.flink.util.Preconditions.checkState;
-import static org.hamcrest.Matchers.equalTo;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertAll;
 
 /** Integration test for performing rescale of unaligned checkpoint. */
-@RunWith(Parameterized.class)
-public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBase {
-    public static final int NUM_GROUPS = 100;
-    private final Topology topology;
-    private final int oldParallelism;
-    private final int newParallelism;
-    private final int buffersPerChannel;
-    private final long sourceSleepMs;
+@ExtendWith(ParameterizedTestExtension.class)
+class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBase {
+    private static final int NUM_GROUPS = 100;
+    @Parameter private String desc;
+
+    @Parameter(1)
+    private Topology topology;
+
+    @Parameter(2)
+    private int oldParallelism;
+
+    @Parameter(3)
+    private int newParallelism;
+
+    @Parameter(4)
+    private long sourceSleepMs;
 
     enum Topology implements DagCreator {
         PIPELINE {
@@ -93,7 +106,7 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                                 0,
                                 sourceSleepMillis,
                                 val -> true);
-                addFailingSink(source, minCheckpoints, slotSharing);
+                addFailingSink(source, minCheckpoints, slotSharing, expectedRestarts);
             }
         },
 
@@ -132,7 +145,7 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                                                     slotSharing ? "default" : ("min" + inputIndex));
                 }
 
-                addFailingSink(combinedSource, minCheckpoints, slotSharing);
+                addFailingSink(combinedSource, minCheckpoints, slotSharing, expectedRestarts);
             }
         },
 
@@ -174,7 +187,7 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                                 .process(new TestKeyedCoProcessFunction())
                                 .setParallelism(parallelism);
 
-                addFailingSink(connected, minCheckpoints, slotSharing);
+                addFailingSink(connected, minCheckpoints, slotSharing, expectedRestarts);
             }
         },
 
@@ -204,7 +217,7 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                     combinedSource = combinedSource == null ? source : combinedSource.union(source);
                 }
 
-                addFailingSink(combinedSource, minCheckpoints, slotSharing);
+                addFailingSink(combinedSource, minCheckpoints, slotSharing, expectedRestarts);
             }
         },
 
@@ -254,7 +267,7 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                                 .process(new TestBroadcastProcessFunction())
                                 .setParallelism(2 * parallelism);
 
-                addFailingSink(joined, minCheckpoints, slotSharing);
+                addFailingSink(joined, minCheckpoints, slotSharing, expectedRestarts);
             }
         },
 
@@ -330,7 +343,7 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                                 .process(new TestKeyedBroadcastProcessFunction())
                                 .setParallelism(parallelism + 2);
 
-                addFailingSink(joined, minCheckpoints, slotSharing);
+                addFailingSink(joined, minCheckpoints, slotSharing, expectedRestarts);
             }
         },
         CUSTOM_PARTITIONER {
@@ -367,14 +380,7 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                                 })
                         .name("long-to-string-map")
                         .uid("long-to-string-map")
-                        .map(
-                                new FailingMapper<>(
-                                        state -> false,
-                                        state ->
-                                                state.completedCheckpoints >= minCheckpoints / 2
-                                                        && state.runNumber == 0,
-                                        state -> false,
-                                        state -> false))
+                        .map(getFailingMapper(minCheckpoints, expectedRestarts))
                         .name("failing-map")
                         .uid("failing-map")
                         .setParallelism(parallelism)
@@ -392,17 +398,13 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
         };
 
         void addFailingSink(
-                DataStream<Long> combinedSource, long minCheckpoints, boolean slotSharing) {
+                DataStream<Long> combinedSource,
+                long minCheckpoints,
+                boolean slotSharing,
+                int expectedRestarts) {
             combinedSource
                     .shuffle()
-                    .map(
-                            new FailingMapper<>(
-                                    state -> false,
-                                    state ->
-                                            state.completedCheckpoints >= minCheckpoints / 2
-                                                    && state.runNumber == 0,
-                                    state -> false,
-                                    state -> false))
+                    .map(getFailingMapper(minCheckpoints, expectedRestarts))
                     .name("failing-map")
                     .uid("failing-map")
                     .slotSharingGroup(slotSharing ? "default" : "failing-map")
@@ -417,6 +419,33 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                     .name("sink")
                     .uid("sink")
                     .slotSharingGroup(slotSharing ? "default" : "sink");
+        }
+
+        /**
+         * Creates a FailingMapper that only fails during snapshot operations.
+         *
+         * <p>When {@code expectedRestarts <= 0}, returns a no-op FailingMapper that never fails.
+         * This is used in phases where no failure is expected (e.g., checkpoint-and-cancel phase).
+         *
+         * <p>When {@code expectedRestarts > 0}, fails during snapshotState() when
+         * completedCheckpoints >= minCheckpoints/2 AND runNumber == 0. After job failovers
+         * internally, runNumber becomes attemptNumber > 0, so failure condition is no longer
+         * satisfied. This ensures the mapper fails exactly once during initial run to trigger job
+         * failover, but never fails again after recovery from checkpoint.
+         */
+        private static <T> FailingMapper<T> getFailingMapper(
+                long minCheckpoints, int expectedRestarts) {
+            if (expectedRestarts <= 0) {
+                return new FailingMapper<>(
+                        state -> false, state -> false, state -> false, state -> false);
+            }
+            return new FailingMapper<>(
+                    state -> false,
+                    state ->
+                            state.completedCheckpoints >= minCheckpoints / 2
+                                    && state.runNumber == 0,
+                    state -> false,
+                    state -> false);
         }
 
         DataStream<Long> createSourcePipeline(
@@ -538,14 +567,15 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
         }
     }
 
-    @Parameterized.Parameters(
-            name = "{0} {1} from {2} to {3}, sourceSleepMs = {4}, buffersPerChannel = {5}")
+    @Parameters(name = "{0} {1} from {2} to {3}, sourceSleepMs = {4}")
     public static Object[][] getScaleFactors() {
         // We use `sourceSleepMs` > 0 to test rescaling without backpressure and only very few
         // captured in-flight records, see FLINK-31963.
         Object[][] parameters =
                 new Object[][] {
+                    // Disable CUSTOM_PARTITIONER since it does not work well, see FLINK-39162
                     new Object[] {"downscale", Topology.CUSTOM_PARTITIONER, 3, 2, 0L},
+                    new Object[] {"upscale", Topology.CUSTOM_PARTITIONER, 2, 3, 0L},
                     new Object[] {"downscale", Topology.KEYED_DIFFERENT_PARALLELISM, 12, 7, 0L},
                     new Object[] {"upscale", Topology.KEYED_DIFFERENT_PARALLELISM, 7, 12, 0L},
                     new Object[] {"downscale", Topology.KEYED_DIFFERENT_PARALLELISM, 5, 3, 5L},
@@ -596,62 +626,76 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
                     new Object[] {"no scale", Topology.MULTI_INPUT, 7, 7, 0L},
                 };
         return Arrays.stream(parameters)
-                .map(
-                        params ->
-                                new Object[][] {
-                                    ArrayUtils.insert(params.length, params, 0),
-                                    ArrayUtils.insert(params.length, params, BUFFER_PER_CHANNEL)
-                                })
+                .map(params -> new Object[][] {ArrayUtils.insert(params.length, params)})
                 .flatMap(Arrays::stream)
                 .toArray(Object[][]::new);
     }
 
-    public UnalignedCheckpointRescaleITCase(
-            String desc,
-            Topology topology,
-            int oldParallelism,
-            int newParallelism,
-            long sourceSleepMs,
-            int buffersPerChannel) {
-        this.topology = topology;
-        this.oldParallelism = oldParallelism;
-        this.newParallelism = newParallelism;
-        this.sourceSleepMs = sourceSleepMs;
-        this.buffersPerChannel = buffersPerChannel;
-    }
-
-    @Test
-    public void shouldRescaleUnalignedCheckpoint() throws Exception {
+    /**
+     * Tests unaligned checkpoint rescaling behavior.
+     *
+     * <p>Prescale phase: Job fails when completedCheckpoints >= minCheckpoints/2 via FailingMapper.
+     * Generates checkpoint for rescale test.
+     *
+     * <p>Postscale phase: Job restores from checkpoint with different parallelism, failovers once,
+     * and finishes after source generates all records.
+     */
+    @TestTemplate
+    void shouldRescaleUnalignedCheckpoint(TestInfo testInfo) throws Exception {
+        // Phase 1: prescale - generate initial checkpoint (unchanged)
         final UnalignedSettings prescaleSettings =
                 new UnalignedSettings(topology)
                         .setParallelism(oldParallelism)
                         .setExpectedFailures(1)
-                        .setBuffersPerChannel(buffersPerChannel)
-                        .setSourceSleepMs(sourceSleepMs);
-        prescaleSettings.setGenerateCheckpoint(true);
-        final File checkpointDir = super.execute(prescaleSettings);
+                        .setSourceSleepMs(sourceSleepMs)
+                        .setExpectedFinalJobStatus(JobStatus.FAILED);
+        prescaleSettings.setCheckpointGenerationMode(CheckpointGenerationMode.WAIT_FOR_JOB_RESULT);
+        final String checkpointDir1 = super.execute(prescaleSettings, testInfo);
+        assertThat(checkpointDir1)
+                .as("First job must generate a checkpoint for rescale test to be valid.")
+                .isNotNull();
 
-        // resume
-        final UnalignedSettings postscaleSettings =
+        // Phase 2: postscale-checkpoint - recover from checkpoint1 and generate new checkpoint
+        // expectedFailures defaults to 0, so expectedRestarts passed to create() is also 0,
+        // which causes getFailingMapper to return a no-op mapper that never fails.
+        final UnalignedSettings phase2Settings =
                 new UnalignedSettings(topology)
                         .setParallelism(newParallelism)
+                        .setCheckpointGenerationMode(
+                                CheckpointGenerationMode.WAIT_FOR_CHECKPOINT_AND_CANCEL)
+                        .setRestoreCheckpoint(checkpointDir1)
+                        .setSourceSleepMs(sourceSleepMs);
+        final String checkpointDir2 = super.execute(phase2Settings, testInfo);
+        assertThat(checkpointDir2)
+                .as("Phase 2 must generate a checkpoint for phase 3 to be valid.")
+                .isNotNull();
+
+        // Phase 3: recovery - recover from checkpoint2 and run to completion
+        // Randomly choose parallelism from oldParallelism or newParallelism
+        int phase3Parallelism =
+                ThreadLocalRandom.current().nextBoolean() ? oldParallelism : newParallelism;
+        final UnalignedSettings phase3Settings =
+                new UnalignedSettings(topology)
+                        .setParallelism(phase3Parallelism)
                         .setExpectedFailures(1)
-                        .setBuffersPerChannel(buffersPerChannel);
-        postscaleSettings.setRestoreCheckpoint(checkpointDir);
-        super.execute(postscaleSettings);
+                        .setRestoreCheckpoint(checkpointDir2)
+                        .setExpectedFinalJobStatus(JobStatus.FINISHED);
+        super.execute(phase3Settings, testInfo);
     }
 
     protected void checkCounters(JobExecutionResult result) {
-        collector.checkThat(
-                "NUM_OUTPUTS = NUM_INPUTS",
-                result.<Long>getAccumulatorResult(NUM_OUTPUTS),
-                equalTo(result.getAccumulatorResult(NUM_INPUTS)));
-        if (!topology.equals(Topology.CUSTOM_PARTITIONER)) {
-            collector.checkThat(
-                    "NUM_DUPLICATES",
-                    result.<Long>getAccumulatorResult(NUM_DUPLICATES),
-                    equalTo(0L));
-        }
+        assertAll(
+                () ->
+                        assertThat(result.<Long>getAccumulatorResult(NUM_OUTPUTS))
+                                .as("NUM_OUTPUTS = NUM_INPUTS")
+                                .isEqualTo(result.getAccumulatorResult(NUM_INPUTS)),
+                () -> {
+                    if (!topology.equals(Topology.CUSTOM_PARTITIONER)) {
+                        assertThat(result.<Long>getAccumulatorResult(NUM_DUPLICATES))
+                                .as("NUM_DUPLICATES")
+                                .isZero();
+                    }
+                });
     }
 
     /**
@@ -696,7 +740,7 @@ public class UnalignedCheckpointRescaleITCase extends UnalignedCheckpointTestBas
             super.close();
         }
 
-        static class State extends VerifyingSinkStateBase {
+        public static class State extends VerifyingSinkStateBase {
             private final BitSet encounteredNumbers = new BitSet();
         }
     }

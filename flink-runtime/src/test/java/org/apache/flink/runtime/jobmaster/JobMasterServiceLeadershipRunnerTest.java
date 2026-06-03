@@ -20,10 +20,8 @@ package org.apache.flink.runtime.jobmaster;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
-import org.apache.flink.api.common.time.Time;
 import org.apache.flink.core.testutils.CheckedThread;
 import org.apache.flink.core.testutils.OneShotLatch;
-import org.apache.flink.runtime.clusterframework.ApplicationStatus;
 import org.apache.flink.runtime.execution.librarycache.LibraryCacheManager;
 import org.apache.flink.runtime.execution.librarycache.TestingClassLoaderLease;
 import org.apache.flink.runtime.executiongraph.ArchivedExecutionGraph;
@@ -80,7 +78,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /** Tests for the {@link JobMasterServiceLeadershipRunner}. */
 class JobMasterServiceLeadershipRunnerTest {
 
-    private static final Time TESTING_TIMEOUT = Time.seconds(10);
+    private static final Duration TESTING_TIMEOUT = Duration.ofSeconds(10);
 
     private static JobGraph jobGraph;
 
@@ -678,8 +676,7 @@ class JobMasterServiceLeadershipRunnerTest {
     @Test
     void testJobAlreadyDone() throws Exception {
         final JobID jobId = new JobID();
-        final JobResult jobResult =
-                TestingJobResultStore.createJobResult(jobId, ApplicationStatus.UNKNOWN);
+        final JobResult jobResult = TestingJobResultStore.createJobResult(jobId, null);
         jobResultStore.createDirtyResultAsync(new JobResultEntry(jobResult)).get();
         try (JobManagerRunner jobManagerRunner =
                 newJobMasterServiceLeadershipRunnerBuilder()

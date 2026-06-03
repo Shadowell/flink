@@ -251,6 +251,16 @@ class GenericInMemoryCatalogTest extends CatalogTestBase {
     }
 
     @Override
+    protected boolean supportsModels() {
+        return true;
+    }
+
+    @Override
+    protected boolean supportsConnections() {
+        return true;
+    }
+
+    @Override
     protected CatalogFunction createPythonFunction() {
         return new CatalogFunctionImpl("test.func1", FunctionLanguage.PYTHON);
     }

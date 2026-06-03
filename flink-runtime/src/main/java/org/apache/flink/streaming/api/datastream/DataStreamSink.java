@@ -26,14 +26,13 @@ import org.apache.flink.api.common.operators.util.OperatorValidationUtils;
 import org.apache.flink.api.connector.sink2.Sink;
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.sink.SinkFunction;
+import org.apache.flink.streaming.api.functions.sink.legacy.SinkFunction;
 import org.apache.flink.streaming.api.lineage.LineageVertexProvider;
 import org.apache.flink.streaming.api.operators.ChainingStrategy;
 import org.apache.flink.streaming.api.operators.StreamSink;
 import org.apache.flink.streaming.api.transformations.LegacySinkTransformation;
 import org.apache.flink.streaming.api.transformations.PhysicalTransformation;
 import org.apache.flink.streaming.api.transformations.SinkTransformation;
-import org.apache.flink.streaming.api.transformations.SinkV1Adapter;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
@@ -96,14 +95,6 @@ public class DataStreamSink<T> {
         return new DataStreamSink<>(transformation);
     }
 
-    @Internal
-    public static <T> DataStreamSink<T> forSinkV1(
-            DataStream<T> inputStream,
-            org.apache.flink.api.connector.sink.Sink<T, ?, ?, ?> sink,
-            CustomSinkOperatorUidHashes customSinkOperatorUidHashes) {
-        return forSink(inputStream, SinkV1Adapter.wrap(sink), customSinkOperatorUidHashes);
-    }
-
     /** Returns the transformation that contains the actual sink operator of this sink. */
     @Internal
     public Transformation<T> getTransformation() {
@@ -145,6 +136,22 @@ public class DataStreamSink<T> {
     @PublicEvolving
     public DataStreamSink<T> uid(String uid) {
         transformation.setUid(uid);
+        return this;
+    }
+
+    /**
+     * Adds additional variables that will be added to scope of the metrics reported from this
+     * operator.
+     *
+     * <p>The specified additional variables are only used for the writer operator. They are not
+     * used for committer or global committer.
+     *
+     * @param key
+     * @param value
+     */
+    @PublicEvolving
+    public DataStreamSink<T> addMetricVariable(String key, String value) {
+        transformation.addMetricVariable(key, value);
         return this;
     }
 

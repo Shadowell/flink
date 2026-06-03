@@ -18,7 +18,6 @@
 package org.apache.flink.runtime.resourcemanager.slotmanager;
 
 import org.apache.flink.api.common.JobID;
-import org.apache.flink.api.common.time.Time;
 import org.apache.flink.core.testutils.OneShotLatch;
 import org.apache.flink.runtime.blocklist.BlockedTaskManagerChecker;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
@@ -45,6 +44,7 @@ import org.apache.flink.util.function.RunnableWithException;
 
 import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.time.Duration;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Optional;
@@ -148,11 +148,11 @@ abstract class FineGrainedSlotManagerTestBase {
         private final ResourceTracker resourceTracker = new DefaultResourceTracker();
         private final TaskManagerTracker taskManagerTracker = new FineGrainedTaskManagerTracker();
         private final SlotStatusSyncer slotStatusSyncer =
-                new DefaultSlotStatusSyncer(Time.seconds(10L));
+                new DefaultSlotStatusSyncer(Duration.ofSeconds(10L));
         private SlotManagerMetricGroup slotManagerMetricGroup =
                 UnregisteredMetricGroups.createUnregisteredSlotManagerMetricGroup();
         private BlockedTaskManagerChecker blockedTaskManagerChecker = resourceID -> false;
-        private final ScheduledExecutor scheduledExecutor =
+        private ScheduledExecutor scheduledExecutor =
                 new ScheduledExecutorServiceAdapter(EXECUTOR_RESOURCE.getExecutor());
         private final Executor mainThreadExecutor = EXECUTOR_RESOURCE.getExecutor();
         private FineGrainedSlotManager slotManager;
@@ -191,6 +191,10 @@ abstract class FineGrainedSlotManagerTestBase {
         public void setBlockedTaskManagerChecker(
                 BlockedTaskManagerChecker blockedTaskManagerChecker) {
             this.blockedTaskManagerChecker = blockedTaskManagerChecker;
+        }
+
+        public void setScheduledExecutor(ScheduledExecutor scheduledExecutor) {
+            this.scheduledExecutor = scheduledExecutor;
         }
 
         void runInMainThread(Runnable runnable) {

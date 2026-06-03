@@ -32,17 +32,17 @@ import org.apache.flink.runtime.metrics.util.InterceptingOperatorMetricGroup;
 import org.apache.flink.runtime.operators.testutils.ExpectedTestException;
 import org.apache.flink.runtime.operators.testutils.MockEnvironmentBuilder;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
-import org.apache.flink.runtime.state.InputChannelStateHandle;
+import org.apache.flink.runtime.state.InputStateHandle;
 import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.OperatorStateHandle;
-import org.apache.flink.runtime.state.ResultSubpartitionStateHandle;
+import org.apache.flink.runtime.state.OutputStateHandle;
 import org.apache.flink.runtime.state.SnapshotResult;
 import org.apache.flink.runtime.state.StateInitializationContext;
 import org.apache.flink.runtime.state.StateSnapshotContext;
 import org.apache.flink.runtime.state.StateSnapshotContextSynchronousImpl;
+import org.apache.flink.runtime.state.hashmap.HashMapStateBackend;
 import org.apache.flink.runtime.state.memory.MemCheckpointStreamFactory;
-import org.apache.flink.runtime.state.memory.MemoryStateBackend;
 import org.apache.flink.streaming.api.operators.StreamOperatorStateHandler.CheckpointedStreamOperator;
 import org.apache.flink.streaming.runtime.tasks.TestProcessingTimeService;
 import org.apache.flink.util.ExceptionUtils;
@@ -77,9 +77,9 @@ class StreamOperatorStateHandlerTest {
                     new CancelableFuture<>();
             RunnableFuture<SnapshotResult<OperatorStateHandle>> operatorStateRawFuture =
                     new CancelableFuture<>();
-            RunnableFuture<SnapshotResult<StateObjectCollection<InputChannelStateHandle>>>
+            RunnableFuture<SnapshotResult<StateObjectCollection<InputStateHandle>>>
                     inputChannelStateFuture = new CancelableFuture<>();
-            RunnableFuture<SnapshotResult<StateObjectCollection<ResultSubpartitionStateHandle>>>
+            RunnableFuture<SnapshotResult<StateObjectCollection<OutputStateHandle>>>
                     resultSubpartitionStateFuture = new CancelableFuture<>();
 
             OperatorSnapshotFutures operatorSnapshotResult =
@@ -99,7 +99,7 @@ class StreamOperatorStateHandlerTest {
 
             StreamTaskStateInitializerImpl stateInitializer =
                     new StreamTaskStateInitializerImpl(
-                            new MockEnvironmentBuilder().build(), new MemoryStateBackend());
+                            new MockEnvironmentBuilder().build(), new HashMapStateBackend());
             StreamOperatorStateContext stateContext =
                     stateInitializer.streamOperatorStateContext(
                             new OperatorID(),
@@ -110,6 +110,7 @@ class StreamOperatorStateHandlerTest {
                             closeableRegistry,
                             new InterceptingOperatorMetricGroup(),
                             1.0,
+                            false,
                             false);
             StreamOperatorStateHandler stateHandler =
                     new StreamOperatorStateHandler(
@@ -162,6 +163,7 @@ class StreamOperatorStateHandlerTest {
                                             new MemCheckpointStreamFactory(1024),
                                             operatorSnapshotResult,
                                             context,
+                                            false,
                                             false))
                     .isInstanceOfSatisfying(
                             CheckpointException.class,

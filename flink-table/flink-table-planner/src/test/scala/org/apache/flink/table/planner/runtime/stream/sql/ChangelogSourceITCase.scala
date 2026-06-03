@@ -17,8 +17,8 @@
  */
 package org.apache.flink.table.planner.runtime.stream.sql
 
-import org.apache.flink.api.scala._
 import org.apache.flink.core.testutils.EachCallbackWrapper
+import org.apache.flink.table.api._
 import org.apache.flink.table.api.bridge.scala._
 import org.apache.flink.table.api.config.ExecutionConfigOptions
 import org.apache.flink.table.planner.JBigDecimal
@@ -46,8 +46,8 @@ import scala.collection.JavaConversions._
 class ChangelogSourceITCase(
     sourceMode: SourceMode,
     miniBatch: MiniBatchMode,
-    state: StateBackendMode)
-  extends StreamingWithMiniBatchTestBase(miniBatch, state) {
+    state: StateBackendMode
+) extends StreamingWithMiniBatchTestBase(miniBatch, state) {
 
   @RegisterExtension private val _: EachCallbackWrapper[LegacyRowExtension] =
     new EachCallbackWrapper[LegacyRowExtension](new LegacyRowExtension)
@@ -78,7 +78,7 @@ class ChangelogSourceITCase(
   def testToRetractStream(): Unit = {
     val result = tEnv.sqlQuery(s"SELECT * FROM users").toRetractStream[Row]
     val sink = new TestingRetractSink()
-    result.addSink(sink).setParallelism(result.parallelism)
+    result.addSink(sink).setParallelism(result.getParallelism)
     env.execute()
 
     val expected = Seq(
@@ -107,6 +107,7 @@ class ChangelogSourceITCase(
       s"""
          |INSERT INTO user_sink
          |SELECT * FROM users
+         |ON CONFLICT DO DEDUPLICATE
          |""".stripMargin
     tEnv.executeSql(sinkDDL)
     tEnv.executeSql(dml).await()
@@ -139,7 +140,7 @@ class ChangelogSourceITCase(
 
     val result = tEnv.sqlQuery(query).toRetractStream[Row]
     val sink = new TestingRetractSink()
-    result.addSink(sink).setParallelism(result.parallelism)
+    result.addSink(sink).setParallelism(result.getParallelism)
     env.execute()
 
     val expected = Seq("3,29.39,tom123@gmail.com")
@@ -167,6 +168,7 @@ class ChangelogSourceITCase(
          |SELECT 'ALL', count(*), sum(balance), max(email)
          |FROM users
          |GROUP BY 'ALL'
+         |ON CONFLICT DO DEDUPLICATE
          |""".stripMargin
     tEnv.executeSql(sinkDDL)
     tEnv.executeSql(dml).await()
@@ -190,12 +192,16 @@ class ChangelogSourceITCase(
          | 'sink-insert-only' = 'false'
          |)
          |""".stripMargin
+    // Note: balance2 is computed as balance*2 which results in a higher precision DECIMAL type.
+    // Since the sink's balance column has fixed precision, this requires ON CONFLICT handling
+    // because narrowing DECIMAL casts (e.g., DECIMAL(28,2) -> DECIMAL(18,2)) are not injective.
     val dml =
       s"""
          |INSERT INTO user_sink
          |SELECT balance2, count(*), max(email)
          |FROM users
          |GROUP BY balance2
+         |ON CONFLICT DO DEDUPLICATE
          |""".stripMargin
     tEnv.executeSql(sinkDDL)
     tEnv.executeSql(dml).await()
@@ -228,6 +234,7 @@ class ChangelogSourceITCase(
       s"""
          |INSERT INTO user_sink
          |SELECT * FROM users WHERE balance > 9
+         |ON CONFLICT DO DEDUPLICATE
          |""".stripMargin
     tEnv.executeSql(sinkDDL)
     tEnv.executeSql(dml).await()
@@ -249,7 +256,7 @@ class ChangelogSourceITCase(
 
     val sink = new TestingRetractSink
     val result = tEnv.sqlQuery(sql).toRetractStream[Row]
-    result.addSink(sink).setParallelism(result.parallelism)
+    result.addSink(sink).setParallelism(result.getParallelism)
     env.execute()
 
     val expected =

@@ -18,6 +18,8 @@
 
 package org.apache.flink.table.planner.plan.nodes.exec.common;
 
+import org.apache.flink.table.planner.plan.nodes.exec.batch.BatchExecCalc;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecCalc;
 import org.apache.flink.table.planner.runtime.utils.JavaUserDefinedScalarFunctions.JavaFunc0;
 import org.apache.flink.table.planner.runtime.utils.JavaUserDefinedScalarFunctions.JavaFunc1;
 import org.apache.flink.table.planner.runtime.utils.JavaUserDefinedScalarFunctions.JavaFunc2;
@@ -28,13 +30,16 @@ import org.apache.flink.table.test.program.SourceTestStep;
 import org.apache.flink.table.test.program.TableTestProgram;
 import org.apache.flink.types.Row;
 
+import java.math.BigDecimal;
+import java.time.Instant;
 import java.time.LocalDateTime;
 
-/**
- * {@link TableTestProgram} definitions for testing {@link
- * org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecCalc}.
- */
+/** {@link TableTestProgram}s for testing {@link StreamExecCalc} and {@link BatchExecCalc}. */
 public class CalcTestPrograms {
+
+    // --------------------------------------------------------------------------------------------
+    // With restore data
+    // --------------------------------------------------------------------------------------------
 
     public static final TableTestProgram SIMPLE_CALC =
             TableTestProgram.of("calc-simple", "validates basic calc node")
@@ -188,7 +193,7 @@ public class CalcTestPrograms {
                                                     "11 and 11 and 1702688461000",
                                                     "hello world11",
                                                     "$hello",
-                                                    LocalDateTime.of(2023, 12, 16, 01, 01, 00, 0)))
+                                                    LocalDateTime.of(2023, 12, 16, 1, 1, 0, 0)))
                                     .consumedAfterRestore(
                                             Row.of(
                                                     5L,
@@ -197,7 +202,7 @@ public class CalcTestPrograms {
                                                     "11 and 11 and 1702688461000",
                                                     "hello world11",
                                                     "$hello",
-                                                    LocalDateTime.of(2023, 12, 16, 01, 01, 00, 0)))
+                                                    LocalDateTime.of(2023, 12, 16, 1, 1, 0, 0)))
                                     .build())
                     .runSql(
                             "INSERT INTO sink_t SELECT "
@@ -210,5 +215,130 @@ public class CalcTestPrograms {
                                     + "udf5(d, 1000) as d1 "
                                     + "from source_t where "
                                     + "(udf1(a) > 0 or (a * b) < 100) and b > 10")
+                    .build();
+
+    public static final TableTestProgram CALC_CURRENT_TIMESTAMP =
+            TableTestProgram.of(
+                            "calc-current-timestamp", "validates basic calc with current timestamp")
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("t")
+                                    .addSchema("a BIGINT")
+                                    .producedBeforeRestore(Row.of(100L))
+                                    .producedAfterRestore(Row.of(10000L))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema("a BIGINT")
+                                    .consumedBeforeRestore(Row.of(20L))
+                                    .consumedAfterRestore(Row.of(0L))
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink_t SELECT extract(year from current_timestamp) / a FROM t")
+                    .build();
+
+    // --------------------------------------------------------------------------------------------
+    // Without restore data
+    // --------------------------------------------------------------------------------------------
+
+    public static final TableTestProgram CURRENT_WATERMARK =
+            TableTestProgram.of(
+                            "calc-current-watermark", "validates the CURRENT_WATERMARK function")
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("t")
+                                    .addSchema(
+                                            "name STRING",
+                                            "ts TIMESTAMP_LTZ(3)",
+                                            "WATERMARK FOR ts AS ts")
+                                    .producedValues(
+                                            Row.of("Bob", Instant.ofEpochMilli(0)),
+                                            Row.of("Bob", Instant.ofEpochMilli(1)),
+                                            Row.of("Alice", Instant.ofEpochMilli(2)),
+                                            Row.of("Bob", Instant.ofEpochMilli(3)))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema(
+                                            "name STRING",
+                                            "ts TIMESTAMP_LTZ(3)",
+                                            "w TIMESTAMP_LTZ(3)")
+                                    .consumedValues(
+                                            "+I[Bob, 1970-01-01T00:00:00Z, null]",
+                                            "+I[Bob, 1970-01-01T00:00:00.001Z, 1970-01-01T00:00:00Z]",
+                                            "+I[Alice, 1970-01-01T00:00:00.002Z, 1970-01-01T00:00:00.001Z]",
+                                            "+I[Bob, 1970-01-01T00:00:00.003Z, 1970-01-01T00:00:00.002Z]")
+                                    .build())
+                    .runSql("INSERT INTO sink_t SELECT name, ts, CURRENT_WATERMARK(ts) AS w FROM t")
+                    .build();
+
+    public static final TableTestProgram COALESCE_NESTED_ROW_LEFT_JOIN =
+            TableTestProgram.of(
+                            "calc-coalesce-nested-row-left-join",
+                            "validates coalesce on nested ROW field from LEFT JOIN")
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("orders")
+                                    .addSchema(
+                                            "`order_id` BIGINT NOT NULL",
+                                            "`amount` DOUBLE",
+                                            "PRIMARY KEY (`order_id`) NOT ENFORCED")
+                                    .producedValues(Row.of(1L, 10.0), Row.of(2L, 20.0))
+                                    .build())
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("order_details_row")
+                                    .addSchema(
+                                            "`r` ROW<`order_id` BIGINT NOT NULL, `name` STRING NOT NULL> NOT NULL",
+                                            "`detail` STRING",
+                                            "PRIMARY KEY (`r`) NOT ENFORCED")
+                                    .producedValues(Row.of(Row.of(1L, "first"), "d1"))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("coalesce_sink")
+                                    .addSchema("order_id_str STRING")
+                                    .consumedValues("+I[1]", "+I[2]")
+                                    .build())
+                    .runSql(
+                            "INSERT INTO coalesce_sink "
+                                    + "SELECT CAST(COALESCE(b.r.order_id, a.order_id) AS STRING) AS order_id_str "
+                                    + "FROM orders a LEFT JOIN order_details_row b "
+                                    + "ON a.order_id = b.r.order_id")
+                    .build();
+
+    public static final TableTestProgram COALESCE =
+            TableTestProgram.of("calc-coalesce", "validates coalesce node")
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("t")
+                                    .addSchema(
+                                            "a DECIMAL(2, 1)",
+                                            "b DECIMAL(4, 2)",
+                                            "c TIMESTAMP(0)",
+                                            "d TIMESTAMP(3)")
+                                    .producedBeforeRestore(
+                                            Row.of(
+                                                    null,
+                                                    new BigDecimal("11.22"),
+                                                    null,
+                                                    LocalDateTime.of(
+                                                            1970, 1, 1, 0, 0, 0, 123_000_000)))
+                                    .producedAfterRestore(
+                                            Row.of(
+                                                    new BigDecimal("5.3"),
+                                                    null,
+                                                    LocalDateTime.of(2000, 2, 2, 2, 2, 2),
+                                                    null))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema("x DECIMAL(4, 2)", "y TIMESTAMP(3)")
+                                    .consumedBeforeRestore(
+                                            Row.of(
+                                                    new BigDecimal("11.22"),
+                                                    LocalDateTime.of(
+                                                            1970, 1, 1, 0, 0, 0, 123_000_000)))
+                                    .consumedAfterRestore(
+                                            Row.of(
+                                                    new BigDecimal("5.30"),
+                                                    LocalDateTime.of(2000, 2, 2, 2, 2, 2)))
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink_t SELECT COALESCE(a, b) AS x, COALESCE(c, d) AS y FROM t")
                     .build();
 }

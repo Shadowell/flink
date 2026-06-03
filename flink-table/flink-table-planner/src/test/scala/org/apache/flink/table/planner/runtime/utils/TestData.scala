@@ -159,7 +159,7 @@ object TestData {
   val nullablesOfNullData5 = Array(true, true, true, true, true)
 
   lazy val smallTupleData3: Seq[(Int, Long, String)] = {
-    val data = new mutable.MutableList[(Int, Long, String)]
+    val data = new mutable.ListBuffer[(Int, Long, String)]
     data.+=((1, 1L, "Hi"))
     data.+=((2, 2L, "Hello"))
     data.+=((3, 2L, "Hello world"))
@@ -171,7 +171,7 @@ object TestData {
   val nullablesOfSmallData3 = Array(true, true, true)
 
   lazy val smallTupleData5: Seq[(Int, Long, Int, String, Long)] = {
-    val data = new mutable.MutableList[(Int, Long, Int, String, Long)]
+    val data = new mutable.ListBuffer[(Int, Long, Int, String, Long)]
     data.+=((1, 1L, 0, "Hallo", 1L))
     data.+=((2, 2L, 1, "Hallo Welt", 2L))
     data.+=((2, 3L, 2, "Hallo Welt wie", 1L))
@@ -237,7 +237,7 @@ object TestData {
   )
 
   lazy val tupleData2: Seq[(Int, Double)] = {
-    val data = new mutable.MutableList[(Int, Double)]
+    val data = new mutable.ListBuffer[(Int, Double)]
     data.+=((1, 0.1))
     data.+=((2, 0.2))
     data.+=((2, 0.2))
@@ -256,7 +256,7 @@ object TestData {
   }
 
   lazy val tupleData3: Seq[(Int, Long, String)] = {
-    val data = new mutable.MutableList[(Int, Long, String)]
+    val data = new mutable.ListBuffer[(Int, Long, String)]
     data.+=((1, 1L, "Hi"))
     data.+=((2, 2L, "Hello"))
     data.+=((3, 2L, "Hello world"))
@@ -331,7 +331,7 @@ object TestData {
   )
 
   lazy val smallNestedTupleData: Seq[((Int, Int), String)] = {
-    val data = new mutable.MutableList[((Int, Int), String)]
+    val data = new mutable.ListBuffer[((Int, Int), String)]
     data.+=(((1, 1), "one"))
     data.+=(((2, 2), "two"))
     data.+=(((3, 3), "three"))
@@ -342,6 +342,18 @@ object TestData {
     Array(Row.of(new JInt(1)), Row.of(new JInt(2)), Row.of(new JInt(3)), Row.of(new JInt(4)))
 
   lazy val mapRows = map(("Monday", 1), ("Tuesday", 2), ("Wednesday", 3))
+
+  lazy val orderedLoopRows: Seq[Row] = {
+    for {
+      cnt <- 0 until 33
+    } yield {
+      Row.of(
+        s"Record_$cnt",
+        cnt.toLong.asInstanceOf[AnyRef],
+        cnt.asInstanceOf[AnyRef],
+        cnt.toDouble.asInstanceOf[AnyRef])
+    }
+  }
 
   lazy val deepNestedRow: Seq[Row] = {
     Seq(
@@ -376,7 +388,7 @@ object TestData {
   }
 
   lazy val tupleData5: Seq[(Int, Long, Int, String, Long)] = {
-    val data = new mutable.MutableList[(Int, Long, Int, String, Long)]
+    val data = new mutable.ListBuffer[(Int, Long, Int, String, Long)]
     data.+=((1, 1L, 0, "Hallo", 1L))
     data.+=((2, 2L, 1, "Hallo Welt", 2L))
     data.+=((2, 3L, 2, "Hallo Welt wie", 1L))
@@ -461,7 +473,7 @@ object TestData {
       3.14,
       "EFG",
       localDate("2017-05-20"),
-      localTime("09:45:78"),
+      localTime("09:45:58"),
       localDateTime("2015-11-19 10:00:01")),
     row(
       4,
@@ -1396,7 +1408,7 @@ object TestData {
       LocalDateTime.of(2020, 5, 1, 23, 23, 23, 0),
       null
     )
-    val instants = new mutable.MutableList[Instant]
+    val instants = new mutable.ListBuffer[Instant]
     for (i <- datetimes.indices) {
       if (datetimes(i) == null) {
         instants += null
@@ -1415,7 +1427,7 @@ object TestData {
     val maps =
       List(map(("k1", 1)), map(("k2", 2), ("k4", 4)), map(("k3", null)), map((null, 3)), null)
 
-    val data = new mutable.MutableList[Row]
+    val data = new mutable.ListBuffer[Row]
     for (i <- ints.indices) {
       data += row(
         bools(i),

@@ -35,6 +35,8 @@ import org.apache.flink.table.runtime.typeutils.RowDataSerializer;
 import org.apache.flink.table.types.logical.IntType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.types.logical.VarCharType;
+import org.apache.flink.types.bitmap.Bitmap;
+import org.apache.flink.types.variant.Variant;
 
 import org.junit.jupiter.api.Test;
 
@@ -309,6 +311,46 @@ class BinaryArrayDataTest {
             BinaryArrayData newArray = splitArray(array);
             assertThat(newArray.isNullAt(0)).isTrue();
             assertThat(newArray.getString(1)).isEqualTo(fromString("jaja"));
+        }
+
+        {
+            // test variant
+            Variant variant = Variant.newBuilder().of(1);
+
+            BinaryArrayData array = new BinaryArrayData();
+            BinaryArrayWriter writer = new BinaryArrayWriter(array, 2, 8);
+            writer.setNullAt(0);
+            writer.writeVariant(1, variant);
+            writer.complete();
+
+            assertThat(array.isNullAt(0)).isTrue();
+            assertThat(array.getVariant(1)).isEqualTo(variant);
+
+            BinaryArrayData newArray = splitArray(array);
+            assertThat(newArray.isNullAt(0)).isTrue();
+            assertThat(newArray.getVariant(1)).isEqualTo(variant);
+        }
+
+        {
+            // test bitmap
+            Bitmap bm1 = Bitmap.empty();
+            Bitmap bm2 = Bitmap.fromArray(new int[] {1});
+
+            BinaryArrayData array = new BinaryArrayData();
+            BinaryArrayWriter writer = new BinaryArrayWriter(array, 3, 8);
+            writer.setNullAt(0);
+            writer.writeBitmap(1, bm1);
+            writer.writeBitmap(2, bm2);
+            writer.complete();
+
+            assertThat(array.isNullAt(0)).isTrue();
+            assertThat(array.getBitmap(1)).isEqualTo(bm1);
+            assertThat(array.getBitmap(2)).isEqualTo(bm2);
+
+            BinaryArrayData newArray = splitArray(array);
+            assertThat(newArray.isNullAt(0)).isTrue();
+            assertThat(newArray.getBitmap(1)).isEqualTo(bm1);
+            assertThat(newArray.getBitmap(2)).isEqualTo(bm2);
         }
 
         BinaryArrayData subArray = new BinaryArrayData();

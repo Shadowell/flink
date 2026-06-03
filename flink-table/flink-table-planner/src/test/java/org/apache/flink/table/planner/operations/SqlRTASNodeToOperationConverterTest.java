@@ -46,10 +46,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Test base for testing convert [CREATE OR] REPLACE TABLE AS statement to operation. */
-public class SqlRTASNodeToOperationConverterTest extends SqlNodeToOperationConversionTestBase {
+class SqlRTASNodeToOperationConverterTest extends SqlNodeToOperationConversionTestBase {
 
     @Test
-    public void testReplaceTableAs() {
+    void testReplaceTableAs() {
         String tableName = "replace_table";
         String tableComment = "test table comment 表描述";
         String sql =
@@ -62,7 +62,51 @@ public class SqlRTASNodeToOperationConverterTest extends SqlNodeToOperationConve
     }
 
     @Test
-    public void testCreateOrReplaceTableAs() {
+    void testReplaceTableAsWithOrderingColumns() {
+        String tableName = "replace_table";
+        String sql =
+                "REPLACE TABLE "
+                        + tableName
+                        + " (a, b) WITH ('k1' = 'v1', 'k2' = 'v2') as SELECT b, a FROM t1";
+        Schema tableSchema =
+                Schema.newBuilder()
+                        .column("a", DataTypes.BIGINT().notNull())
+                        .column("b", DataTypes.STRING())
+                        .build();
+
+        testCommonReplaceTableAs(sql, tableName, null, tableSchema, null, Collections.emptyList());
+    }
+
+    @Test
+    void testReplaceTableAsWithNotFoundColumnIdentifiers() {
+        String tableName = "replace_table";
+        String sql =
+                "REPLACE TABLE "
+                        + tableName
+                        + " (a, d) WITH ('k1' = 'v1', 'k2' = 'v2') as SELECT b, a FROM t1";
+
+        assertThatThrownBy(() -> parseAndConvert(sql))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining("Column 'd' not found in the source schema.");
+    }
+
+    @Test
+    void testReplaceTableAsWithMismatchIdentifiersLength() {
+        String tableName = "replace_table";
+        String sql =
+                "REPLACE TABLE "
+                        + tableName
+                        + " (a) WITH ('k1' = 'v1', 'k2' = 'v2') as SELECT b, a FROM t1";
+
+        assertThatThrownBy(() -> parseAndConvert(sql))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining(
+                        "The number of columns in the column list "
+                                + "must match the number of columns in the source schema.");
+    }
+
+    @Test
+    void testCreateOrReplaceTableAs() {
         String tableName = "create_or_replace_table";
         String sql =
                 "CREATE OR REPLACE TABLE "
@@ -72,18 +116,19 @@ public class SqlRTASNodeToOperationConverterTest extends SqlNodeToOperationConve
     }
 
     @Test
-    public void testCreateOrReplaceTableAsWithColumns() {
+    void testCreateOrReplaceTableAsWithColumns() {
         String tableName = "create_or_replace_table";
         String sql =
                 "CREATE OR REPLACE TABLE "
                         + tableName
-                        + "(c0 int, c1 double metadata, c2 as c0 * a) "
+                        + "(c0 int, c1 double metadata, c2 as c0 * a, c3 int metadata virtual) "
                         + " WITH ('k1' = 'v1', 'k2' = 'v2') as SELECT * FROM t1";
         Schema tableSchema =
                 Schema.newBuilder()
                         .column("c0", DataTypes.INT())
                         .columnByMetadata("c1", DataTypes.DOUBLE())
                         .columnByExpression("c2", "`c0` * `a`")
+                        .columnByMetadata("c3", DataTypes.INT(), true)
                         .fromSchema(getDefaultTableSchema())
                         .build();
 
@@ -91,27 +136,28 @@ public class SqlRTASNodeToOperationConverterTest extends SqlNodeToOperationConve
     }
 
     @Test
-    public void testCreateOrReplaceTableAsWithColumnsOverridden() {
+    void testCreateOrReplaceTableAsWithColumnsOverridden() {
         String tableName = "create_or_replace_table";
         String sql =
                 "CREATE OR REPLACE TABLE "
                         + tableName
-                        + "(c0 int, a double, c int) "
-                        + " WITH ('k1' = 'v1', 'k2' = 'v2') as SELECT * FROM t1";
+                        + "(c0 int, a double, bb string, c int metadata, dd string metadata) "
+                        + " WITH ('k1' = 'v1', 'k2' = 'v2') "
+                        + "as SELECT a, b as `bb`, c, d as `dd` FROM t1";
         Schema tableSchema =
                 Schema.newBuilder()
                         .column("c0", DataTypes.INT())
                         .column("a", DataTypes.DOUBLE())
-                        .column("b", DataTypes.STRING())
-                        .column("c", DataTypes.INT())
-                        .column("d", DataTypes.STRING())
+                        .column("bb", DataTypes.STRING())
+                        .columnByMetadata("c", DataTypes.INT())
+                        .columnByMetadata("dd", DataTypes.STRING())
                         .build();
 
         testCommonReplaceTableAs(sql, tableName, null, tableSchema, null, Collections.emptyList());
     }
 
     @Test
-    public void testCreateOrReplaceTableAsWithNotNullColumnsAreNotAllowed() {
+    void testCreateOrReplaceTableAsWithNotNullColumnsAreNotAllowed() {
         String tableName = "create_or_replace_table";
         String sql =
                 "CREATE OR REPLACE TABLE "
@@ -125,7 +171,40 @@ public class SqlRTASNodeToOperationConverterTest extends SqlNodeToOperationConve
     }
 
     @Test
-    public void testCreateOrReplaceTableAsWithIncompatibleImplicitCastTypes() {
+    void testCreateOrReplaceTableAsWithOverriddenVirtualMetadataColumnsNotAllowed() {
+        String tableName = "create_or_replace_table";
+        String sql =
+                "CREATE OR REPLACE TABLE "
+                        + tableName
+                        + "(c int metadata virtual) "
+                        + " WITH ('k1' = 'v1', 'k2' = 'v2') as SELECT * FROM t1";
+
+        assertThatThrownBy(() -> parseAndConvert(sql))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining(
+                        "A column named 'c' already exists in the source schema. "
+                                + "Virtual metadata columns cannot overwrite columns from "
+                                + "source.");
+    }
+
+    @Test
+    void testCreateOrReplaceTableAsWithOverriddenComputedColumnsNotAllowed() {
+        String tableName = "create_or_replace_table";
+        String sql =
+                "CREATE OR REPLACE TABLE "
+                        + tableName
+                        + "(c as 'f0 * 2') "
+                        + " WITH ('k1' = 'v1', 'k2' = 'v2') as SELECT * FROM t1";
+
+        assertThatThrownBy(() -> parseAndConvert(sql))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining(
+                        "A column named 'c' already exists in the source schema. "
+                                + "Computed columns cannot overwrite columns from source.");
+    }
+
+    @Test
+    void testCreateOrReplaceTableAsWithIncompatibleImplicitCastTypes() {
         String tableName = "create_or_replace_table";
         String sql =
                 "CREATE OR REPLACE TABLE "
@@ -136,13 +215,13 @@ public class SqlRTASNodeToOperationConverterTest extends SqlNodeToOperationConve
         assertThatThrownBy(() -> parseAndConvert(sql))
                 .isInstanceOf(ValidationException.class)
                 .hasMessageContaining(
-                        "Incompatible types for sink column 'a' at position 0. "
+                        "Incompatible types for sink column 'a' at position 1. "
                                 + "The source column has type 'BIGINT NOT NULL', while the target "
                                 + "column has type 'BOOLEAN'.");
     }
 
     @Test
-    public void testCreateOrReplaceTableAsWithDistribution() {
+    void testCreateOrReplaceTableAsWithDistribution() {
         String tableName = "create_or_replace_table";
         String sql =
                 "CREATE OR REPLACE TABLE "
@@ -161,7 +240,7 @@ public class SqlRTASNodeToOperationConverterTest extends SqlNodeToOperationConve
     }
 
     @Test
-    public void testCreateOrReplaceTableAsWithPrimaryKey() {
+    void testCreateOrReplaceTableAsWithPrimaryKey() {
         String tableName = "create_or_replace_table";
         String sql =
                 "CREATE OR REPLACE TABLE "
@@ -181,7 +260,7 @@ public class SqlRTASNodeToOperationConverterTest extends SqlNodeToOperationConve
     }
 
     @Test
-    public void testCreateOrReplaceTableAsWithWatermark() {
+    void testCreateOrReplaceTableAsWithWatermark() {
         String tableName = "create_or_replace_table";
         String sql =
                 "CREATE OR REPLACE TABLE "

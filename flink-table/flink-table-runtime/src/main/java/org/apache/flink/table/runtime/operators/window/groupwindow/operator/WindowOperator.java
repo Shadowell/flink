@@ -25,6 +25,7 @@ import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.functions.KeySelector;
+import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.metrics.Counter;
 import org.apache.flink.metrics.Gauge;
 import org.apache.flink.metrics.Meter;
@@ -33,7 +34,6 @@ import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.state.internal.InternalMergingState;
 import org.apache.flink.runtime.state.internal.InternalValueState;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
-import org.apache.flink.streaming.api.operators.ChainingStrategy;
 import org.apache.flink.streaming.api.operators.InternalTimer;
 import org.apache.flink.streaming.api.operators.InternalTimerService;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
@@ -207,8 +207,11 @@ public abstract class WindowOperator<K, W extends Window> extends AbstractStream
         this.rowtimeIndex = rowtimeIndex;
         this.shiftTimeZone = shiftTimeZone;
         this.recordCounter = RecordCounter.of(inputCountIndex);
+    }
 
-        setChainingStrategy(ChainingStrategy.ALWAYS);
+    @Override
+    public boolean useInterruptibleTimers(ReadableConfig config) {
+        return true;
     }
 
     WindowOperator(
@@ -240,8 +243,6 @@ public abstract class WindowOperator<K, W extends Window> extends AbstractStream
         this.rowtimeIndex = rowtimeIndex;
         this.shiftTimeZone = shiftTimeZone;
         this.recordCounter = RecordCounter.of(inputCountIndex);
-
-        setChainingStrategy(ChainingStrategy.ALWAYS);
     }
 
     protected abstract void compileGeneratedCode();

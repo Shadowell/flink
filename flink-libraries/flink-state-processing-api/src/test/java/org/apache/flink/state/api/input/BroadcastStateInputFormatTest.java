@@ -57,7 +57,8 @@ public class BroadcastStateInputFormatTest {
             testHarness.processElement2(new StreamRecord<>(3));
 
             OperatorSubtaskState subtaskState = testHarness.snapshot(0, 0);
-            OperatorState state = new OperatorState(OperatorIDGenerator.fromUid("uid"), 1, 4);
+            OperatorState state =
+                    new OperatorState(null, null, OperatorIDGenerator.fromUid("uid"), 1, 4);
             state.putState(0, subtaskState);
 
             OperatorStateInputSplit split =
@@ -67,7 +68,7 @@ public class BroadcastStateInputFormatTest {
                     new BroadcastStateInputFormat<>(
                             state, new Configuration(), null, descriptor, new ExecutionConfig());
 
-            format.setRuntimeContext(new MockStreamingRuntimeContext(false, 1, 0));
+            format.setRuntimeContext(new MockStreamingRuntimeContext(1, 0));
             format.open(split);
 
             Map<Integer, Integer> results = new HashMap<>(3);

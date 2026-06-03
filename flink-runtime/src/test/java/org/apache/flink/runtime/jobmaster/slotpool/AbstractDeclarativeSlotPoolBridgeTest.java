@@ -18,6 +18,7 @@
 
 package org.apache.flink.runtime.jobmaster.slotpool;
 
+import org.apache.flink.api.common.ApplicationID;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
@@ -43,6 +44,7 @@ abstract class AbstractDeclarativeSlotPoolBridgeTest {
 
     protected static final Duration RPC_TIMEOUT = Duration.ofSeconds(20);
     protected static final JobID JOB_ID = new JobID();
+    protected static final ApplicationID APPLICATION_ID = new ApplicationID();
     protected static final JobMasterId JOB_MASTER_ID = JobMasterId.generate();
     protected final ComponentMainThreadExecutor componentMainThreadExecutor = forMainThread();
 
@@ -52,11 +54,11 @@ abstract class AbstractDeclarativeSlotPoolBridgeTest {
     protected Duration slotRequestMaxInterval;
 
     @Parameter(2)
-    boolean slotBatchAllocatable;
+    boolean deferSlotAllocation;
 
     @Parameters(
             name =
-                    "requestSlotMatchingStrategy: {0}, slotRequestMaxInterval: {1}, slotBatchAllocatable: {2}")
+                    "requestSlotMatchingStrategy: {0}, slotRequestMaxInterval: {1}, deferSlotAllocation: {2}")
     private static Collection<Object[]> data() {
         return Arrays.asList(
                 new Object[] {SimpleRequestSlotMatchingStrategy.INSTANCE, Duration.ZERO, false},
@@ -68,18 +70,26 @@ abstract class AbstractDeclarativeSlotPoolBridgeTest {
                     SimpleRequestSlotMatchingStrategy.INSTANCE, Duration.ofMillis(20), true
                 },
                 new Object[] {
-                    PreferredAllocationRequestSlotMatchingStrategy.INSTANCE, Duration.ZERO, false
+                    PreferredAllocationRequestSlotMatchingStrategy.create(
+                            SimpleRequestSlotMatchingStrategy.INSTANCE),
+                    Duration.ZERO,
+                    false
                 },
                 new Object[] {
-                    PreferredAllocationRequestSlotMatchingStrategy.INSTANCE, Duration.ZERO, true
+                    PreferredAllocationRequestSlotMatchingStrategy.create(
+                            SimpleRequestSlotMatchingStrategy.INSTANCE),
+                    Duration.ZERO,
+                    true
                 },
                 new Object[] {
-                    PreferredAllocationRequestSlotMatchingStrategy.INSTANCE,
+                    PreferredAllocationRequestSlotMatchingStrategy.create(
+                            SimpleRequestSlotMatchingStrategy.INSTANCE),
                     Duration.ofMillis(20),
                     false
                 },
                 new Object[] {
-                    PreferredAllocationRequestSlotMatchingStrategy.INSTANCE,
+                    PreferredAllocationRequestSlotMatchingStrategy.create(
+                            SimpleRequestSlotMatchingStrategy.INSTANCE),
                     Duration.ofMillis(20),
                     true
                 });
@@ -98,6 +108,7 @@ abstract class AbstractDeclarativeSlotPoolBridgeTest {
             ComponentMainThreadExecutor componentMainThreadExecutor) {
         return new DeclarativeSlotPoolBridge(
                 JOB_ID,
+                APPLICATION_ID,
                 declarativeSlotPoolFactory,
                 SystemClock.getInstance(),
                 RPC_TIMEOUT,
@@ -105,7 +116,7 @@ abstract class AbstractDeclarativeSlotPoolBridgeTest {
                 Duration.ofSeconds(20),
                 requestSlotMatchingStrategy,
                 slotRequestMaxInterval,
-                slotBatchAllocatable,
+                deferSlotAllocation,
                 componentMainThreadExecutor);
     }
 

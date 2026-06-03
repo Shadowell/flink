@@ -18,13 +18,10 @@
 
 package org.apache.flink.util;
 
-import org.apache.flink.api.common.time.Time;
-
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.time.temporal.ChronoUnit;
-import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -120,6 +117,14 @@ class TimeUtilsTest {
     }
 
     @Test
+    public void testParseDurationISO8601() {
+        assertThat(TimeUtils.parseDuration("PT20.345S").toMillis()).isEqualTo(20345);
+        assertThat(TimeUtils.parseDuration("PT15M").toMinutes()).isEqualTo(15);
+        assertThat(TimeUtils.parseDuration("PT10H").toHours()).isEqualTo(10);
+        assertThat(TimeUtils.parseDuration("P2DT3H4M").toMinutes()).isEqualTo(3064);
+    }
+
+    @Test
     void testParseDurationInvalid() {
         // null
         assertThatThrownBy(() -> TimeUtils.parseDuration(null))
@@ -148,6 +153,10 @@ class TimeUtilsTest {
         // negative number
         assertThatThrownBy(() -> TimeUtils.parseDuration("-100 ms"))
                 .isInstanceOf(IllegalArgumentException.class);
+
+        // negative ISO-8601
+        assertThatThrownBy(() -> TimeUtils.parseDuration("-PT6H3M"))
+                .isInstanceOf(NumberFormatException.class);
     }
 
     @Test
@@ -162,13 +171,5 @@ class TimeUtilsTest {
         assertThat(TimeUtils.getStringInMillis(Duration.ofSeconds(4567L))).isEqualTo("4567000ms");
         assertThat(TimeUtils.getStringInMillis(Duration.of(4567L, ChronoUnit.MICROS)))
                 .isEqualTo("4ms");
-    }
-
-    @Test
-    void testToDuration() {
-        final Time time = Time.of(1337, TimeUnit.MICROSECONDS);
-        final Duration duration = TimeUtils.toDuration(time);
-
-        assertThat(duration.toNanos()).isEqualTo(time.getUnit().toNanos(time.getSize()));
     }
 }

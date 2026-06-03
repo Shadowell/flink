@@ -70,6 +70,23 @@ public class PythonDependencyUtils {
     private static final String HASH_ALGORITHM = "SHA-256";
 
     /**
+     * Extracts the target directory name from an archive value string.
+     *
+     * <p>The archive value may contain a {@link #PARAM_DELIMITER} separator. If present, the format
+     * is "originalFileName#targetDirName" and the target directory name is the part after the
+     * delimiter. Otherwise, the entire value is used as the target directory name.
+     *
+     * @param archiveValue the archive value string, e.g. "venv.zip#venv" or "venv"
+     * @return the target directory name
+     */
+    public static String getArchiveTargetDirName(String archiveValue) {
+        if (archiveValue.contains(PARAM_DELIMITER)) {
+            return archiveValue.split(PARAM_DELIMITER, 2)[1];
+        }
+        return archiveValue;
+    }
+
+    /**
      * Adds python dependencies to registered cache file list according to given configuration and
      * returns a new configuration which contains the metadata of the registered python
      * dependencies.
@@ -335,7 +352,9 @@ public class PythonDependencyUtils {
 
         private void registerCachedFileIfNotExist(String name, String path) {
             final List<Tuple2<String, String>> cachedFilePairs =
-                    config.getOptional(PipelineOptions.CACHED_FILES).orElse(new ArrayList<>())
+                    config
+                            .getOptional(PipelineOptions.CACHED_FILES)
+                            .orElse(new ArrayList<>())
                             .stream()
                             .map(
                                     m ->
@@ -367,7 +386,9 @@ public class PythonDependencyUtils {
 
         private void removeCachedFilesByPrefix(String prefix) {
             final List<String> cachedFiles =
-                    config.getOptional(PipelineOptions.CACHED_FILES).orElse(new ArrayList<>())
+                    config
+                            .getOptional(PipelineOptions.CACHED_FILES)
+                            .orElse(new ArrayList<>())
                             .stream()
                             .map(m -> Tuple2.of(ConfigurationUtils.parseStringToMap(m), m))
                             .filter(

@@ -21,6 +21,7 @@ package org.apache.flink.table.catalog;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.configuration.ReadableConfig;
+import org.apache.flink.table.api.FunctionDescriptor;
 import org.apache.flink.table.api.TableException;
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.catalog.exceptions.DatabaseNotExistException;
@@ -55,6 +56,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
@@ -115,23 +117,17 @@ public final class FunctionCatalog {
                 name, new InlineCatalogFunction(definition), ignoreIfExists);
     }
 
-    /** Registers a uninstantiated temporary system function. */
-    public void registerTemporarySystemFunction(
-            String name,
-            String fullyQualifiedName,
-            FunctionLanguage language,
-            boolean ignoreIfExists) {
-        registerTemporarySystemFunction(
-                name, new CatalogFunctionImpl(fullyQualifiedName, language), ignoreIfExists);
-    }
-
     /** Registers a temporary system function from resource uris. */
     public void registerTemporarySystemFunction(
-            String name, String className, List<ResourceUri> resourceUris) {
+            String name, FunctionDescriptor functionDescriptor, boolean ignoreIfExists) {
         registerTemporarySystemFunction(
                 name,
-                new CatalogFunctionImpl(className, FunctionLanguage.JAVA, resourceUris),
-                false);
+                new CatalogFunctionImpl(
+                        functionDescriptor.getClassName(),
+                        functionDescriptor.getLanguage(),
+                        functionDescriptor.getResourceUris(),
+                        functionDescriptor.getOptions()),
+                ignoreIfExists);
     }
 
     /** Drops a temporary system function. Returns true if a function was dropped. */
@@ -145,12 +141,12 @@ public final class FunctionCatalog {
                             "Could not drop temporary system function. A function named '%s' doesn't exist.",
                             name));
         }
-        unregisterFunctionJarResources(function);
+        unregisterFunctionResources(function);
 
         return function != null;
     }
 
-    private void unregisterFunctionJarResources(@Nullable CatalogFunction function) {
+    private void unregisterFunctionResources(@Nullable CatalogFunction function) {
         if (function != null && function.getFunctionLanguage() == FunctionLanguage.JAVA) {
             resourceManager.unregisterFunctionResources(function.getFunctionResources());
         }
@@ -208,37 +204,18 @@ public final class FunctionCatalog {
         return dropTempCatalogFunction(identifier, ignoreIfNotExist) != null;
     }
 
-    /** Registers a catalog function by also considering temporary catalog functions. */
     public void registerCatalogFunction(
             UnresolvedIdentifier unresolvedIdentifier,
-            Class<? extends UserDefinedFunction> functionClass,
-            boolean ignoreIfExists) {
-        final ObjectIdentifier identifier = catalogManager.qualifyIdentifier(unresolvedIdentifier);
-        final CatalogFunction catalogFunction =
-                new CatalogFunctionImpl(functionClass.getName(), FunctionLanguage.JAVA);
-
-        try {
-            UserDefinedFunctionHelper.validateClass(functionClass);
-        } catch (Throwable t) {
-            throw new ValidationException(
-                    String.format(
-                            "Could not register catalog function '%s' due to implementation errors.",
-                            identifier.asSummaryString()),
-                    t);
-        }
-
-        registerCatalogFunction(identifier, catalogFunction, ignoreIfExists);
-    }
-
-    public void registerCatalogFunction(
-            UnresolvedIdentifier unresolvedIdentifier,
-            String className,
-            List<ResourceUri> resourceUris,
+            FunctionDescriptor functionDescriptor,
             boolean ignoreIfExists) {
 
         final ObjectIdentifier identifier = catalogManager.qualifyIdentifier(unresolvedIdentifier);
         final CatalogFunction catalogFunction =
-                new CatalogFunctionImpl(className, FunctionLanguage.JAVA, resourceUris);
+                new CatalogFunctionImpl(
+                        functionDescriptor.getClassName(),
+                        functionDescriptor.getLanguage(),
+                        functionDescriptor.getResourceUris(),
+                        functionDescriptor.getOptions());
 
         registerCatalogFunction(identifier, catalogFunction, ignoreIfExists);
     }
@@ -532,7 +509,7 @@ public final class FunctionCatalog {
                     .getTemporaryOperationListener(normalizedName)
                     .ifPresent(l -> l.onDropTemporaryFunction(normalizedName.toObjectPath()));
             tempCatalogFunctions.remove(normalizedName);
-            unregisterFunctionJarResources(fd);
+            unregisterFunctionResources(fd);
         } else if (!ignoreIfNotExist) {
             throw new ValidationException(
                     String.format("Temporary catalog function %s doesn't exist", identifier));
@@ -624,12 +601,12 @@ public final class FunctionCatalog {
         CatalogFunction potentialResult = tempCatalogFunctions.get(normalizedIdentifier);
 
         if (potentialResult != null) {
-            registerFunctionJarResources(
-                    oi.asSummaryString(), potentialResult.getFunctionResources());
+            registerFunctionResources(oi.asSummaryString(), potentialResult.getFunctionResources());
             return Optional.of(
                     ContextResolvedFunction.temporary(
                             FunctionIdentifier.of(oi),
-                            getFunctionDefinition(oi.getObjectName(), potentialResult)));
+                            getFunctionDefinition(oi.getObjectName(), potentialResult),
+                            potentialResult));
         }
 
         Optional<Catalog> catalogOptional = catalogManager.getCatalog(oi.getCatalogName());
@@ -644,7 +621,7 @@ public final class FunctionCatalog {
                 FunctionDefinition fd;
                 if (catalog.getFunctionDefinitionFactory().isPresent()
                         && catalogFunction.getFunctionLanguage() != FunctionLanguage.PYTHON) {
-                    registerFunctionJarResources(
+                    registerFunctionResources(
                             oi.asSummaryString(), catalogFunction.getFunctionResources());
                     fd =
                             catalog.getFunctionDefinitionFactory()
@@ -658,7 +635,8 @@ public final class FunctionCatalog {
                 }
 
                 return Optional.of(
-                        ContextResolvedFunction.permanent(FunctionIdentifier.of(oi), fd));
+                        ContextResolvedFunction.permanent(
+                                FunctionIdentifier.of(oi), fd, catalogFunction));
             } catch (FunctionNotExistException e) {
                 // Ignore
             }
@@ -677,7 +655,7 @@ public final class FunctionCatalog {
         String normalizedName = FunctionIdentifier.normalizeName(funcName);
         if (tempSystemFunctions.containsKey(normalizedName)) {
             CatalogFunction function = tempSystemFunctions.get(normalizedName);
-            registerFunctionJarResources(funcName, function.getFunctionResources());
+            registerFunctionResources(funcName, function.getFunctionResources());
             return Optional.of(
                     ContextResolvedFunction.temporary(
                             FunctionIdentifier.of(funcName),
@@ -753,7 +731,7 @@ public final class FunctionCatalog {
         }
         // If the jar resource of UDF used is not empty, register it to classloader before
         // validate.
-        registerFunctionJarResources(name, function.getFunctionResources());
+        registerFunctionResources(name, function.getFunctionResources());
 
         return UserDefinedFunctionHelper.instantiateFunction(
                 resourceManager.getUserClassLoader(),
@@ -763,15 +741,15 @@ public final class FunctionCatalog {
                 function);
     }
 
-    public void registerFunctionJarResources(String functionName, List<ResourceUri> resourceUris) {
+    public void registerFunctionResources(String functionName, List<ResourceUri> resourceUris) {
         try {
             if (!resourceUris.isEmpty()) {
-                resourceManager.registerJarResources(resourceUris);
+                resourceManager.registerResources(resourceUris);
             }
         } catch (Exception e) {
             throw new TableException(
                     String.format(
-                            "Failed to register jar resource '%s' of function '%s'.",
+                            "Failed to register resource '%s' of function '%s'.",
                             resourceUris, functionName),
                     e);
         }
@@ -874,12 +852,6 @@ public final class FunctionCatalog {
         }
 
         @Override
-        public boolean isGeneric() {
-            throw new UnsupportedOperationException(
-                    "This CatalogFunction is a InlineCatalogFunction. This method should not be called.");
-        }
-
-        @Override
         public FunctionLanguage getFunctionLanguage() {
             return FunctionLanguage.JAVA;
         }
@@ -891,6 +863,21 @@ public final class FunctionCatalog {
 
         public FunctionDefinition getDefinition() {
             return definition;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (o == null || getClass() != o.getClass()) {
+                return false;
+            }
+
+            InlineCatalogFunction that = (InlineCatalogFunction) o;
+            return Objects.equals(definition, that.definition);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hashCode(definition);
         }
     }
 }

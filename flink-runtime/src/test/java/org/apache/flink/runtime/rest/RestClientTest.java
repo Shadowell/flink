@@ -31,15 +31,17 @@ import org.apache.flink.runtime.rest.versioning.RuntimeRestAPIVersion;
 import org.apache.flink.testutils.TestingUtils;
 import org.apache.flink.testutils.executor.TestExecutorExtension;
 import org.apache.flink.util.NetUtils;
+import org.apache.flink.util.concurrent.ExecutorThreadFactory;
 import org.apache.flink.util.concurrent.Executors;
 import org.apache.flink.util.function.CheckedSupplier;
 
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
 import org.apache.flink.shaded.netty4.io.netty.channel.Channel;
-import org.apache.flink.shaded.netty4.io.netty.channel.ConnectTimeoutException;
 import org.apache.flink.shaded.netty4.io.netty.channel.DefaultSelectStrategyFactory;
+import org.apache.flink.shaded.netty4.io.netty.channel.MultiThreadIoEventLoopGroup;
 import org.apache.flink.shaded.netty4.io.netty.channel.SelectStrategy;
 import org.apache.flink.shaded.netty4.io.netty.channel.SelectStrategyFactory;
+import org.apache.flink.shaded.netty4.io.netty.channel.nio.NioIoHandler;
 import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponseStatus;
 
 import org.assertj.core.api.InstanceOfAssertFactories;
@@ -51,6 +53,7 @@ import java.lang.annotation.Annotation;
 import java.lang.reflect.Field;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketException;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.Collections;
@@ -74,7 +77,8 @@ class RestClientTest {
     private static final TestExecutorExtension<ScheduledExecutorService> EXECUTOR_EXTENSION =
             TestingUtils.defaultExecutorExtension();
 
-    private static final String unroutableIp = "240.0.0.0";
+    // Part of TEST-NET-1 block described in RFC 5737 that should never be routed.
+    private static final String unroutableIp = "192.0.2.1";
 
     private static final long TIMEOUT = 10L;
 
@@ -107,12 +111,32 @@ class RestClientTest {
                             EmptyMessageParameters.getInstance(),
                             EmptyRequestBody.getInstance());
 
+            // Depending on the environment, connecting to a non-routable address may fail with
+            // either a ConnectTimeoutException (timeout fires before the OS responds) or a
+            // SocketException such as "Network is unreachable" (OS rejects immediately).
+            // Both are SocketException subtypes.
             FlinkAssertions.assertThatFuture(future)
                     .eventuallyFailsWith(ExecutionException.class)
-                    .withCauseInstanceOf(ConnectTimeoutException.class)
+                    .withCauseInstanceOf(SocketException.class)
                     .extracting(Throwable::getCause, as(InstanceOfAssertFactories.THROWABLE))
                     .hasMessageContaining(unroutableIp);
         }
+    }
+
+    @Test
+    void testExternalEventGroup() throws Exception {
+        MultiThreadIoEventLoopGroup externalGroup =
+                new MultiThreadIoEventLoopGroup(
+                        1,
+                        new ExecutorThreadFactory("flink-rest-client-netty-external"),
+                        NioIoHandler.newFactory());
+
+        final RestClient restClient =
+                new RestClient(
+                        new Configuration(), Executors.directExecutor(), null, -1, externalGroup);
+        restClient.closeAsync();
+
+        assertThat(externalGroup.isShuttingDown() || externalGroup.isShutdown()).isFalse();
     }
 
     @Test
@@ -181,7 +205,15 @@ class RestClientTest {
         }
     }
 
-    /** Tests that we fail the operation if the client closes. */
+    /**
+     * Tests that we fail the operation if the client closes.
+     *
+     * <p>The exact exception depends on timing.
+     *
+     * <p>Both are valid outcomes when the client is closed with a request in-flight.
+     *
+     * <p>See FLINK-39180
+     */
     @Test
     void testRestClientClosedHandling() throws Exception {
         final Configuration config = new Configuration();
@@ -220,9 +252,24 @@ class RestClientTest {
 
             restClient.close();
 
+            // Both exceptions are valid depending on timing (see javadoc)
             FlinkAssertions.assertThatFuture(responseFuture)
                     .eventuallyFailsWith(ExecutionException.class)
-                    .withCauseInstanceOf(IOException.class);
+                    .satisfies(
+                            e ->
+                                    assertThat(e.getCause())
+                                            .satisfiesAnyOf(
+                                                    c ->
+                                                            assertThat(c)
+                                                                    .isInstanceOf(
+                                                                            IllegalStateException
+                                                                                    .class)
+                                                                    .hasMessage(
+                                                                            "RestClient closed before request completed"),
+                                                    c ->
+                                                            assertThat(c)
+                                                                    .isInstanceOf(
+                                                                            IOException.class)));
         } finally {
             if (connectionSocket != null) {
                 connectionSocket.close();

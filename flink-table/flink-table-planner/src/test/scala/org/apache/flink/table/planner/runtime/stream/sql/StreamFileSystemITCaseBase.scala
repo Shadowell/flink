@@ -17,8 +17,7 @@
  */
 package org.apache.flink.table.planner.runtime.stream.sql
 
-import org.apache.flink.api.scala._
-import org.apache.flink.streaming.api.functions.sink.SinkFunction
+import org.apache.flink.streaming.api.functions.sink.legacy.SinkFunction
 import org.apache.flink.table.api.TableEnvironment
 import org.apache.flink.table.api.bridge.scala._
 import org.apache.flink.table.planner.runtime.FileSystemITCaseBase
@@ -58,7 +57,7 @@ abstract class StreamFileSystemITCaseBase extends StreamingTestBase with FileSys
 
   override def checkPredicate(sqlQuery: String, checkFunc: Row => Unit): Unit = {
     val result = tEnv.sqlQuery(sqlQuery).toDataStream
-    val sinkResults = new mutable.MutableList[Row]
+    val sinkResults = new mutable.ListBuffer[Row]
 
     val sink = new AbstractExactlyOnceSink[Row] {
       override def invoke(value: Row, context: SinkFunction.Context): Unit =

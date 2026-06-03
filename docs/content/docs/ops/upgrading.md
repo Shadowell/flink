@@ -32,7 +32,7 @@ This document describes how to update a Flink streaming application and how to m
 
 ## API compatibility guarantees
 
-The classes & members of the Java/Scala APIs that are intended for users are annotated with the following stability annotations:
+The classes & members of the Java APIs that are intended for users are annotated with the following stability annotations:
 * `Public`
 * `PublicEvolving`
 * `Experimental`
@@ -132,9 +132,9 @@ In this section, we discuss how applications can be modified to remain state com
 
 When an application is restarted from a savepoint, Flink matches the operator state stored in the savepoint to stateful operators of the started application. The matching is done based on operator IDs, which are also stored in the savepoint. Each operator has a default ID that is derived from the operator's position in the application's operator topology. Hence, an unmodified application can always be restarted from one of its own savepoints. However, the default IDs of operators are likely to change if an application is modified. Therefore, modified applications can only be started from a savepoint if the operator IDs have been explicitly specified. Assigning IDs to operators is very simple and done using the `uid(String)` method as follows:
 
-```scala
-val mappedEvents: DataStream[(Int, Long)] = events
-  .map(new MyStatefulMapFunc()).uid("mapper-1")
+```java
+DataStream<String> mappedEvents = events
+  .map(new MyStatefulMapFunc()).uid("mapper-1");
 ```
 
 **Note:** Since the operator IDs stored in a savepoint and IDs of operators in the application to start must be equal, it is highly recommended to assign unique IDs to all operators of an application that might be upgraded in the future. This advice applies to all operators, i.e., operators with and without explicitly declared operator state, because some operators have internal state that is not visible to the user. Upgrading an application without assigned operator IDs is significantly more difficult and may only be possible via a low-level workaround using the `setUidHash()` method.
@@ -184,7 +184,7 @@ Every new major-minor Flink version (e.g. `1.12` to `1.13`) might introduce new 
 specialized runtime operators that change the execution plan. However, the community tries to keep patch
 versions state-compatible (e.g. `1.13.1` to `1.13.2`).
 
-See the [table state management section]({{< ref "docs/dev/table/concepts/overview" >}}#state-management)
+See the [table state management section]({{< ref "docs/concepts/sql-table-concepts/overview" >}}#state-management)
 for more information.
 
 ## Upgrading the Flink Framework Version
@@ -278,6 +278,11 @@ For more details, please take a look at the [savepoint documentation]({{< ref "d
 ## Compatibility Table
 
 Savepoints are compatible across Flink versions as indicated by the table below:
+
+**Note**: "Compatible" here refers specifically to compatibility of the internal data format in
+savepoints. It does not cover compatibility of SQL operators or other Upper-level changes. In
+practice, provided there are no changes to Flink SQL semantics, this state format compatibility
+typically also ensures job-level compatibility.
 
 <table class="table table-bordered" style="font-size:8pt">
   <thead>

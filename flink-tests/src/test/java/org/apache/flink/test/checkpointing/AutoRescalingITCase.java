@@ -21,7 +21,6 @@ package org.apache.flink.test.checkpointing;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.functions.RichFlatMapFunction;
 import org.apache.flink.api.common.functions.RuntimeContext;
-import org.apache.flink.api.common.restartstrategy.RestartStrategies;
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.state.ValueState;
@@ -35,11 +34,9 @@ import org.apache.flink.client.program.rest.RestClusterClient;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.JobManagerOptions;
-import org.apache.flink.configuration.NettyShuffleEnvironmentOptions;
 import org.apache.flink.configuration.StateBackendOptions;
 import org.apache.flink.configuration.StateRecoveryOptions;
 import org.apache.flink.configuration.WebOptions;
-import org.apache.flink.contrib.streaming.state.RocksDBConfigurableOptions;
 import org.apache.flink.core.execution.CheckpointingMode;
 import org.apache.flink.core.testutils.OneShotLatch;
 import org.apache.flink.runtime.client.JobExecutionException;
@@ -50,30 +47,35 @@ import org.apache.flink.runtime.state.FunctionInitializationContext;
 import org.apache.flink.runtime.state.FunctionSnapshotContext;
 import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
 import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
+import org.apache.flink.state.rocksdb.RocksDBConfigurableOptions;
 import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
 import org.apache.flink.streaming.api.checkpoint.ListCheckpointed;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.sink.SinkFunction;
+import org.apache.flink.streaming.api.functions.sink.legacy.SinkFunction;
 import org.apache.flink.streaming.api.functions.sink.v2.DiscardingSink;
-import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunction;
-import org.apache.flink.streaming.api.functions.source.SourceFunction;
+import org.apache.flink.streaming.api.functions.source.legacy.RichParallelSourceFunction;
+import org.apache.flink.streaming.api.functions.source.legacy.SourceFunction;
+import org.apache.flink.streaming.util.RestartStrategyUtils;
 import org.apache.flink.test.util.MiniClusterWithClientResource;
 import org.apache.flink.testutils.TestingUtils;
-import org.apache.flink.testutils.executor.TestExecutorResource;
+import org.apache.flink.testutils.executor.TestExecutorExtension;
+import org.apache.flink.testutils.junit.extensions.parameterized.ParameterizedTestExtension;
+import org.apache.flink.testutils.junit.extensions.parameterized.Parameters;
+import org.apache.flink.testutils.junit.utils.TempDirUtils;
 import org.apache.flink.util.Collector;
-import org.apache.flink.util.TestLogger;
+import org.apache.flink.util.TestLoggerExtension;
 
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.ClassRule;
-import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.TestTemplate;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.Collection;
@@ -91,8 +93,7 @@ import static org.apache.flink.runtime.testutils.CommonTestUtils.waitForAllTaskR
 import static org.apache.flink.runtime.testutils.CommonTestUtils.waitForNewCheckpoint;
 import static org.apache.flink.test.scheduling.UpdateJobResourceRequirementsITCase.waitForAvailableSlots;
 import static org.apache.flink.test.scheduling.UpdateJobResourceRequirementsITCase.waitForRunningTasks;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Test checkpoint rescaling under changing resource requirements. This test is mostly a variant of
@@ -100,43 +101,41 @@ import static org.junit.Assert.assertTrue;
  * savepoints and (2) rescaling without cancel/restart but triggered by changing resource
  * requirements.
  */
-@RunWith(Parameterized.class)
-public class AutoRescalingITCase extends TestLogger {
+@ExtendWith({TestLoggerExtension.class, ParameterizedTestExtension.class})
+class AutoRescalingITCase {
 
-    @ClassRule
-    public static final TestExecutorResource<ScheduledExecutorService> EXECUTOR_RESOURCE =
-            TestingUtils.defaultExecutorResource();
+    @RegisterExtension
+    private static final TestExecutorExtension<ScheduledExecutorService> EXECUTOR_RESOURCE =
+            TestingUtils.defaultExecutorExtension();
 
     private static final int numTaskManagers = 2;
     private static final int slotsPerTaskManager = 2;
     private static final int totalSlots = numTaskManagers * slotsPerTaskManager;
 
-    @Parameterized.Parameters(name = "backend = {0}, buffersPerChannel = {1}, useIngestDB = {2}")
-    public static Collection<Object[]> data() {
+    @Parameters(name = "backend = {0}, useIngestDB = {1}")
+    private static Collection<Object[]> data() {
         return Arrays.asList(
                 new Object[][] {
-                    {"rocksdb", 0, false},
-                    {"rocksdb", 2, true},
-                    {"filesystem", 0, false},
-                    {"filesystem", 2, false}
+                    {"rocksdb", false},
+                    {"rocksdb", true},
+                    {"hashmap", false},
+                    {"forst", false},
+                    {"forst", true}
                 });
     }
 
-    public AutoRescalingITCase(String backend, int buffersPerChannel, boolean useIngestDB) {
+    private AutoRescalingITCase(String backend, boolean useIngestDB) {
         this.backend = backend;
-        this.buffersPerChannel = buffersPerChannel;
         this.useIngestDB = useIngestDB;
     }
 
     private final String backend;
 
-    private final int buffersPerChannel;
-
     private final boolean useIngestDB;
 
     private String currentBackend = null;
 
-    enum OperatorCheckpointMethod {
+    private enum OperatorCheckpointMethod {
         NON_PARTITIONED,
         CHECKPOINTED_FUNCTION,
         CHECKPOINTED_FUNCTION_BROADCAST,
@@ -146,10 +145,10 @@ public class AutoRescalingITCase extends TestLogger {
     private static MiniClusterWithClientResource cluster;
     private static RestClusterClient<?> restClusterClient;
 
-    @ClassRule public static TemporaryFolder temporaryFolder = new TemporaryFolder();
+    @TempDir private static Path temporaryFolder;
 
-    @Before
-    public void setup() throws Exception {
+    @BeforeEach
+    void setup() throws Exception {
         // detect parameter change
         if (!Objects.equals(currentBackend, backend)) {
             shutDownExistingCluster();
@@ -158,8 +157,8 @@ public class AutoRescalingITCase extends TestLogger {
 
             Configuration config = new Configuration();
 
-            final File checkpointDir = temporaryFolder.newFolder();
-            final File savepointDir = temporaryFolder.newFolder();
+            final File checkpointDir = TempDirUtils.newFolder(temporaryFolder);
+            final File savepointDir = TempDirUtils.newFolder(temporaryFolder);
 
             config.set(StateBackendOptions.STATE_BACKEND, currentBackend);
             config.set(RocksDBConfigurableOptions.USE_INGEST_DB_RESTORE_MODE, useIngestDB);
@@ -168,12 +167,12 @@ public class AutoRescalingITCase extends TestLogger {
             config.set(
                     CheckpointingOptions.CHECKPOINTS_DIRECTORY, checkpointDir.toURI().toString());
             config.set(CheckpointingOptions.SAVEPOINT_DIRECTORY, savepointDir.toURI().toString());
-            config.set(
-                    NettyShuffleEnvironmentOptions.NETWORK_BUFFERS_PER_CHANNEL, buffersPerChannel);
 
             config.set(JobManagerOptions.SCHEDULER, JobManagerOptions.SchedulerType.Adaptive);
             // Disable the scaling cooldown to speed up the test
-            config.set(JobManagerOptions.SCHEDULER_SCALING_INTERVAL_MIN, Duration.ofMillis(0));
+            config.set(
+                    JobManagerOptions.SCHEDULER_EXECUTING_COOLDOWN_AFTER_RESCALING,
+                    Duration.ofMillis(0));
 
             // speed the test suite up
             // - lower refresh interval -> controls how fast we invalidate ExecutionGraphCache
@@ -193,21 +192,21 @@ public class AutoRescalingITCase extends TestLogger {
         }
     }
 
-    @AfterClass
-    public static void shutDownExistingCluster() {
+    @AfterAll
+    static void shutDownExistingCluster() {
         if (cluster != null) {
             cluster.after();
             cluster = null;
         }
     }
 
-    @Test
-    public void testCheckpointRescalingInKeyedState() throws Exception {
+    @TestTemplate
+    void testCheckpointRescalingInKeyedState() throws Exception {
         testCheckpointRescalingKeyedState(false);
     }
 
-    @Test
-    public void testCheckpointRescalingOutKeyedState() throws Exception {
+    @TestTemplate
+    void testCheckpointRescalingOutKeyedState() throws Exception {
         testCheckpointRescalingKeyedState(true);
     }
 
@@ -215,7 +214,7 @@ public class AutoRescalingITCase extends TestLogger {
      * Tests that a job with purely keyed state can be restarted from a checkpoint with a different
      * parallelism.
      */
-    public void testCheckpointRescalingKeyedState(boolean scaleOut) throws Exception {
+    private void testCheckpointRescalingKeyedState(boolean scaleOut) throws Exception {
         final int numberKeys = 42;
         final int numberElements = 1000;
         final int parallelism = scaleOut ? totalSlots / 2 : totalSlots;
@@ -245,9 +244,10 @@ public class AutoRescalingITCase extends TestLogger {
 
             // wait til the sources have emitted numberElements for each key and completed a
             // checkpoint
-            assertTrue(
-                    SubtaskIndexFlatMapper.workCompletedLatch.await(
-                            deadline.timeLeft().toMillis(), TimeUnit.MILLISECONDS));
+            assertThat(
+                            SubtaskIndexFlatMapper.workCompletedLatch.await(
+                                    deadline.timeLeft().toMillis(), TimeUnit.MILLISECONDS))
+                    .isTrue();
 
             // verify the current state
 
@@ -265,7 +265,7 @@ public class AutoRescalingITCase extends TestLogger {
                                 numberElements * key));
             }
 
-            assertEquals(expectedResult, actualResult);
+            assertThat(actualResult).isEqualTo(expectedResult);
 
             // clear the CollectionSink set for the restarted job
             CollectionSink.clearElementsSet();
@@ -307,7 +307,7 @@ public class AutoRescalingITCase extends TestLogger {
                                 key * 2 * numberElements));
             }
 
-            assertEquals(expectedResult2, actualResult2);
+            assertThat(actualResult2).isEqualTo(expectedResult2);
 
         } finally {
             // clear the CollectionSink set for the restarted job
@@ -319,8 +319,8 @@ public class AutoRescalingITCase extends TestLogger {
      * Tests that a job cannot be restarted from a checkpoint with a different parallelism if the
      * rescaled operator has non-partitioned state.
      */
-    @Test
-    public void testCheckpointRescalingNonPartitionedStateCausesException() throws Exception {
+    @TestTemplate
+    void testCheckpointRescalingNonPartitionedStateCausesException() throws Exception {
         final int parallelism = totalSlots / 2;
         final int parallelism2 = totalSlots;
         final int maxParallelism = 13;
@@ -369,8 +369,8 @@ public class AutoRescalingITCase extends TestLogger {
      * Tests that a job with non partitioned state can be restarted from a checkpoint with a
      * different parallelism if the operator with non-partitioned state are not rescaled.
      */
-    @Test
-    public void testCheckpointRescalingWithKeyedAndNonPartitionedState() throws Exception {
+    @TestTemplate
+    void testCheckpointRescalingWithKeyedAndNonPartitionedState() throws Exception {
         int numberKeys = 42;
         int numberElements = 1000;
         int parallelism = totalSlots / 2;
@@ -401,9 +401,10 @@ public class AutoRescalingITCase extends TestLogger {
 
             // wait til the sources have emitted numberElements for each key and completed a
             // checkpoint
-            assertTrue(
-                    SubtaskIndexFlatMapper.workCompletedLatch.await(
-                            deadline.timeLeft().toMillis(), TimeUnit.MILLISECONDS));
+            assertThat(
+                            SubtaskIndexFlatMapper.workCompletedLatch.await(
+                                    deadline.timeLeft().toMillis(), TimeUnit.MILLISECONDS))
+                    .isTrue();
 
             // verify the current state
 
@@ -421,7 +422,7 @@ public class AutoRescalingITCase extends TestLogger {
                                 numberElements * key));
             }
 
-            assertEquals(expectedResult, actualResult);
+            assertThat(actualResult).isEqualTo(expectedResult);
 
             // clear the CollectionSink set for the restarted job
             CollectionSink.clearElementsSet();
@@ -463,7 +464,7 @@ public class AutoRescalingITCase extends TestLogger {
                                 key * 2 * numberElements));
             }
 
-            assertEquals(expectedResult2, actualResult2);
+            assertThat(actualResult2).isEqualTo(expectedResult2);
 
         } finally {
             // clear the CollectionSink set for the restarted job
@@ -471,32 +472,32 @@ public class AutoRescalingITCase extends TestLogger {
         }
     }
 
-    @Test
-    public void testCheckpointRescalingInPartitionedOperatorState() throws Exception {
+    @TestTemplate
+    void testCheckpointRescalingInPartitionedOperatorState() throws Exception {
         testCheckpointRescalingPartitionedOperatorState(
                 false, OperatorCheckpointMethod.CHECKPOINTED_FUNCTION);
     }
 
-    @Test
-    public void testCheckpointRescalingOutPartitionedOperatorState() throws Exception {
+    @TestTemplate
+    void testCheckpointRescalingOutPartitionedOperatorState() throws Exception {
         testCheckpointRescalingPartitionedOperatorState(
                 true, OperatorCheckpointMethod.CHECKPOINTED_FUNCTION);
     }
 
-    @Test
-    public void testCheckpointRescalingInBroadcastOperatorState() throws Exception {
+    @TestTemplate
+    void testCheckpointRescalingInBroadcastOperatorState() throws Exception {
         testCheckpointRescalingPartitionedOperatorState(
                 false, OperatorCheckpointMethod.CHECKPOINTED_FUNCTION_BROADCAST);
     }
 
-    @Test
-    public void testCheckpointRescalingOutBroadcastOperatorState() throws Exception {
+    @TestTemplate
+    void testCheckpointRescalingOutBroadcastOperatorState() throws Exception {
         testCheckpointRescalingPartitionedOperatorState(
                 true, OperatorCheckpointMethod.CHECKPOINTED_FUNCTION_BROADCAST);
     }
 
     /** Tests rescaling of partitioned operator state. */
-    public void testCheckpointRescalingPartitionedOperatorState(
+    private void testCheckpointRescalingPartitionedOperatorState(
             boolean scaleOut, OperatorCheckpointMethod checkpointMethod) throws Exception {
         final int parallelism = scaleOut ? totalSlots : totalSlots / 2;
         final int parallelism2 = scaleOut ? totalSlots / 2 : totalSlots;
@@ -568,7 +569,7 @@ public class AutoRescalingITCase extends TestLogger {
             sumExp *= parallelism2;
         }
 
-        assertEquals(sumExp, sumAct);
+        assertThat(sumAct).isEqualTo(sumExp);
     }
 
     // ------------------------------------------------------------------------------------------------------------------
@@ -586,7 +587,7 @@ public class AutoRescalingITCase extends TestLogger {
         configureCheckpointing(env.getCheckpointConfig());
         env.setParallelism(parallelism);
         env.getConfig().setMaxParallelism(maxParallelism);
-        env.setRestartStrategy(RestartStrategies.noRestart());
+        RestartStrategyUtils.configureNoRestartStrategy(env);
 
         StateSourceBase.workStartedLatch = new CountDownLatch(parallelism);
 
@@ -627,7 +628,7 @@ public class AutoRescalingITCase extends TestLogger {
         }
 
         configureCheckpointing(env.getCheckpointConfig());
-        env.setRestartStrategy(RestartStrategies.noRestart());
+        RestartStrategyUtils.configureNoRestartStrategy(env);
         env.getConfig().setUseSnapshotCompression(true);
 
         DataStream<Integer> input =
@@ -665,7 +666,7 @@ public class AutoRescalingITCase extends TestLogger {
         env.setParallelism(parallelism);
         env.getConfig().setMaxParallelism(maxParallelism);
         configureCheckpointing(env.getCheckpointConfig());
-        env.setRestartStrategy(RestartStrategies.noRestart());
+        RestartStrategyUtils.configureNoRestartStrategy(env);
 
         DataStream<Integer> input =
                 env.addSource(

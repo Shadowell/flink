@@ -32,9 +32,12 @@ import org.apache.flink.metrics.Counter;
 import org.apache.flink.runtime.state.JavaSerializer;
 import org.apache.flink.runtime.state.StateInitializationContext;
 import org.apache.flink.runtime.state.StateSnapshotContext;
+import org.apache.flink.streaming.api.functions.source.legacy.ContinuousFileMonitoringFunction;
+import org.apache.flink.streaming.api.functions.source.legacy.SourceFunction;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.operators.OutputTypeConfigurable;
+import org.apache.flink.streaming.api.operators.StreamOperatorParameters;
 import org.apache.flink.streaming.api.operators.StreamSourceContexts;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
@@ -181,6 +184,7 @@ public class ContinuousFileReaderOperator<OUT, T extends TimestampedInputSplit>
         };
 
         private static final Set<ReaderState> ACCEPT_SPLITS = EnumSet.of(IDLE, OPENING, READING);
+
         /** Possible transition FROM each state. */
         private static final Map<ReaderState, Set<ReaderState>> VALID_TRANSITIONS;
 
@@ -226,6 +230,7 @@ public class ContinuousFileReaderOperator<OUT, T extends TimestampedInputSplit>
     private transient OUT reusedRecord;
     private transient SourceFunction.SourceContext<OUT> sourceContext;
     private transient ListState<T> checkpointedState;
+
     /** MUST only be changed via {@link #switchState(ReaderState) switchState}. */
     private transient ReaderState state = ReaderState.IDLE;
 
@@ -245,10 +250,11 @@ public class ContinuousFileReaderOperator<OUT, T extends TimestampedInputSplit>
             };
 
     ContinuousFileReaderOperator(
+            StreamOperatorParameters<OUT> parameters,
             InputFormat<OUT, ? super T> format,
             ProcessingTimeService processingTimeService,
             MailboxExecutor mailboxExecutor) {
-
+        super(parameters);
         this.format = checkNotNull(format);
         this.processingTimeService = checkNotNull(processingTimeService);
         this.executor = (MailboxExecutorImpl) checkNotNull(mailboxExecutor);
@@ -308,7 +314,6 @@ public class ContinuousFileReaderOperator<OUT, T extends TimestampedInputSplit>
 
         this.sourceContext =
                 StreamSourceContexts.getSourceContext(
-                        getOperatorConfig().getTimeCharacteristic(),
                         getProcessingTimeService(),
                         new Object(), // no actual locking needed
                         output,
@@ -495,7 +500,11 @@ public class ContinuousFileReaderOperator<OUT, T extends TimestampedInputSplit>
         LOG.debug("cleanup, state={}", state);
 
         RunnableWithException[] runClose = {
-            () -> sourceContext.close(),
+            () -> {
+                if (sourceContext != null) {
+                    sourceContext.close();
+                }
+            },
             () -> format.close(),
             () -> {
                 if (this.format instanceof RichInputFormat) {

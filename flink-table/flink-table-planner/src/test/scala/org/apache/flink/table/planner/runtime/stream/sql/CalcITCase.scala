@@ -19,15 +19,14 @@ package org.apache.flink.table.planner.runtime.stream.sql
 
 import org.apache.flink.api.common.typeinfo.TypeInformation
 import org.apache.flink.api.java.typeutils.RowTypeInfo
-import org.apache.flink.api.scala._
-import org.apache.flink.api.scala.typeutils.Types
 import org.apache.flink.core.testutils.EachCallbackWrapper
 import org.apache.flink.table.api.{TableDescriptor, _}
 import org.apache.flink.table.api.bridge.scala._
 import org.apache.flink.table.api.config.ExecutionConfigOptions
 import org.apache.flink.table.api.config.ExecutionConfigOptions.LegacyCastBehaviour
-import org.apache.flink.table.api.internal.TableEnvironmentInternal
+import org.apache.flink.table.api.typeutils.Types
 import org.apache.flink.table.catalog.CatalogDatabaseImpl
+import org.apache.flink.table.connector.ChangelogMode
 import org.apache.flink.table.data.{GenericRowData, MapData}
 import org.apache.flink.table.planner.factories.TestValuesTableFactory
 import org.apache.flink.table.planner.runtime.utils._
@@ -47,7 +46,7 @@ import org.junit.jupiter.api.extension.RegisterExtension
 import java.time.Instant
 import java.util
 
-import scala.collection.JavaConversions._
+import scala.collection.JavaConverters._
 
 class CalcITCase extends StreamingTestBase {
 
@@ -94,7 +93,7 @@ class CalcITCase extends StreamingTestBase {
         .ofFields(new IntType(), new BooleanType())
         .asInstanceOf[TypeInformation[GenericRowData]]
 
-    val ds = env.fromCollection(data)
+    val ds = StreamingEnvUtil.fromCollection(env, data)
 
     val t = ds.toTable(tEnv, 'a, 'b)
     tEnv.createTemporaryView("MyTableRow", t)
@@ -129,7 +128,7 @@ class CalcITCase extends StreamingTestBase {
         .ofFields(new IntType(), new IntType(), new BigIntType())
         .asInstanceOf[TypeInformation[GenericRowData]]
 
-    val ds = env.fromCollection(data)
+    val ds = StreamingEnvUtil.fromCollection(env, data)
 
     val t = ds.toTable(tEnv, 'a, 'b, 'c)
     tEnv.createTemporaryView("MyTableRow", t)
@@ -156,7 +155,7 @@ class CalcITCase extends StreamingTestBase {
 
     implicit val tpe: TypeInformation[Row] = new RowTypeInfo(Types.STRING, Types.STRING, Types.INT)
 
-    val ds = env.fromCollection(data)
+    val ds = StreamingEnvUtil.fromCollection(env, data)
 
     val t = ds.toTable(tEnv, 'a, 'b, 'c)
     tEnv.createTemporaryView("MyTableRow", t)
@@ -189,7 +188,7 @@ class CalcITCase extends StreamingTestBase {
         .ofFields(new IntType(), new IntType(), new BigIntType())
         .asInstanceOf[TypeInformation[GenericRowData]]
 
-    val ds = env.fromCollection(data)
+    val ds = StreamingEnvUtil.fromCollection(env, data)
 
     val t = ds.toTable(tEnv, 'a, 'b, 'c)
     tEnv.createTemporaryView("MyTableRow", t)
@@ -214,7 +213,7 @@ class CalcITCase extends StreamingTestBase {
 
     implicit val tpe: TypeInformation[Row] = new RowTypeInfo(Types.STRING, Types.STRING, Types.INT)
 
-    val ds = env.fromCollection(data)
+    val ds = StreamingEnvUtil.fromCollection(env, data)
 
     val t = ds.toTable(tEnv, 'a, 'b, 'c)
     tEnv.createTemporaryView("MyTableRow", t)
@@ -232,8 +231,8 @@ class CalcITCase extends StreamingTestBase {
   def testPrimitiveMapType(): Unit = {
     val sqlQuery = "SELECT MAP[b, 30, 10, a] FROM MyTableRow"
 
-    val t = env
-      .fromCollection(TestData.smallTupleData3)
+    val t = StreamingEnvUtil
+      .fromCollection(env, TestData.smallTupleData3)
       .toTable(tEnv, 'a, 'b, 'c)
     tEnv.createTemporaryView("MyTableRow", t)
 
@@ -250,8 +249,8 @@ class CalcITCase extends StreamingTestBase {
   def testNonPrimitiveMapType(): Unit = {
     val sqlQuery = "SELECT MAP[a, c] FROM MyTableRow"
 
-    val t = env
-      .fromCollection(TestData.smallTupleData3)
+    val t = StreamingEnvUtil
+      .fromCollection(env, TestData.smallTupleData3)
       .toTable(tEnv, 'a, 'b, 'c)
     tEnv.createTemporaryView("MyTableRow", t)
 
@@ -269,7 +268,8 @@ class CalcITCase extends StreamingTestBase {
     val sqlQuery = "SELECT * FROM MyTable"
 
     val table = tEnv.fromDataStream(
-      env.fromCollection(
+      StreamingEnvUtil.fromCollection(
+        env,
         Seq(
           ((0, 0), "0"),
           ((1, 1), "1"),
@@ -280,20 +280,24 @@ class CalcITCase extends StreamingTestBase {
     tEnv.createTemporaryView("MyTable", table)
 
     val result = tEnv.sqlQuery(sqlQuery)
-    val sink = TestSinkUtil.configureSink(result, new TestingAppendTableSink())
-    tEnv.asInstanceOf[TableEnvironmentInternal].registerTableSinkInternal("MySink", sink)
+
+    TestSinkUtil.addValuesSink(tEnv, "MySink", result, ChangelogMode.insertOnly())
     table.executeInsert("MySink").await()
 
     val expected = List("0,0,0", "1,1,1", "2,2,2")
-    assertThat(sink.getAppendResults.sorted).isEqualTo(expected.sorted)
+    assertThat(
+      TestValuesTableFactory
+        .getResultsAsStrings("MySink")
+        .asScala
+        .sorted).isEqualTo(expected.sorted)
   }
 
   @Test
   def testIn(): Unit = {
     val sqlQuery = "SELECT * FROM MyTable WHERE b in (1,3,4,5,6)"
 
-    val t = env
-      .fromCollection(TestData.tupleData3)
+    val t = StreamingEnvUtil
+      .fromCollection(env, TestData.tupleData3)
       .toTable(tEnv, 'a, 'b, 'c)
     tEnv.createTemporaryView("MyTable", t)
 
@@ -330,8 +334,8 @@ class CalcITCase extends StreamingTestBase {
   def testNotIn(): Unit = {
     val sqlQuery = "SELECT * FROM MyTable WHERE b not in (1,3,4,5,6)"
 
-    val t = env
-      .fromCollection(TestData.tupleData3)
+    val t = StreamingEnvUtil
+      .fromCollection(env, TestData.tupleData3)
       .toTable(tEnv, 'a, 'b, 'c)
     tEnv.createTemporaryView("MyTable", t)
 
@@ -347,8 +351,8 @@ class CalcITCase extends StreamingTestBase {
   @Test
   def testLongProjectionList(): Unit = {
 
-    val t = env
-      .fromCollection(TestData.smallTupleData3)
+    val t = StreamingEnvUtil
+      .fromCollection(env, TestData.smallTupleData3)
       .toTable(tEnv, 'a, 'b, 'c)
     tEnv.createTemporaryView("MyTable", t)
 
@@ -388,6 +392,7 @@ class CalcITCase extends StreamingTestBase {
     val actual = tEnv
       .executeSql("SELECT IF(a > 3, 'true', 'false'), a from t")
       .collect()
+      .asScala
       .map(r => r.toString)
       .toList
     assertThat(actual.sorted).isEqualTo(expected.sorted)
@@ -430,7 +435,7 @@ class CalcITCase extends StreamingTestBase {
     val result = tEnv.executeSql("select a, b from CustomTable")
 
     val expected = List("1,{1=2}", "2,{4=5}")
-    val actual = CollectionUtil.iteratorToList(result.collect()).map(r => r.toString)
+    val actual = CollectionUtil.iteratorToList(result.collect()).asScala.map(r => r.toString)
     assertThat(actual.sorted).isEqualTo(expected.sorted)
   }
 
@@ -560,7 +565,9 @@ class CalcITCase extends StreamingTestBase {
       .select($("id"), currentWatermark($("ts")))
       .execute()
       .collect()
+      .asScala
       .toList
+      .asJava
     TestBaseUtils.compareResultAsText(
       result1,
       """1,null
@@ -573,7 +580,9 @@ class CalcITCase extends StreamingTestBase {
       .sqlQuery("SELECT id, CURRENT_WATERMARK(ts) FROM T")
       .execute()
       .collect()
+      .asScala
       .toList
+      .asJava
     TestBaseUtils.compareResultAsText(
       result2,
       """1,null
@@ -588,7 +597,9 @@ class CalcITCase extends StreamingTestBase {
           |""".stripMargin)
       .execute()
       .collect()
+      .asScala
       .toList
+      .asJava
     TestBaseUtils.compareResultAsText(
       result3,
       """1
@@ -607,7 +618,9 @@ class CalcITCase extends StreamingTestBase {
                   |""".stripMargin)
       .execute()
       .collect()
+      .asScala
       .toList
+      .asJava
     TestBaseUtils.compareResultAsText(
       result4,
       """1990-06-02T13:37:43,null
@@ -676,13 +689,13 @@ class CalcITCase extends StreamingTestBase {
         .build()
     )
 
-    val result = tEnv.sqlQuery("SELECT * FROM T").execute().collect().toList
+    val result = tEnv.sqlQuery("SELECT * FROM T").execute().collect().asScala.toList.asJava
     TestBaseUtils.compareResultAsText(result, "42")
   }
 
   @Test
   def testSearch(): Unit = {
-    val stream = env.fromElements("HC809", "H389N     ")
+    val stream = env.fromData("HC809", "H389N     ")
     tEnv.createTemporaryView(
       "SimpleTable",
       stream,
@@ -734,13 +747,15 @@ class CalcITCase extends StreamingTestBase {
           "COALESCE(cast(NULL as double), cast(NULL as double))")
       .execute()
       .collect()
+      .asScala
       .toList
+      .asJava
     TestBaseUtils.compareResultAsText(result, "1,1,2,1,3,4,1,1,2,1,3,4,1.0,1.0,2.0,2.0,2.0,null")
   }
 
   @Test
   def testCurrentDatabase(): Unit = {
-    val result1 = tEnv.sqlQuery("SELECT CURRENT_DATABASE()").execute().collect().toList
+    val result1 = tEnv.sqlQuery("SELECT CURRENT_DATABASE()").execute().collect().asScala.toList
     assertThat(result1).isEqualTo(Seq(row(tEnv.getCurrentDatabase)))
 
     // switch to another database
@@ -752,7 +767,8 @@ class CalcITCase extends StreamingTestBase {
         new CatalogDatabaseImpl(new util.HashMap[String, String](), "db1"),
         false)
     tEnv.useDatabase("db1")
-    val result2 = tEnv.sqlQuery("SELECT CURRENT_DATABASE()").execute().collect().toList
+    val result2 =
+      tEnv.sqlQuery("SELECT CURRENT_DATABASE()").execute().collect().asScala.toList
     assertThat(result2).isEqualTo(Seq(row(tEnv.getCurrentDatabase)))
   }
 
@@ -789,8 +805,8 @@ class CalcITCase extends StreamingTestBase {
 
   @Test
   def testNonMergeableRandCall(): Unit = {
-    val t = env
-      .fromCollection(TestData.smallTupleData3)
+    val t = StreamingEnvUtil
+      .fromCollection(env, TestData.smallTupleData3)
       .toTable(tEnv, 'a, 'b, 'c)
     tEnv.createTemporaryView("SimpleTable", t)
 
@@ -821,5 +837,132 @@ class CalcITCase extends StreamingTestBase {
 
     val expected = List("16")
     assertThat(sink.getAppendResults.sorted).isEqualTo(expected.sorted)
+  }
+
+  @Test
+  def testCastRow(): Unit = {
+    val testDataId = TestValuesTableFactory.registerData(
+      Seq(
+        row(row(row(row("1")))),
+        row(row(row(row("2"))))
+      ))
+    tEnv.executeSql(
+      s"""
+         |CREATE TABLE t (
+         |  a ROW<`data` ROW<`nested` ROW<`trId` STRING NOT NULL>>NOT NULL>,
+         |  b AS CAST(a as ROW<`data` ROW<`nested` ROW<`trId` STRING NOT NULL>>NOT NULL>)
+         |) WITH (
+         |  'connector' = 'values',
+         |  'data-id' = '$testDataId',
+         |  'bounded' = 'true'
+         |)
+         |""".stripMargin)
+    val expected = List(
+      row("1", "1", row(row(row("1")))),
+      row("2", "2", row(row(row("2"))))
+    )
+    val actual = tEnv
+      .executeSql("select a.data.nested.trId, b.data.nested.trId, b AS col from t")
+      .collect()
+      .asScala
+      .map(r => r)
+      .toList
+    assertThat(actual).isEqualTo(expected)
+  }
+
+  @Test
+  def testSelectForArrayWithNestedRows(): Unit = {
+    val result = tEnv
+      .executeSql(s"""
+                     |SELECT * FROM
+                     |(VALUES (
+                     |    ARRAY[
+                     |       ROW(
+                     |          ROW('Test1', TRUE)
+                     |       ),
+                     |       ROW(
+                     |          ROW('Test2', FALSE)
+                     |       )
+                     |    ]
+                     |))
+                     |""".stripMargin)
+      .collect()
+      .asScala
+      .toList
+
+    val field = result.head.getField(0)
+    val arr = field.asInstanceOf[Array[Row]]
+    assertThat(arr.apply(0).getArity).isEqualTo(1)
+    assertThat(arr.apply(0).getField(0).asInstanceOf[Row].getArity).isEqualTo(2)
+    assertThat(arr.apply(0).getField(0)).isEqualTo(row("Test1", true))
+    assertThat(arr.apply(1).getField(0)).isEqualTo(row("Test2", false))
+  }
+
+  @Test
+  def testSelectForArrayWithMaps(): Unit = {
+    val result = tEnv
+      .executeSql(s"""
+                     |SELECT * FROM
+                     |(VALUES (
+                     |    ARRAY[
+                     |         MAP['nested1',
+                     |            ARRAY['Test1', 'True']
+                     |            ],
+                     |         MAP['nested2',
+                     |            ARRAY['Test2', 'False']
+                     |            ]
+                     |    ]
+                     |))
+                     |""".stripMargin)
+      .collect()
+      .asScala
+      .toList
+
+    val field = result.head.getField(0)
+    assertThat(field.isInstanceOf[Array[util.Map[_, _]]]).isTrue
+    val arr = field.asInstanceOf[Array[util.Map[_, _]]]
+    assertThat(arr.apply(0).get("nested1").asInstanceOf[Array[String]])
+      .isEqualTo(Array("Test1", "True"))
+    assertThat(arr.apply(1).get("nested2").asInstanceOf[Array[String]])
+      .isEqualTo(Array("Test2", "False"))
+  }
+
+  @Test
+  def testPrimitiveDefaultValues(): Unit = {
+    val sql =
+      """
+        |SELECT
+        |  a[1]
+        |  ,b[1]
+        |FROM (
+        |  VALUES (CAST(ARRAY[1,2] AS ARRAY<SMALLINT>), CAST(ARRAY[2,3] AS ARRAY<TINYINT>))
+        |) t(a, b)
+        |""".stripMargin
+
+    val result = tEnv
+      .executeSql(sql)
+      .collect()
+      .asScala
+      .toList
+      .map(_.toString)
+    val expected = List("1,2")
+    assertThat(result).isEqualTo(expected)
+  }
+
+  @Test
+  def testWeekQuarterIntervals(): Unit = {
+    val sql =
+      """
+        |SELECT INTERVAL '2' WEEK, INTERVAL '3' QUARTER
+        |""".stripMargin
+
+    val result = tEnv
+      .executeSql(sql)
+      .collect()
+      .asScala
+      .toList
+      .map(_.toString)
+    val expected = List("PT336H,P9M")
+    assertThat(result).isEqualTo(expected)
   }
 }

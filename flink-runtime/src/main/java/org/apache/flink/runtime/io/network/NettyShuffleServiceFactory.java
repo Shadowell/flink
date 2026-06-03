@@ -130,7 +130,6 @@ public class NettyShuffleServiceFactory
                                 resultPartitionManager,
                                 taskEventPublisher,
                                 nettyConfig,
-                                config.getMaxNumberOfConnections(),
                                 config.isConnectionReuseEnabled())
                         : new LocalConnectionManager();
         return createNettyShuffleEnvironment(
@@ -227,6 +226,7 @@ public class NettyShuffleServiceFactory
                         config.networkBuffersPerChannel(),
                         config.floatingNetworkBuffersPerGate(),
                         config.networkBufferSize(),
+                        config.startingBufferSize(),
                         config.isBatchShuffleCompressionEnabled(),
                         config.getCompressionCodec(),
                         config.getMaxBuffersPerChannel(),

@@ -18,20 +18,25 @@
 
 package org.apache.flink.streaming.runtime.operators.sink.committables;
 
+import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.connector.sink2.Committer;
 import org.apache.flink.metrics.groups.SinkCommitterMetricGroup;
+import org.apache.flink.streaming.api.connector.sink2.CommittableMessage;
 import org.apache.flink.streaming.api.connector.sink2.CommittableSummary;
 import org.apache.flink.streaming.api.connector.sink2.CommittableWithLineage;
+import org.apache.flink.util.Preconditions;
 
-import javax.annotation.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static org.apache.flink.util.Preconditions.checkArgument;
 import static org.apache.flink.util.Preconditions.checkNotNull;
@@ -40,56 +45,76 @@ class CheckpointCommittableManagerImpl<CommT> implements CheckpointCommittableMa
     /** Mapping of subtask id to {@link SubtaskCommittableManager}. */
     private final Map<Integer, SubtaskCommittableManager<CommT>> subtasksCommittableManagers;
 
-    @Nullable private final Long checkpointId;
-    private final int subtaskId;
+    private final long checkpointId;
     private final int numberOfSubtasks;
     private final SinkCommitterMetricGroup metricGroup;
 
-    CheckpointCommittableManagerImpl(
-            int subtaskId,
-            int numberOfSubtasks,
-            @Nullable Long checkpointId,
-            SinkCommitterMetricGroup metricGroup) {
-        this(new HashMap<>(), subtaskId, numberOfSubtasks, checkpointId, metricGroup);
-    }
+    private static final Logger LOG =
+            LoggerFactory.getLogger(CheckpointCommittableManagerImpl.class);
 
+    @VisibleForTesting
     CheckpointCommittableManagerImpl(
             Map<Integer, SubtaskCommittableManager<CommT>> subtasksCommittableManagers,
-            int subtaskId,
             int numberOfSubtasks,
-            @Nullable Long checkpointId,
+            long checkpointId,
             SinkCommitterMetricGroup metricGroup) {
         this.subtasksCommittableManagers = checkNotNull(subtasksCommittableManagers);
-        this.subtaskId = subtaskId;
         this.numberOfSubtasks = numberOfSubtasks;
         this.checkpointId = checkpointId;
         this.metricGroup = metricGroup;
     }
 
+    public static <CommT> CheckpointCommittableManagerImpl<CommT> forSummary(
+            CommittableSummary<CommT> summary, SinkCommitterMetricGroup metricGroup) {
+        return new CheckpointCommittableManagerImpl<>(
+                new HashMap<>(),
+                summary.getNumberOfSubtasks(),
+                summary.getCheckpointIdOrEOI(),
+                metricGroup);
+    }
+
     @Override
     public long getCheckpointId() {
-        checkNotNull(checkpointId);
         return checkpointId;
+    }
+
+    @Override
+    public int getNumberOfSubtasks() {
+        return numberOfSubtasks;
     }
 
     Collection<SubtaskCommittableManager<CommT>> getSubtaskCommittableManagers() {
         return subtasksCommittableManagers.values();
     }
 
-    void upsertSummary(CommittableSummary<CommT> summary) {
-        SubtaskCommittableManager<CommT> existing =
-                subtasksCommittableManagers.putIfAbsent(
+    void addSummary(CommittableSummary<CommT> summary) {
+        long checkpointId = summary.getCheckpointIdOrEOI();
+        SubtaskCommittableManager<CommT> manager =
+                new SubtaskCommittableManager<>(
+                        summary.getNumberOfCommittables(),
                         summary.getSubtaskId(),
-                        new SubtaskCommittableManager<>(
-                                summary.getNumberOfCommittables(),
-                                subtaskId,
-                                summary.getCheckpointId().isPresent()
-                                        ? summary.getCheckpointId().getAsLong()
-                                        : null,
-                                metricGroup));
-        if (existing != null) {
-            throw new UnsupportedOperationException(
-                    "Currently it is not supported to update the CommittableSummary for a checkpoint coming from the same subtask. Please check the status of FLINK-25920");
+                        checkpointId,
+                        metricGroup);
+        // Remove branch once CommittableMessage.EOI has been removed (earliest 2.2)
+        if (checkpointId == CommittableMessage.EOI) {
+            SubtaskCommittableManager<CommT> merged =
+                    subtasksCommittableManagers.merge(
+                            summary.getSubtaskId(), manager, SubtaskCommittableManager::merge);
+            LOG.debug("Adding EOI summary (new={}}, merged={}}).", manager, merged);
+        } else {
+            SubtaskCommittableManager<CommT> existing =
+                    subtasksCommittableManagers.putIfAbsent(summary.getSubtaskId(), manager);
+            if (existing != null) {
+                throw new UnsupportedOperationException(
+                        String.format(
+                                "Received duplicate committable summary for checkpoint %s + subtask %s (new=%s, old=%s). Please check the status of FLINK-25920",
+                                checkpointId, summary.getSubtaskId(), manager, existing));
+            } else {
+                LOG.debug(
+                        "Setting the summary for checkpointId {} with {}",
+                        this.checkpointId,
+                        manager);
+            }
         }
     }
 
@@ -104,72 +129,131 @@ class CheckpointCommittableManagerImpl<CommT> implements CheckpointCommittableMa
     }
 
     @Override
-    public CommittableSummary<CommT> getSummary() {
-        return new CommittableSummary<>(
-                subtaskId,
-                numberOfSubtasks,
-                checkpointId,
-                subtasksCommittableManagers.values().stream()
-                        .mapToInt(SubtaskCommittableManager::getNumCommittables)
-                        .sum(),
-                subtasksCommittableManagers.values().stream()
-                        .mapToInt(SubtaskCommittableManager::getNumPending)
-                        .sum(),
-                subtasksCommittableManagers.values().stream()
-                        .mapToInt(SubtaskCommittableManager::getNumFailed)
-                        .sum());
-    }
-
-    boolean isFinished() {
+    public boolean isFinished() {
         return subtasksCommittableManagers.values().stream()
                 .allMatch(SubtaskCommittableManager::isFinished);
     }
 
     @Override
-    public Collection<CommittableWithLineage<CommT>> commit(
-            boolean fullyReceived, Committer<CommT> committer)
+    public boolean hasGloballyReceivedAll() {
+        return subtasksCommittableManagers.size() == numberOfSubtasks
+                && subtasksCommittableManagers.values().stream()
+                        .allMatch(SubtaskCommittableManager::hasReceivedAll);
+    }
+
+    @Override
+    public void commit(Committer<CommT> committer, int maxRetries)
             throws IOException, InterruptedException {
-        Collection<CommitRequestImpl<CommT>> requests = getPendingRequests(fullyReceived);
-        requests.forEach(CommitRequestImpl::setSelected);
-        committer.commit(new ArrayList<>(requests));
-        requests.forEach(CommitRequestImpl::setCommittedIfNoError);
-        Collection<CommittableWithLineage<CommT>> committed = drainFinished();
-        metricGroup.setCurrentPendingCommittablesGauge(() -> getPendingRequests(false).size());
-        return committed;
+        Collection<CommitRequestImpl<CommT>> requests =
+                getPendingRequests().collect(Collectors.toList());
+        for (int retry = 0; !requests.isEmpty() && retry <= maxRetries; retry++) {
+            requests.forEach(CommitRequestImpl::setSelected);
+            committer.commit(Collections.unmodifiableCollection(requests));
+            requests.forEach(CommitRequestImpl::setCommittedIfNoError);
+            requests = requests.stream().filter(r -> !r.isFinished()).collect(Collectors.toList());
+        }
+        if (!requests.isEmpty()) {
+            throw new IOException(
+                    String.format(
+                            "Failed to commit %s committables after %s retries: %s",
+                            requests.size(), maxRetries, requests));
+        }
     }
 
-    Collection<CommitRequestImpl<CommT>> getPendingRequests(boolean fullyReceived) {
+    @Override
+    public Collection<CommT> getSuccessfulCommittables() {
         return subtasksCommittableManagers.values().stream()
-                .filter(subtask -> !fullyReceived || subtask.hasReceivedAll())
-                .flatMap(SubtaskCommittableManager::getPendingRequests)
+                .flatMap(SubtaskCommittableManager::getSuccessfulCommittables)
                 .collect(Collectors.toList());
     }
 
-    Collection<CommittableWithLineage<CommT>> drainFinished() {
+    @Override
+    public int getNumFailed() {
         return subtasksCommittableManagers.values().stream()
-                .flatMap(subtask -> subtask.drainCommitted().stream())
-                .collect(Collectors.toList());
+                .mapToInt(SubtaskCommittableManager::getNumFailed)
+                .sum();
+    }
+
+    Stream<CommitRequestImpl<CommT>> getPendingRequests() {
+        return subtasksCommittableManagers.values().stream()
+                .peek(this::assertReceivedAll)
+                .flatMap(SubtaskCommittableManager::getPendingRequests);
+    }
+
+    /**
+     * For committers: Sinks don't use unaligned checkpoints, so we receive all committables of a
+     * given upstream task before the respective barrier. Thus, when the barrier reaches the
+     * committer, all committables of a specific checkpoint must have been received. Committing
+     * happens even later on notifyCheckpointComplete.
+     *
+     * <p>Global committers need to ensure that all committables of all subtasks have been received
+     * with {@link #hasGloballyReceivedAll()} before trying to commit. Naturally, this method then
+     * becomes a no-op.
+     *
+     * <p>Note that by transitivity, the assertion also holds for committables of subsumed
+     * checkpoints.
+     *
+     * <p>This assertion will fail in case of bugs in the writer or in the pre-commit topology if
+     * present.
+     */
+    private void assertReceivedAll(SubtaskCommittableManager<CommT> subtask) {
+        Preconditions.checkArgument(
+                subtask.hasReceivedAll(),
+                "Trying to commit incomplete batch of committables subtask=%s, manager=%s",
+                subtask.getSubtaskId(),
+                this);
     }
 
     CheckpointCommittableManagerImpl<CommT> merge(CheckpointCommittableManagerImpl<CommT> other) {
-        checkArgument(Objects.equals(other.checkpointId, checkpointId));
+        checkArgument(other.checkpointId == checkpointId);
+        CheckpointCommittableManagerImpl<CommT> merged = copy();
         for (Map.Entry<Integer, SubtaskCommittableManager<CommT>> subtaskEntry :
                 other.subtasksCommittableManagers.entrySet()) {
-            subtasksCommittableManagers.merge(
+            merged.subtasksCommittableManagers.merge(
                     subtaskEntry.getKey(),
                     subtaskEntry.getValue(),
                     SubtaskCommittableManager::merge);
         }
-        return this;
+        return merged;
     }
 
     CheckpointCommittableManagerImpl<CommT> copy() {
         return new CheckpointCommittableManagerImpl<>(
                 subtasksCommittableManagers.entrySet().stream()
                         .collect(Collectors.toMap(Map.Entry::getKey, (e) -> e.getValue().copy())),
-                subtaskId,
                 numberOfSubtasks,
                 checkpointId,
                 metricGroup);
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        CheckpointCommittableManagerImpl<?> that = (CheckpointCommittableManagerImpl<?>) o;
+        return checkpointId == that.checkpointId
+                && numberOfSubtasks == that.numberOfSubtasks
+                && Objects.equals(subtasksCommittableManagers, that.subtasksCommittableManagers);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(subtasksCommittableManagers, checkpointId, numberOfSubtasks);
+    }
+
+    @Override
+    public String toString() {
+        return "CheckpointCommittableManagerImpl{"
+                + "numberOfSubtasks="
+                + numberOfSubtasks
+                + ", checkpointId="
+                + checkpointId
+                + ", subtasksCommittableManagers="
+                + subtasksCommittableManagers
+                + '}';
     }
 }

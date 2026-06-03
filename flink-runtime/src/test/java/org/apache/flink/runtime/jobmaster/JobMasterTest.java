@@ -18,13 +18,12 @@
 
 package org.apache.flink.runtime.jobmaster;
 
+import org.apache.flink.api.common.ApplicationID;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.common.functions.AggregateFunction;
 import org.apache.flink.api.common.io.DefaultInputSplitAssigner;
-import org.apache.flink.api.common.restartstrategy.RestartStrategies;
-import org.apache.flink.api.common.time.Time;
 import org.apache.flink.api.java.ClosureCleaner;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.tuple.Tuple3;
@@ -38,6 +37,9 @@ import org.apache.flink.core.io.InputSplit;
 import org.apache.flink.core.io.InputSplitAssigner;
 import org.apache.flink.core.io.InputSplitSource;
 import org.apache.flink.core.testutils.OneShotLatch;
+import org.apache.flink.events.Event;
+import org.apache.flink.events.EventBuilder;
+import org.apache.flink.events.Events;
 import org.apache.flink.runtime.blocklist.BlockedNode;
 import org.apache.flink.runtime.blocklist.DefaultBlocklistHandler;
 import org.apache.flink.runtime.checkpoint.CheckpointProperties;
@@ -81,10 +83,12 @@ import org.apache.flink.runtime.jobgraph.SavepointRestoreSettings;
 import org.apache.flink.runtime.jobgraph.tasks.AbstractInvokable;
 import org.apache.flink.runtime.jobmanager.PartitionProducerDisposedException;
 import org.apache.flink.runtime.jobmanager.slots.TaskManagerGateway;
+import org.apache.flink.runtime.jobmaster.factories.JobManagerJobMetricGroupFactory;
 import org.apache.flink.runtime.jobmaster.slotpool.DeclarativeSlotPoolFactory;
 import org.apache.flink.runtime.jobmaster.slotpool.FreeSlotTracker;
 import org.apache.flink.runtime.jobmaster.slotpool.FreeSlotTrackerTestUtils;
 import org.apache.flink.runtime.jobmaster.slotpool.PhysicalSlot;
+import org.apache.flink.runtime.jobmaster.slotpool.PhysicalSlotRequest;
 import org.apache.flink.runtime.jobmaster.slotpool.SlotPool;
 import org.apache.flink.runtime.jobmaster.slotpool.SlotPoolService;
 import org.apache.flink.runtime.jobmaster.slotpool.SlotPoolServiceFactory;
@@ -92,6 +96,8 @@ import org.apache.flink.runtime.jobmaster.slotpool.TestingSlotPoolServiceBuilder
 import org.apache.flink.runtime.jobmaster.utils.JobMasterBuilder;
 import org.apache.flink.runtime.leaderretrieval.SettableLeaderRetrievalService;
 import org.apache.flink.runtime.messages.Acknowledge;
+import org.apache.flink.runtime.metrics.groups.JobManagerJobMetricGroup;
+import org.apache.flink.runtime.metrics.groups.UnregisteredMetricGroups;
 import org.apache.flink.runtime.registration.RegistrationResponse;
 import org.apache.flink.runtime.resourcemanager.ResourceManagerGateway;
 import org.apache.flink.runtime.resourcemanager.ResourceManagerId;
@@ -105,6 +111,7 @@ import org.apache.flink.runtime.scheduler.SchedulerTestingUtils;
 import org.apache.flink.runtime.scheduler.TestingPhysicalSlot;
 import org.apache.flink.runtime.scheduler.TestingSchedulerNG;
 import org.apache.flink.runtime.scheduler.TestingSchedulerNGFactory;
+import org.apache.flink.runtime.scheduler.metrics.AllSubTasksRunningOrFinishedStateTimeMetrics;
 import org.apache.flink.runtime.shuffle.DefaultPartitionWithMetrics;
 import org.apache.flink.runtime.shuffle.DefaultShuffleMetrics;
 import org.apache.flink.runtime.shuffle.NettyShuffleDescriptor;
@@ -123,6 +130,8 @@ import org.apache.flink.runtime.testtasks.NoOpInvokable;
 import org.apache.flink.runtime.testutils.CommonTestUtils;
 import org.apache.flink.runtime.util.NettyShuffleDescriptorBuilder;
 import org.apache.flink.runtime.util.TestingFatalErrorHandler;
+import org.apache.flink.streaming.api.graph.ExecutionPlan;
+import org.apache.flink.streaming.util.RestartStrategyUtils;
 import org.apache.flink.testutils.TestingUtils;
 import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.FlinkRuntimeException;
@@ -169,15 +178,20 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
+import static org.apache.flink.configuration.JobManagerOptions.SchedulerType;
 import static org.apache.flink.configuration.RestartStrategyOptions.RestartStrategyType.FIXED_DELAY;
 import static org.apache.flink.core.testutils.FlinkAssertions.assertThatFuture;
 import static org.apache.flink.runtime.executiongraph.ExecutionGraphTestUtils.createExecutionAttemptId;
+import static org.apache.flink.runtime.scheduler.metrics.AllSubTasksRunningOrFinishedStateTimeMetrics.Status.ALL_RUNNING_OR_FINISHED;
+import static org.apache.flink.runtime.scheduler.metrics.AllSubTasksRunningOrFinishedStateTimeMetrics.Status.NOT_ALL_RUNNING_OR_FINISHED;
+import static org.apache.flink.runtime.util.JobVertexConnectionUtils.connectNewDataSetAsInput;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -189,7 +203,7 @@ class JobMasterTest {
 
     @TempDir private Path temporaryFolder;
 
-    private static final Time testingTimeout = Time.seconds(10L);
+    private static final Duration testingTimeout = Duration.ofSeconds(10L);
 
     private static final long fastHeartbeatInterval = 1L;
     private static final long fastHeartbeatTimeout = 10L;
@@ -369,7 +383,7 @@ class JobMasterTest {
 
             final JobID disconnectedJobManager =
                     disconnectedJobManagerFuture.get(
-                            testingTimeout.toMilliseconds(), TimeUnit.MILLISECONDS);
+                            testingTimeout.toMillis(), TimeUnit.MILLISECONDS);
 
             assertThat(disconnectedJobManager).isEqualTo(jobGraph.getJobID());
         }
@@ -486,6 +500,7 @@ class JobMasterTest {
         @Override
         public SlotPoolService createSlotPoolService(
                 @Nonnull JobID jobId,
+                @Nonnull ApplicationID applicationId,
                 DeclarativeSlotPoolFactory declarativeSlotPoolFactory,
                 @Nonnull ComponentMainThreadExecutor componentMainThreadExecutor) {
             return new TestingSlotPool(jobId, hasReceivedSlotOffers);
@@ -598,29 +613,20 @@ class JobMasterTest {
 
         @Override
         public Optional<PhysicalSlot> allocateAvailableSlot(
-                @Nonnull SlotRequestId slotRequestId,
-                @Nonnull AllocationID allocationID,
-                @Nonnull ResourceProfile requirementProfile) {
+                AllocationID allocationID, PhysicalSlotRequest physicalSlotRequest) {
             throw new UnsupportedOperationException(
                     "TestingSlotPool does not support this operation.");
         }
 
-        @Nonnull
         @Override
         public CompletableFuture<PhysicalSlot> requestNewAllocatedSlot(
-                @Nonnull SlotRequestId slotRequestId,
-                @Nonnull ResourceProfile resourceProfile,
-                @Nonnull Collection<AllocationID> preferredAllocations,
-                @Nullable Duration timeout) {
+                PhysicalSlotRequest physicalSlotRequest, Duration timeout) {
             return new CompletableFuture<>();
         }
 
-        @Nonnull
         @Override
         public CompletableFuture<PhysicalSlot> requestNewAllocatedBatchSlot(
-                @Nonnull SlotRequestId slotRequestId,
-                @Nonnull ResourceProfile resourceProfile,
-                @Nonnull Collection<AllocationID> preferredAllocations) {
+                PhysicalSlotRequest physicalSlotRequest) {
             return new CompletableFuture<>();
         }
 
@@ -704,7 +710,7 @@ class JobMasterTest {
             // register job manager success will trigger monitor heartbeat target between jm and rm
             final Tuple3<JobMasterId, ResourceID, JobID> registrationInformation =
                     jobManagerRegistrationFuture.get(
-                            testingTimeout.toMilliseconds(), TimeUnit.MILLISECONDS);
+                            testingTimeout.toMillis(), TimeUnit.MILLISECONDS);
 
             assertThat(registrationInformation.f0).isEqualTo(jobMasterId);
             assertThat(registrationInformation.f1).isEqualTo(jmResourceId);
@@ -712,7 +718,7 @@ class JobMasterTest {
 
             final JobID disconnectedJobManager =
                     disconnectedJobManagerFuture.get(
-                            testingTimeout.toMilliseconds(), TimeUnit.MILLISECONDS);
+                            testingTimeout.toMillis(), TimeUnit.MILLISECONDS);
 
             // heartbeat timeout should trigger disconnect JobManager from ResourceManager
             assertThat(disconnectedJobManager).isEqualTo(jobGraph.getJobID());
@@ -1077,14 +1083,10 @@ class JobMasterTest {
         source.setInputSplitSource(inputSplitSource);
         source.setInvokableClass(AbstractInvokable.class);
 
-        final ExecutionConfig executionConfig = new ExecutionConfig();
-        executionConfig.setRestartStrategy(RestartStrategies.fixedDelayRestart(100, 0));
-
         final JobGraph inputSplitJobGraph =
-                JobGraphBuilder.newStreamingJobGraphBuilder()
-                        .addJobVertex(source)
-                        .setExecutionConfig(executionConfig)
-                        .build();
+                JobGraphBuilder.newStreamingJobGraphBuilder().addJobVertex(source).build();
+        inputSplitJobGraph.setApplicationId(new ApplicationID());
+        RestartStrategyUtils.configureFixedDelayRestartStrategy(inputSplitJobGraph, 100, 0L);
 
         try (final JobMaster jobMaster =
                 new JobMasterBuilder(inputSplitJobGraph, rpcService)
@@ -1203,7 +1205,8 @@ class JobMasterTest {
                 .map(
                         accessExecutionJobVertex ->
                                 Arrays.asList(accessExecutionJobVertex.getTaskVertices()))
-                .orElse(Collections.emptyList()).stream()
+                .orElse(Collections.emptyList())
+                .stream()
                 .map(AccessExecutionVertex::getCurrentExecutionAttempt)
                 .collect(Collectors.toList());
     }
@@ -1433,7 +1436,7 @@ class JobMasterTest {
 
     /**
      * Tests that the timeout in {@link JobMasterGateway#triggerSavepoint(String, boolean,
-     * SavepointFormatType, Time)} is respected.
+     * SavepointFormatType, Duration)} is respected.
      */
     @Test
     void testTriggerSavepointTimeout() throws Exception {
@@ -1458,7 +1461,7 @@ class JobMasterTest {
                     jobMaster.getSelfGateway(JobMasterGateway.class);
             final CompletableFuture<String> savepointFutureLowTimeout =
                     jobMasterGateway.triggerSavepoint(
-                            "/tmp", false, SavepointFormatType.CANONICAL, Time.milliseconds(1));
+                            "/tmp", false, SavepointFormatType.CANONICAL, Duration.ofMillis(1));
             final CompletableFuture<String> savepointFutureHighTimeout =
                     jobMasterGateway.triggerSavepoint(
                             "/tmp", false, SavepointFormatType.CANONICAL, RpcUtils.INF_TIMEOUT);
@@ -1466,7 +1469,7 @@ class JobMasterTest {
             assertThatThrownBy(
                             () ->
                                     savepointFutureLowTimeout.get(
-                                            testingTimeout.getSize(), testingTimeout.getUnit()))
+                                            testingTimeout.toMillis(), TimeUnit.MILLISECONDS))
                     .hasRootCauseInstanceOf(TimeoutException.class);
 
             assertThat(savepointFutureHighTimeout).isNotDone();
@@ -1597,7 +1600,7 @@ class JobMasterTest {
 
             // trigger some request to guarantee ensure the slotAllocationFailure processing if
             // complete
-            jobMasterGateway.requestJobStatus(Time.seconds(5)).get();
+            jobMasterGateway.requestJobStatus(Duration.ofSeconds(5)).get();
             assertThat(disconnectTaskExecutorFuture).isNotDone();
         }
     }
@@ -1691,24 +1694,82 @@ class JobMasterTest {
      */
     @Test
     void testJobFailureWhenGracefulTaskExecutorTermination() throws Exception {
-        runJobFailureWhenTaskExecutorTerminatesTest(
-                heartbeatServices,
-                (localTaskManagerLocation, jobMasterGateway) ->
-                        jobMasterGateway.disconnectTaskManager(
-                                localTaskManagerLocation.getResourceID(),
-                                new FlinkException("Test disconnectTaskManager exception.")));
+        final List<Event> jobEvents = new ArrayList<>();
+        final SchedulerType schedulerType =
+                runJobFailureWhenTaskExecutorTerminatesTest(
+                        heartbeatServices,
+                        (localTaskManagerLocation, jobMasterGateway) ->
+                                jobMasterGateway.disconnectTaskManager(
+                                        localTaskManagerLocation.getResourceID(),
+                                        new FlinkException(
+                                                "Test disconnectTaskManager exception.")),
+                        jobEvents);
+
+        assertJobStatusTransitions(schedulerType, jobEvents);
     }
 
     @Test
     void testJobFailureWhenTaskExecutorHeartbeatTimeout() throws Exception {
+        final List<Event> jobEvents = new ArrayList<>();
         final TestingHeartbeatServices testingHeartbeatService =
                 new TestingHeartbeatServices(heartbeatInterval, heartbeatTimeout);
 
-        runJobFailureWhenTaskExecutorTerminatesTest(
-                testingHeartbeatService,
-                (localTaskManagerLocation, jobMasterGateway) ->
-                        testingHeartbeatService.triggerHeartbeatTimeout(
-                                jmResourceId, localTaskManagerLocation.getResourceID()));
+        final SchedulerType schedulerType =
+                runJobFailureWhenTaskExecutorTerminatesTest(
+                        testingHeartbeatService,
+                        (localTaskManagerLocation, jobMasterGateway) ->
+                                testingHeartbeatService.triggerHeartbeatTimeout(
+                                        jmResourceId, localTaskManagerLocation.getResourceID()),
+                        jobEvents);
+
+        assertJobStatusTransitions(schedulerType, jobEvents);
+    }
+
+    /**
+     * Asserts that job status transitions are as expected based on the scheduler type.
+     * DefaultScheduler does not emit CREATED state, while AdaptiveScheduler and
+     * AdaptiveBatchScheduler do.
+     */
+    private static void assertJobStatusTransitions(
+            SchedulerType schedulerType, List<Event> jobEvents) {
+        final List<String> jobStatusTransitions =
+                jobEvents.stream()
+                        .filter(event -> Events.JobStatusChangeEvent.name().equals(event.getName()))
+                        .map(Event::getAttributes)
+                        .map(x -> (String) x.get("newJobStatus"))
+                        .collect(Collectors.toList());
+
+        if (schedulerType == SchedulerType.Adaptive) {
+            // Adaptive schedulers emit CREATED: CREATED → RUNNING → FAILING → FAILED
+            assertThat(jobStatusTransitions)
+                    .containsExactly(
+                            JobStatus.CREATED.toString(),
+                            JobStatus.RUNNING.toString(),
+                            JobStatus.FAILING.toString(),
+                            JobStatus.FAILED.toString());
+        } else {
+            // Default scheduler does not emit CREATED: RUNNING → FAILING → FAILED
+            assertThat(jobStatusTransitions)
+                    .containsExactly(
+                            JobStatus.RUNNING.toString(),
+                            JobStatus.FAILING.toString(),
+                            JobStatus.FAILED.toString());
+        }
+
+        assertThat(
+                        jobEvents.stream()
+                                .filter(
+                                        event ->
+                                                Events.AllSubtasksStatusChangeEvent.name()
+                                                        .equals(event.getName()))
+                                .map(Event::getAttributes)
+                                .map(
+                                        x ->
+                                                x.get(
+                                                        AllSubTasksRunningOrFinishedStateTimeMetrics
+                                                                .STATUS_ATTRIBUTE)))
+                .containsExactly(
+                        ALL_RUNNING_OR_FINISHED.toString(), NOT_ALL_RUNNING_OR_FINISHED.toString());
     }
 
     /**
@@ -2335,6 +2396,86 @@ class JobMasterTest {
     }
 
     @Test
+    public void testJobMasterDoesNotReconnectToResourceManagerEvenIfCleanupStalls()
+            throws Exception {
+
+        // the ResourceManager should count the connect attempts
+        final TestingResourceManagerGateway resourceManagerGateway =
+                createAndRegisterTestingResourceManagerGateway();
+        final AtomicInteger connectCount = new AtomicInteger();
+        final OneShotLatch firstRegistrationLatch = new OneShotLatch();
+        resourceManagerGateway.setRegisterJobManagerFunction(
+                (jobMasterId, resourceID, s, jobID) -> {
+                    connectCount.incrementAndGet();
+                    firstRegistrationLatch.trigger();
+
+                    return CompletableFuture.completedFuture(
+                            resourceManagerGateway.getJobMasterRegistrationSuccess());
+                });
+
+        final OneShotLatch schedulerCloseLatch = new OneShotLatch();
+        final CompletableFuture<Void> schedulerCloseFuture = new CompletableFuture<>();
+        final TestingSchedulerNG scheduler =
+                TestingSchedulerNG.newBuilder()
+                        .setCloseAsyncSupplier(
+                                () -> {
+                                    schedulerCloseLatch.trigger();
+                                    return schedulerCloseFuture;
+                                })
+                        .build();
+
+        final OneShotLatch closeSlotPoolLatch = new OneShotLatch();
+        final JobMaster jobMaster =
+                new JobMasterBuilder(jobGraph, rpcService)
+                        .withHighAvailabilityServices(haServices)
+                        .withSlotPoolServiceSchedulerFactory(
+                                DefaultSlotPoolServiceSchedulerFactory.create(
+                                        TestingSlotPoolServiceBuilder.newBuilder()
+                                                .setCloseRunnable(closeSlotPoolLatch::awaitQuietly),
+                                        new TestingSchedulerNGFactory(scheduler)))
+                        .createJobMaster();
+        jobMaster.start();
+
+        notifyResourceManagerLeaderListeners(resourceManagerGateway);
+        firstRegistrationLatch.await();
+
+        final CompletableFuture<Void> jobMasterCloseFuture = jobMaster.closeAsync();
+
+        // force the scheduler closing to happen outside the main thread
+        schedulerCloseLatch.await();
+        CompletableFuture.runAsync(
+                () -> {
+                    try {
+                        // we don't want the future to be completed right away because that could
+                        // lead to the subsequent calls being executed by the main thread again
+                        Thread.sleep(100);
+                    } catch (InterruptedException e) {
+                        throw new RuntimeException(e);
+                    }
+                    schedulerCloseFuture.complete(null);
+                });
+
+        // wait for the ResourceManager connection to be closed (happens before closing the slot
+        // pool)
+        CommonTestUtils.waitUntilCondition(() -> closeSlotPoolLatch.getWaitersCount() > 0);
+
+        final JobMasterGateway jobMasterGateway = jobMaster.getSelfGateway(JobMasterGateway.class);
+        jobMasterGateway.disconnectResourceManager(
+                resourceManagerGateway.getFencingToken(),
+                new FlinkException(
+                        "The JobMaster triggered a connection shutdown which is confirmed by the ResourceManager through this disconnectResourceManager call."));
+
+        // unblocks JobMaster's close procedure
+        closeSlotPoolLatch.trigger();
+        assertThatFuture(jobMasterCloseFuture).eventuallySucceeds();
+
+        assertThat(connectCount.get())
+                .as(
+                        "The disconnect shouldn't trigger another reconnect because the ResourceManager connection was already closed.")
+                .isEqualTo(1);
+    }
+
+    @Test
     void testRetrievingCheckpointStats() throws Exception {
         // create savepoint data
         final long savepointId = 42L;
@@ -2418,13 +2559,18 @@ class JobMasterTest {
         return resourceManagerGateway;
     }
 
-    private void runJobFailureWhenTaskExecutorTerminatesTest(
+    private SchedulerType runJobFailureWhenTaskExecutorTerminatesTest(
             HeartbeatServices heartbeatServices,
-            BiConsumer<LocalUnresolvedTaskManagerLocation, JobMasterGateway> jobReachedRunningState)
+            BiConsumer<LocalUnresolvedTaskManagerLocation, JobMasterGateway> jobReachedRunningState,
+            List<Event> jobEventsOut)
             throws Exception {
         final JobGraph jobGraph = JobGraphTestUtils.singleNoOpJobGraph();
         final JobMasterBuilder.TestingOnCompletionActions onCompletionActions =
                 new JobMasterBuilder.TestingOnCompletionActions();
+
+        final SlotPoolServiceSchedulerFactory slotPoolServiceSchedulerFactory =
+                DefaultSlotPoolServiceSchedulerFactory.fromConfiguration(
+                        configuration, jobGraph.getJobType(), jobGraph.isDynamic());
 
         try (final JobMaster jobMaster =
                 new JobMasterBuilder(jobGraph, rpcService)
@@ -2432,6 +2578,22 @@ class JobMasterTest {
                         .withHighAvailabilityServices(haServices)
                         .withHeartbeatServices(heartbeatServices)
                         .withOnCompletionActions(onCompletionActions)
+                        .withSlotPoolServiceSchedulerFactory(slotPoolServiceSchedulerFactory)
+                        .withMetricsGroupFactory(
+                                new JobManagerJobMetricGroupFactory() {
+                                    @Override
+                                    public JobManagerJobMetricGroup create(
+                                            @Nonnull ExecutionPlan executionPlan) {
+                                        return new UnregisteredMetricGroups
+                                                .UnregisteredJobManagerJobMetricGroup() {
+                                            @Override
+                                            public void addEvent(EventBuilder eventBuilder) {
+                                                jobEventsOut.add(
+                                                        eventBuilder.build(getAllVariables()));
+                                            }
+                                        };
+                                    }
+                                })
                         .createJobMaster()) {
 
             jobMaster.start();
@@ -2483,6 +2645,8 @@ class JobMasterTest {
 
             assertThat(archivedExecutionGraph.getState()).isEqualTo(JobStatus.FAILED);
         }
+
+        return slotPoolServiceSchedulerFactory.getSchedulerType();
     }
 
     private Collection<SlotOffer> registerSlotsAtJobMaster(
@@ -2526,8 +2690,8 @@ class JobMasterTest {
         consumer.setInvokableClass(NoOpInvokable.class);
         consumer.setParallelism(1);
 
-        consumer.connectNewDataSetAsInput(
-                producer, DistributionPattern.POINTWISE, ResultPartitionType.BLOCKING);
+        connectNewDataSetAsInput(
+                consumer, producer, DistributionPattern.POINTWISE, ResultPartitionType.BLOCKING);
 
         return JobGraphTestUtils.batchJobGraph(producer, consumer);
     }
@@ -2556,10 +2720,7 @@ class JobMasterTest {
     private JobGraph createSingleVertexJobWithRestartStrategy() throws IOException {
         final JobGraph jobGraph = JobGraphTestUtils.singleNoOpJobGraph();
 
-        final ExecutionConfig executionConfig = new ExecutionConfig();
-        executionConfig.setRestartStrategy(
-                RestartStrategies.fixedDelayRestart(Integer.MAX_VALUE, 0L));
-        jobGraph.setExecutionConfig(executionConfig);
+        RestartStrategyUtils.configureFixedDelayRestartStrategy(jobGraph, Integer.MAX_VALUE, 0L);
 
         return jobGraph;
     }

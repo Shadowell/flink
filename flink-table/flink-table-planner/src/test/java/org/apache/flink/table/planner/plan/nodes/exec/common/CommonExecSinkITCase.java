@@ -18,15 +18,19 @@
 
 package org.apache.flink.table.planner.plan.nodes.exec.common;
 
+import org.apache.flink.api.connector.source.ReaderOutput;
+import org.apache.flink.api.connector.source.SourceReader;
+import org.apache.flink.api.connector.source.SourceReaderContext;
+import org.apache.flink.api.connector.source.SplitEnumerator;
+import org.apache.flink.api.connector.source.SplitEnumeratorContext;
+import org.apache.flink.core.io.InputStatus;
 import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSink;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.sink.SinkFunction;
-import org.apache.flink.streaming.api.functions.source.SourceFunction;
-import org.apache.flink.streaming.api.transformations.SinkV1Adapter;
+import org.apache.flink.streaming.api.functions.sink.legacy.SinkFunction;
 import org.apache.flink.streaming.api.watermark.Watermark;
-import org.apache.flink.streaming.runtime.operators.sink.TestSink;
+import org.apache.flink.streaming.runtime.operators.sink.TestSinkV2;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.ExplainDetail;
 import org.apache.flink.table.api.Schema;
@@ -39,32 +43,31 @@ import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.connector.ProviderContext;
 import org.apache.flink.table.connector.sink.DataStreamSinkProvider;
 import org.apache.flink.table.connector.sink.DynamicTableSink;
-import org.apache.flink.table.connector.sink.SinkProvider;
 import org.apache.flink.table.connector.sink.SinkV2Provider;
 import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.connector.source.ScanTableSource;
-import org.apache.flink.table.connector.source.SourceFunctionProvider;
+import org.apache.flink.table.connector.source.SourceProvider;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.planner.factories.TableFactoryHarness;
 import org.apache.flink.test.junit5.MiniClusterExtension;
+import org.apache.flink.test.util.source.AbstractTestSource;
+import org.apache.flink.test.util.source.SingleSplitEnumerator;
+import org.apache.flink.test.util.source.TestSourceReader;
+import org.apache.flink.test.util.source.TestSplit;
 import org.apache.flink.testutils.junit.SharedObjectsExtension;
 import org.apache.flink.testutils.junit.SharedReference;
-import org.apache.flink.testutils.junit.extensions.parameterized.Parameter;
-import org.apache.flink.testutils.junit.extensions.parameterized.ParameterizedTestExtension;
-import org.apache.flink.testutils.junit.extensions.parameterized.Parameters;
 import org.apache.flink.types.Row;
 
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.TestTemplate;
-import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
 import javax.annotation.Nullable;
 
+import java.io.Serializable;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
@@ -77,8 +80,6 @@ import static org.apache.flink.table.api.config.ExecutionConfigOptions.TABLE_EXE
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-/** Test for {@link CommonExecSink}. */
-@ExtendWith(ParameterizedTestExtension.class)
 class CommonExecSinkITCase {
 
     private static final int PARALLELISM = 4;
@@ -94,13 +95,7 @@ class CommonExecSinkITCase {
     @RegisterExtension
     private final SharedObjectsExtension sharedObjects = SharedObjectsExtension.create();
 
-    @Parameter private boolean useSinkV2;
     private StreamExecutionEnvironment env;
-
-    @Parameters
-    private static Collection<Boolean> useSinkV2() {
-        return Arrays.asList(true, false);
-    }
 
     @BeforeEach
     void before() {
@@ -108,7 +103,7 @@ class CommonExecSinkITCase {
         env.setParallelism(PARALLELISM);
     }
 
-    @TestTemplate
+    @Test
     void testStreamRecordTimestampInserterSinkRuntimeProvider()
             throws ExecutionException, InterruptedException {
         final StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
@@ -133,7 +128,7 @@ class CommonExecSinkITCase {
         assertTimestampResults(timestamps, rows);
     }
 
-    @TestTemplate
+    @Test
     void testStreamRecordTimestampInserterDataStreamSinkProvider()
             throws ExecutionException, InterruptedException {
         final StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
@@ -180,7 +175,7 @@ class CommonExecSinkITCase {
         assertTimestampResults(timestamps, rows);
     }
 
-    @TestTemplate
+    @Test
     void testStreamRecordTimestampInserterNotApplied() {
         final StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
         final SharedReference<List<Long>> timestamps = sharedObjects.add(new ArrayList<>());
@@ -201,7 +196,7 @@ class CommonExecSinkITCase {
         assertPlan(tableEnv, "INSERT INTO T1 SELECT * FROM T1", false);
     }
 
-    @TestTemplate
+    @Test
     void testUnifiedSinksAreUsableWithDataStreamSinkProvider()
             throws ExecutionException, InterruptedException {
         final StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
@@ -223,7 +218,7 @@ class CommonExecSinkITCase {
         assertThat(fetchedRows.get(1).intValue()).isEqualTo(2);
     }
 
-    @TestTemplate
+    @Test
     void testCharLengthEnforcer() throws ExecutionException, InterruptedException {
         final StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
         final List<Row> rows =
@@ -277,7 +272,7 @@ class CommonExecSinkITCase {
         }
     }
 
-    @TestTemplate
+    @Test
     void testBinaryLengthEnforcer() throws ExecutionException, InterruptedException {
         final StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
         final List<Row> rows =
@@ -379,7 +374,7 @@ class CommonExecSinkITCase {
         }
     }
 
-    @TestTemplate
+    @Test
     void testNullEnforcer() throws ExecutionException, InterruptedException {
         final StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
         final List<Row> rows =
@@ -442,7 +437,7 @@ class CommonExecSinkITCase {
         }
     }
 
-    @TestTemplate
+    @Test
     void testFromValuesWatermarkPropagation() throws Exception {
         final StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
         final SharedReference<List<Long>> watermarks = sharedObjects.add(new ArrayList<>());
@@ -490,24 +485,18 @@ class CommonExecSinkITCase {
         elements.applySync(l -> l.add(element));
     }
 
-    private static TestSink<RowData> buildRecordWriterTestSink(
-            TestSink.DefaultSinkWriter<RowData> writer) {
-        return TestSink.newBuilder()
-                .setWriter(writer)
-                .setCommittableSerializer(TestSink.StringCommittableSerializer.INSTANCE)
-                .build();
+    private static TestSinkV2<RowData> buildRecordWriterTestSink(
+            TestSinkV2.DefaultSinkWriter<RowData> writer) {
+        return TestSinkV2.<RowData>newBuilder().setWriter(writer).build();
     }
 
     private TableFactoryHarness.SinkBase buildRuntimeSinkProvider(
-            TestSink.DefaultSinkWriter<RowData> writer) {
+            TestSinkV2.DefaultSinkWriter<RowData> writer) {
         return new TableFactoryHarness.SinkBase() {
             @Override
             public SinkRuntimeProvider getSinkRuntimeProvider(Context context) {
-                TestSink<RowData> sink = buildRecordWriterTestSink(writer);
-                if (useSinkV2) {
-                    return SinkV2Provider.of(SinkV1Adapter.wrap(sink));
-                }
-                return SinkProvider.of(sink);
+                TestSinkV2<RowData> sink = buildRecordWriterTestSink(writer);
+                return SinkV2Provider.of(sink);
             }
         };
     }
@@ -522,11 +511,8 @@ class CommonExecSinkITCase {
                     @Override
                     public DataStreamSink<?> consumeDataStream(
                             ProviderContext providerContext, DataStream<RowData> dataStream) {
-                        TestSink<RowData> sink =
+                        TestSinkV2<RowData> sink =
                                 buildRecordWriterTestSink(new RecordWriter(fetched));
-                        if (useSinkV2) {
-                            return dataStream.sinkTo(SinkV1Adapter.wrap(sink));
-                        }
                         return dataStream.sinkTo(sink);
                     }
                 };
@@ -598,7 +584,8 @@ class CommonExecSinkITCase {
         }
     }
 
-    private static class TestSource extends TableFactoryHarness.ScanSourceBase {
+    private static class TestSource extends TableFactoryHarness.ScanSourceBase
+            implements Serializable {
 
         private final List<Row> rows;
 
@@ -608,37 +595,63 @@ class CommonExecSinkITCase {
         }
 
         @Override
-        public ScanTableSource.ScanRuntimeProvider getScanRuntimeProvider(
-                ScanTableSource.ScanContext context) {
-            final DynamicTableSource.DataStructureConverter converter =
+        public ScanTableSource.ScanRuntimeProvider getScanRuntimeProvider(ScanContext context) {
+            DynamicTableSource.DataStructureConverter converter =
                     context.createDataStructureConverter(
                             getFactoryContext().getPhysicalRowDataType());
 
-            return SourceFunctionProvider.of(new TestSourceFunction(rows, converter), false);
+            return SourceProvider.of(
+                    new AbstractTestSource<>() {
+                        @Override
+                        public SplitEnumerator<TestSplit, Void> createEnumerator(
+                                SplitEnumeratorContext<TestSplit> enumCtx) {
+                            return new SingleSplitEnumerator(enumCtx);
+                        }
+
+                        @Override
+                        public SourceReader<RowData, TestSplit> createReader(
+                                SourceReaderContext ctx) {
+                            // Each subtask gets a reader, but only one will actually receive the
+                            // split.
+                            return new TestSourceReader<>(ctx) {
+                                private boolean hasSplit = false;
+                                private boolean noMoreSplits = false;
+                                private boolean emitted = false;
+
+                                @Override
+                                public void addSplits(List<TestSplit> splits) {
+                                    // Mark reader as active if it got a split
+                                    hasSplit = !splits.isEmpty();
+                                }
+
+                                @Override
+                                public void notifyNoMoreSplits() {
+                                    // Called for readers that never get a split → they can finish
+                                    noMoreSplits = true;
+                                }
+
+                                @Override
+                                public InputStatus pollNext(ReaderOutput<RowData> out) {
+                                    if (hasSplit && !emitted) {
+                                        rows.forEach(
+                                                r ->
+                                                        out.collect(
+                                                                (RowData) converter.toInternal(r)));
+                                        emitted = true;
+                                        return InputStatus.END_OF_INPUT;
+                                    }
+                                    if (!hasSplit && noMoreSplits) {
+                                        return InputStatus.END_OF_INPUT;
+                                    }
+                                    return InputStatus.NOTHING_AVAILABLE;
+                                }
+                            };
+                        }
+                    });
         }
     }
 
-    private static class TestSourceFunction implements SourceFunction<RowData> {
-
-        private final List<Row> rows;
-        private final DynamicTableSource.DataStructureConverter converter;
-
-        public TestSourceFunction(
-                List<Row> rows, DynamicTableSource.DataStructureConverter converter) {
-            this.rows = rows;
-            this.converter = converter;
-        }
-
-        @Override
-        public void run(SourceContext<RowData> ctx) throws Exception {
-            rows.stream().map(row -> (RowData) converter.toInternal(row)).forEach(ctx::collect);
-        }
-
-        @Override
-        public void cancel() {}
-    }
-
-    private static class TestTimestampWriter extends TestSink.DefaultSinkWriter<RowData> {
+    private static class TestTimestampWriter extends TestSinkV2.DefaultSinkWriter<RowData> {
 
         private final SharedReference<List<Long>> timestamps;
 
@@ -653,7 +666,7 @@ class CommonExecSinkITCase {
         }
     }
 
-    private static class RecordWriter extends TestSink.DefaultSinkWriter<RowData> {
+    private static class RecordWriter extends TestSinkV2.DefaultSinkWriter<RowData> {
 
         private final SharedReference<List<RowData>> rows;
 

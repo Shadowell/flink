@@ -18,7 +18,6 @@
 
 package org.apache.flink.testutils;
 
-import org.apache.flink.api.common.time.Time;
 import org.apache.flink.testutils.executor.TestExecutorExtension;
 import org.apache.flink.testutils.executor.TestExecutorResource;
 
@@ -32,6 +31,7 @@ import java.util.Collection;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
 import java.util.function.Predicate;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -41,11 +41,11 @@ public class TestingUtils {
     private static final UUID ZERO_UUID = new UUID(0L, 0L);
 
     public static final Duration TESTING_DURATION = Duration.ofMinutes(2L);
-    public static final Time TIMEOUT = Time.minutes(1L);
+    public static final Duration TIMEOUT = Duration.ofMinutes(1L);
     public static final Duration DEFAULT_ASK_TIMEOUT = Duration.ofSeconds(200);
 
-    public static Time infiniteTime() {
-        return Time.milliseconds(Integer.MAX_VALUE);
+    public static Duration infiniteTime() {
+        return Duration.ofMillis(Integer.MAX_VALUE);
     }
 
     public static Duration infiniteDuration() {
@@ -54,8 +54,36 @@ public class TestingUtils {
         return Duration.ofDays(365L);
     }
 
+    // To make debugging logs easier, we use a custom thread factory that names the thread.
+    static class JmMainSingleThreadPoolFactory implements ThreadFactory {
+        public Thread newThread(final Runnable r) {
+            return new Thread(r, "jm-main-thread");
+        }
+    }
+
+    // To make debugging logs easier, we use a custom thread factory that names the thread.
+    static class AsyncSingleThreadPoolFactory implements ThreadFactory {
+        public Thread newThread(final Runnable r) {
+            return new Thread(r, "async-single-thread-pool");
+        }
+    }
+
     public static TestExecutorExtension<ScheduledExecutorService> defaultExecutorExtension() {
         return new TestExecutorExtension<>(Executors::newSingleThreadScheduledExecutor);
+    }
+
+    public static TestExecutorExtension<ScheduledExecutorService> jmMainThreadExecutorExtension() {
+        return new TestExecutorExtension<>(
+                () ->
+                        Executors.newSingleThreadScheduledExecutor(
+                                new JmMainSingleThreadPoolFactory()));
+    }
+
+    public static TestExecutorExtension<ScheduledExecutorService> jmAsyncThreadExecutorExtension() {
+        return new TestExecutorExtension<>(
+                () ->
+                        Executors.newSingleThreadScheduledExecutor(
+                                new AsyncSingleThreadPoolFactory()));
     }
 
     public static TestExecutorResource<ScheduledExecutorService> defaultExecutorResource() {
@@ -81,7 +109,9 @@ public class TestingUtils {
 
         final Collection<Path> jarPaths =
                 org.apache.flink.util.FileUtils.listFilesInDirectory(mvnTargetDir, fileFilter);
-        assertThat(jarPaths).isNotEmpty();
+        assertThat(jarPaths)
+                .describedAs("Could not find any matching files in %s", mvnTargetDir)
+                .isNotEmpty();
 
         return jarPaths.iterator().next().toFile();
     }

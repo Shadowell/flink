@@ -18,18 +18,15 @@
 
 package org.apache.flink.streaming.api.environment;
 
-import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.ExternalizedCheckpointRetention;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.core.execution.CheckpointingMode;
-import org.apache.flink.runtime.state.CheckpointStorage;
-import org.apache.flink.runtime.state.storage.FileSystemCheckpointStorage;
 
-import org.assertj.core.api.InstanceOfAssertFactories;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.util.Map;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
 import java.util.stream.Stream;
@@ -45,18 +42,18 @@ public class CheckpointConfigFromConfigurationTest {
     private static Stream<TestSpec<?>> specs() {
         return Stream.of(
                 TestSpec.testValue(org.apache.flink.streaming.api.CheckpointingMode.AT_LEAST_ONCE)
-                        .whenSetFromFile("execution.checkpointing.mode", "AT_LEAST_ONCE")
+                        .whenSetFromFile(Map.of("execution.checkpointing.mode", "AT_LEAST_ONCE"))
                         .viaSetter(CheckpointConfig::setCheckpointingMode)
                         .getterVia(CheckpointConfig::getCheckpointingMode)
                         .nonDefaultValue(
                                 org.apache.flink.streaming.api.CheckpointingMode.AT_LEAST_ONCE),
                 TestSpec.testValue(CheckpointingMode.AT_LEAST_ONCE)
-                        .whenSetFromFile("execution.checkpointing.mode", "AT_LEAST_ONCE")
+                        .whenSetFromFile(Map.of("execution.checkpointing.mode", "AT_LEAST_ONCE"))
                         .viaSetter(CheckpointConfig::setCheckpointingConsistencyMode)
                         .getterVia(CheckpointConfig::getCheckpointingConsistencyMode)
                         .nonDefaultValue(CheckpointingMode.AT_LEAST_ONCE),
                 TestSpec.testValue(CheckpointingMode.AT_LEAST_ONCE)
-                        .whenSetFromFile("execution.checkpointing.mode", "AT_LEAST_ONCE")
+                        .whenSetFromFile(Map.of("execution.checkpointing.mode", "AT_LEAST_ONCE"))
                         .viaSetter(
                                 (config, v) -> {
                                     config.setCheckpointingMode(
@@ -66,7 +63,7 @@ public class CheckpointConfigFromConfigurationTest {
                         .getterVia(CheckpointConfig::getCheckpointingConsistencyMode)
                         .nonDefaultValue(CheckpointingMode.AT_LEAST_ONCE),
                 TestSpec.testValue(org.apache.flink.streaming.api.CheckpointingMode.AT_LEAST_ONCE)
-                        .whenSetFromFile("execution.checkpointing.mode", "AT_LEAST_ONCE")
+                        .whenSetFromFile(Map.of("execution.checkpointing.mode", "AT_LEAST_ONCE"))
                         .viaSetter(
                                 (config, v) -> {
                                     config.setCheckpointingConsistencyMode(
@@ -76,114 +73,73 @@ public class CheckpointConfigFromConfigurationTest {
                         .nonDefaultValue(
                                 org.apache.flink.streaming.api.CheckpointingMode.AT_LEAST_ONCE),
                 TestSpec.testValue(10000L)
-                        .whenSetFromFile("execution.checkpointing.interval", "10 s")
+                        .whenSetFromFile(Map.of("execution.checkpointing.interval", "10 s"))
                         .viaSetter(CheckpointConfig::setCheckpointInterval)
                         .getterVia(CheckpointConfig::getCheckpointInterval)
                         .nonDefaultValue(100L),
                 TestSpec.testValue(12000L)
-                        .whenSetFromFile("execution.checkpointing.timeout", "12 s")
+                        .whenSetFromFile(Map.of("execution.checkpointing.timeout", "12 s"))
                         .viaSetter(CheckpointConfig::setCheckpointTimeout)
                         .getterVia(CheckpointConfig::getCheckpointTimeout)
                         .nonDefaultValue(100L),
                 TestSpec.testValue(12)
-                        .whenSetFromFile("execution.checkpointing.max-concurrent-checkpoints", "12")
+                        .whenSetFromFile(
+                                Map.of("execution.checkpointing.max-concurrent-checkpoints", "12"))
                         .viaSetter(CheckpointConfig::setMaxConcurrentCheckpoints)
                         .getterVia(CheckpointConfig::getMaxConcurrentCheckpoints)
                         .nonDefaultValue(100),
                 TestSpec.testValue(1000L)
-                        .whenSetFromFile("execution.checkpointing.min-pause", "1 s")
+                        .whenSetFromFile(Map.of("execution.checkpointing.min-pause", "1 s"))
                         .viaSetter(CheckpointConfig::setMinPauseBetweenCheckpoints)
                         .getterVia(CheckpointConfig::getMinPauseBetweenCheckpoints)
                         .nonDefaultValue(100L),
-                TestSpec.testValue(
-                                CheckpointConfig.ExternalizedCheckpointCleanup
-                                        .RETAIN_ON_CANCELLATION)
-                        .whenSetFromFile(
-                                "execution.checkpointing.externalized-checkpoint-retention",
-                                "RETAIN_ON_CANCELLATION")
-                        .viaSetter(CheckpointConfig::setExternalizedCheckpointCleanup)
-                        .getterVia(CheckpointConfig::getExternalizedCheckpointCleanup)
-                        .nonDefaultValue(
-                                CheckpointConfig.ExternalizedCheckpointCleanup
-                                        .DELETE_ON_CANCELLATION),
                 TestSpec.testValue(ExternalizedCheckpointRetention.RETAIN_ON_CANCELLATION)
                         .whenSetFromFile(
-                                "execution.checkpointing.externalized-checkpoint-retention",
-                                "RETAIN_ON_CANCELLATION")
+                                Map.of(
+                                        "execution.checkpointing.externalized-checkpoint-retention",
+                                        "RETAIN_ON_CANCELLATION"))
                         .viaSetter(CheckpointConfig::setExternalizedCheckpointRetention)
                         .getterVia(CheckpointConfig::getExternalizedCheckpointRetention)
                         .nonDefaultValue(ExternalizedCheckpointRetention.DELETE_ON_CANCELLATION),
-                TestSpec.testValue(ExternalizedCheckpointRetention.RETAIN_ON_CANCELLATION)
-                        .whenSetFromFile(
-                                "execution.checkpointing.externalized-checkpoint-retention",
-                                "RETAIN_ON_CANCELLATION")
-                        .viaSetter(
-                                (config, v) -> {
-                                    config.setExternalizedCheckpointCleanup(
-                                            CheckpointConfig.ExternalizedCheckpointCleanup.valueOf(
-                                                    v.name()));
-                                })
-                        .getterVia(CheckpointConfig::getExternalizedCheckpointRetention)
-                        .nonDefaultValue(ExternalizedCheckpointRetention.DELETE_ON_CANCELLATION),
-                TestSpec.testValue(
-                                CheckpointConfig.ExternalizedCheckpointCleanup
-                                        .RETAIN_ON_CANCELLATION)
-                        .whenSetFromFile(
-                                "execution.checkpointing.externalized-checkpoint-retention",
-                                "RETAIN_ON_CANCELLATION")
-                        .viaSetter(
-                                (config, v) -> {
-                                    config.setExternalizedCheckpointRetention(
-                                            ExternalizedCheckpointRetention.valueOf(v.name()));
-                                })
-                        .getterVia(CheckpointConfig::getExternalizedCheckpointCleanup)
-                        .nonDefaultValue(
-                                CheckpointConfig.ExternalizedCheckpointCleanup
-                                        .DELETE_ON_CANCELLATION),
                 TestSpec.testValue(12)
                         .whenSetFromFile(
-                                "execution.checkpointing.tolerable-failed-checkpoints", "12")
+                                Map.of(
+                                        "execution.checkpointing.tolerable-failed-checkpoints",
+                                        "12"))
                         .viaSetter(CheckpointConfig::setTolerableCheckpointFailureNumber)
                         .getterVia(CheckpointConfig::getTolerableCheckpointFailureNumber)
                         .nonDefaultValue(100),
                 TestSpec.testValue(true)
-                        .whenSetFromFile("execution.checkpointing.unaligned.enabled", "true")
-                        .viaSetter(CheckpointConfig::enableUnalignedCheckpoints)
+                        .whenSetFromFile(
+                                Map.of(
+                                        "execution.checkpointing.interval", "10s",
+                                        "execution.checkpointing.unaligned.enabled", "true"))
+                        .viaSetter(
+                                (checkpointConfig, enabled) -> {
+                                    checkpointConfig.setCheckpointInterval(10000);
+                                    checkpointConfig.enableUnalignedCheckpoints(enabled);
+                                })
                         .getterVia(CheckpointConfig::isUnalignedCheckpointsEnabled)
                         .nonDefaultValue(true),
                 TestSpec.testValue(true)
                         .whenSetFromFile(
-                                "execution.checkpointing.unaligned.interruptible-timers.enabled",
-                                "true")
-                        .viaSetter(CheckpointConfig::enableUnalignedCheckpointsInterruptibleTimers)
+                                Map.of(
+                                        "execution.checkpointing.interval",
+                                        "10s",
+                                        "execution.checkpointing.unaligned.enabled",
+                                        "true",
+                                        "execution.checkpointing.unaligned.interruptible-timers.enabled",
+                                        "true"))
+                        .viaSetter(
+                                (checkpointConfig, enabled) -> {
+                                    checkpointConfig.setCheckpointInterval(10000);
+                                    checkpointConfig.enableUnalignedCheckpoints(enabled);
+                                    checkpointConfig.enableUnalignedCheckpointsInterruptibleTimers(
+                                            enabled);
+                                })
                         .getterVia(
                                 CheckpointConfig::isUnalignedCheckpointsInterruptibleTimersEnabled)
-                        .nonDefaultValue(true),
-                TestSpec.testValue(
-                                (CheckpointStorage)
-                                        new FileSystemCheckpointStorage(
-                                                "file:///path/to/checkpoint/dir"))
-                        .whenSetFromFile(
-                                CheckpointingOptions.CHECKPOINTS_DIRECTORY.key(),
-                                "file:///path/to/checkpoint/dir")
-                        .viaSetter(CheckpointConfig::setCheckpointStorage)
-                        .getterVia(CheckpointConfig::getCheckpointStorage)
-                        .nonDefaultValue(
-                                new FileSystemCheckpointStorage("file:///path/to/checkpoint/dir"))
-                        .customMatcher(
-                                (actualValue, expectedValue) ->
-                                        assertThat(actualValue)
-                                                .hasSameClassAs(expectedValue)
-                                                .asInstanceOf(
-                                                        InstanceOfAssertFactories.type(
-                                                                FileSystemCheckpointStorage.class))
-                                                .extracting(
-                                                        FileSystemCheckpointStorage
-                                                                ::getCheckpointPath)
-                                                .isEqualTo(
-                                                        ((FileSystemCheckpointStorage)
-                                                                        expectedValue)
-                                                                .getCheckpointPath())));
+                        .nonDefaultValue(true));
     }
 
     @ParameterizedTest
@@ -193,7 +149,7 @@ public class CheckpointConfigFromConfigurationTest {
         CheckpointConfig configFromFile = new CheckpointConfig();
 
         Configuration configuration = new Configuration();
-        configuration.setString(spec.key, spec.value);
+        spec.configs.forEach(configuration::setString);
         configFromFile.configure(configuration);
 
         spec.setValue(configFromSetters);
@@ -213,8 +169,7 @@ public class CheckpointConfigFromConfigurationTest {
     }
 
     private static class TestSpec<T> {
-        private String key;
-        private String value;
+        private Map<String, String> configs;
         private final T objectValue;
         private T nonDefaultValue;
         private BiConsumer<CheckpointConfig, T> setter;
@@ -231,9 +186,8 @@ public class CheckpointConfigFromConfigurationTest {
             return new TestSpec<>(value);
         }
 
-        public TestSpec<T> whenSetFromFile(String key, String value) {
-            this.key = key;
-            this.value = value;
+        public TestSpec<T> whenSetFromFile(Map<String, String> configs) {
+            this.configs = configs;
             return this;
         }
 
@@ -276,7 +230,7 @@ public class CheckpointConfigFromConfigurationTest {
 
         @Override
         public String toString() {
-            return "key='" + key + '\'';
+            return "configs='" + configs + '\'';
         }
     }
 }

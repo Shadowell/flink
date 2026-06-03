@@ -52,6 +52,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -338,6 +339,50 @@ public class CommonTestUtils {
                     return allSubtasks
                             ? vertexStream.allMatch(subtaskPredicate)
                             : vertexStream.anyMatch(subtaskPredicate);
+                });
+    }
+
+    /** Wait for one checkpoint with in-flight buffers. */
+    public static String waitForCheckpointWithInflightBuffers(JobID jobID, MiniCluster miniCluster)
+            throws Exception {
+        CompletableFuture<String> checkpointPath = new CompletableFuture<>();
+        waitForCheckpoints(
+                jobID,
+                miniCluster,
+                checkpointStatsSnapshot -> {
+                    if (checkpointStatsSnapshot == null) {
+                        return false;
+                    }
+                    CompletedCheckpointStats latestCompletedCheckpoint =
+                            checkpointStatsSnapshot.getHistory().getLatestCompletedCheckpoint();
+
+                    if (latestCompletedCheckpoint == null
+                            || latestCompletedCheckpoint.getPersistedData() == 0) {
+                        return false;
+                    }
+                    checkpointPath.complete(latestCompletedCheckpoint.getExternalPath());
+                    return true;
+                });
+        return checkpointPath.get();
+    }
+
+    /** Wait for at least {@code count} completed checkpoints that carry in-flight buffers. */
+    public static void waitForNCheckpointsWithInflightBuffers(
+            JobID jobID, MiniCluster miniCluster, int count) throws Exception {
+        waitForCheckpoints(
+                jobID,
+                miniCluster,
+                checkpointStatsSnapshot -> {
+                    if (checkpointStatsSnapshot == null) {
+                        return false;
+                    }
+                    long matched =
+                            checkpointStatsSnapshot.getHistory().getCheckpoints().stream()
+                                    .filter(cp -> cp instanceof CompletedCheckpointStats)
+                                    .map(cp -> (CompletedCheckpointStats) cp)
+                                    .filter(cp -> cp.getPersistedData() > 0)
+                                    .count();
+                    return matched >= count;
                 });
     }
 

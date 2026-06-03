@@ -108,7 +108,7 @@ COPY /path/of/my-flink-job.jar $FLINK_HOME/usrlib/my-flink-job.jar
 After creating and publishing the Docker image under `custom-image-name`, you can start an Application cluster with the following command:
 
 ```bash
-$ ./bin/flink run-application \
+$ ./bin/flink run \
     --target kubernetes-application \
     -Dkubernetes.cluster-id=my-first-application-cluster \
     -Dkubernetes.container.image.ref=custom-image-name \
@@ -120,7 +120,7 @@ $ ./bin/flink run-application \
 In case you have a locally available Flink job JAR, artifact upload can be used so Flink will upload the local artifact to DFS during deployment and fetch it on the deployed JobManager pod:
 
 ```bash
-$ ./bin/flink run-application \
+$ ./bin/flink run \
     --target kubernetes-application \
     -Dkubernetes.cluster-id=my-first-application-cluster \
     -Dkubernetes.container.image=custom-image-name \
@@ -133,7 +133,7 @@ The `kubernetes.artifacts.local-upload-enabled` enables this feature, and `kuber
 You can add additional artifacts via the `user.artifacts.artifact-list` config option, which can contain a mix of local and remote artifacts:
 
 ```bash
-$ ./bin/flink run-application \
+$ ./bin/flink run \
     --target kubernetes-application \
     -Dkubernetes.cluster-id=my-first-application-cluster \
     -Dkubernetes.container.image=custom-image-name \
@@ -147,14 +147,14 @@ In case the job JAR or any additional artifact is already available remotely via
 
 ```bash
 # FileSystem
-$ ./bin/flink run-application \
+$ ./bin/flink run \
     --target kubernetes-application \
     -Dkubernetes.cluster-id=my-first-application-cluster \
     -Dkubernetes.container.image=custom-image-name \
     s3://my-bucket/my-flink-job.jar
 
 # HTTP(S)
-$ ./bin/flink run-application \
+$ ./bin/flink run \
     --target kubernetes-application \
     -Dkubernetes.cluster-id=my-first-application-cluster \
     -Dkubernetes.container.image=custom-image-name \
@@ -349,6 +349,116 @@ $ ./bin/kubernetes-session.sh -Dkubernetes.env.secretKeyRef=\
 
 The env variable `SECRET_USERNAME` contains the username and the env variable `SECRET_PASSWORD` contains the password of the secret `mysecret`.
 For more details see the [official Kubernetes documentation](https://kubernetes.io/docs/concepts/configuration/secret/#using-secrets-as-environment-variables).
+
+### Mounting Persistent Volume Claims
+
+[Kubernetes PersistentVolumeClaims (PVCs)](https://kubernetes.io/docs/concepts/storage/persistent-volumes/) provide a way to request and use persistent storage in Kubernetes.
+Flink on Kubernetes supports mounting PVCs directly to JobManager and TaskManager pods via configuration options.
+
+#### Configuration Options
+
+Flink provides two configuration options for mounting PVCs:
+
+<table class="table table-bordered">
+    <thead>
+        <tr>
+            <th class="text-left" style="width: 30%">Configuration Option</th>
+            <th class="text-left" style="width: 15%">Type</th>
+            <th class="text-left" style="width: 15%">Default</th>
+            <th class="text-left" style="width: 40%">Description</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><code>kubernetes.persistent-volume-claims</code></td>
+            <td>Map&lt;String, String&gt;</td>
+            <td>(none)</td>
+            <td>The user-specified PersistentVolumeClaims that will be mounted into Flink containers.
+                The value should be in the form of <code>pvc-name:/mount/path</code>.
+                Multiple PVCs can be specified by separating them with commas.</td>
+        </tr>
+        <tr>
+            <td><code>kubernetes.persistent-volume-claim-read-only</code></td>
+            <td>Boolean</td>
+            <td>false</td>
+            <td>Whether to mount PersistentVolumeClaims as read-only.
+                When set to true, all PVCs will be mounted as read-only.</td>
+        </tr>
+    </tbody>
+</table>
+
+#### Usage Examples
+
+The following command will mount the PVC `checkpoint-pvc` to the path `/opt/flink/checkpoints` in the started pods:
+
+```bash
+$ ./bin/kubernetes-session.sh \
+    -Dkubernetes.cluster-id=my-session-cluster \
+    -Dkubernetes.persistent-volume-claims=checkpoint-pvc:/opt/flink/checkpoints
+```
+
+You can mount multiple PVCs by separating them with commas:
+
+```bash
+$ ./bin/kubernetes-session.sh \
+    -Dkubernetes.cluster-id=my-session-cluster \
+    -Dkubernetes.persistent-volume-claims=checkpoint-pvc:/opt/flink/checkpoints,data-pvc:/opt/flink/data
+```
+
+To mount PVCs as read-only (useful for shared reference data):
+
+```bash
+$ ./bin/kubernetes-session.sh \
+    -Dkubernetes.cluster-id=my-session-cluster \
+    -Dkubernetes.persistent-volume-claims=shared-data:/opt/flink/shared \
+    -Dkubernetes.persistent-volume-claim-read-only=true
+```
+
+#### Example: Using PVC for Checkpoint Storage
+
+A common use case is to use PVC for storing checkpoints. First, create a PVC in your Kubernetes cluster:
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flink-checkpoints-pvc
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: standard
+```
+
+Then start a Flink cluster with the PVC mounted for checkpoint storage:
+
+```bash
+$ ./bin/flink run \
+    --target kubernetes-application \
+    -Dkubernetes.cluster-id=my-checkpoint-cluster \
+    -Dkubernetes.container.image=flink:latest \
+    -Dkubernetes.persistent-volume-claims=flink-checkpoints-pvc:/opt/flink/checkpoints \
+    -Dstate.checkpoints.dir=file:///opt/flink/checkpoints \
+    local:///opt/flink/usrlib/my-flink-job.jar
+```
+
+#### Prerequisites
+
+- The PVCs must exist in the same namespace as the Flink cluster before deployment.
+- The PVCs must have appropriate access modes:
+  - **ReadWriteOnce (RWO)**: For single pod access. Suitable for standalone JobManager deployments.
+  - **ReadWriteMany (RWX)**: For multiple pods accessing the same storage. Recommended for HA setups or when both JobManager and TaskManagers need to write to the same storage.
+  - **ReadOnlyMany (ROX)**: For read-only access from multiple pods. Suitable for shared reference data.
+
+{{< hint warning >}}
+For high availability (HA) setups with multiple JobManagers or when both JobManager and TaskManagers need write access to the same storage, ensure your PVC supports ReadWriteMany (RWX) access mode. Using ReadWriteOnce (RWO) in such scenarios may cause mount failures or I/O errors.
+{{< /hint >}}
+
+{{< hint info >}}
+The `kubernetes.persistent-volume-claim-read-only` option applies globally to all configured PVCs. If you need different access modes for different PVCs (e.g., read-write for checkpoints but read-only for reference data), use [Pod Templates]({{< ref "docs/deployment/resource-providers/native_kubernetes" >}}#pod-template) instead to define fine-grained volume configurations.
+{{< /hint >}}
 
 ### High-Availability on Kubernetes
 

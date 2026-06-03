@@ -22,6 +22,7 @@ import {
   ChangeDetectorRef,
   Component,
   ElementRef,
+  HostListener,
   OnDestroy,
   OnInit,
   ViewChild
@@ -45,16 +46,28 @@ import { JobLocalService } from '../job-local.service';
   templateUrl: './job-overview.component.html',
   styleUrls: ['./job-overview.component.less'],
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [NzAlertModule, NgIf, DagreComponent, RouterOutlet, JobOverviewListComponent, ResizeComponent],
-  standalone: true
+  imports: [NzAlertModule, NgIf, DagreComponent, RouterOutlet, JobOverviewListComponent, ResizeComponent]
 })
 export class JobOverviewComponent implements OnInit, OnDestroy {
   public nodes: NodesItemCorrect[] = [];
   public links: NodesItemLink[] = [];
+  public streamNodes: NodesItemCorrect[] = [];
+  public streamLinks: NodesItemLink[] = [];
+  public pendingNodes: NodesItemCorrect[] = [];
+  public pendingLinks: NodesItemLink[] = [];
   public selectedNode: NodesItemCorrect | null;
-  public top = 500;
+  public top = Math.max(280, Math.min(Math.round(window.innerHeight * 0.4), 500));
   public jobId: string;
   public timeoutId: number;
+  private isTopManuallyResized = false;
+
+  @HostListener('window:resize', ['$event'])
+  onResize(): void {
+    if (!this.isTopManuallyResized) {
+      this.top = Math.max(280, Math.min(Math.round(window.innerHeight * 0.4), 500));
+      this.cdr.markForCheck();
+    }
+  }
 
   @ViewChild(DagreComponent, { static: true }) private readonly dagreComponent: DagreComponent;
 
@@ -79,11 +92,14 @@ export class JobOverviewComponent implements OnInit, OnDestroy {
         takeUntil(this.destroy$)
       )
       .subscribe(data => {
-        if (this.jobId !== data.plan.jid || this.nodes.length === 0) {
-          this.nodes = data.plan.nodes;
-          this.links = data.plan.links;
+        if (this.jobId !== data.plan.jid || data.plan.nodes.length !== this.nodes.length) {
           this.jobId = data.plan.jid;
-          this.dagreComponent.flush(this.nodes, this.links, true).then();
+          this.nodes = data.plan.nodes;
+          this.streamNodes = data.plan.streamNodes;
+          this.streamLinks = data.plan.streamLinks;
+          this.links = data.plan.links;
+          this.updatePendingInfo();
+          this.refreshGraph(this.dagreComponent.showPendingOperators);
           this.refreshNodesWithMetrics();
         } else {
           this.nodes = data.plan.nodes;
@@ -128,6 +144,7 @@ export class JobOverviewComponent implements OnInit, OnDestroy {
   }
 
   public onResizeEnd(): void {
+    this.isTopManuallyResized = true;
     if (!this.selectedNode) {
       this.dagreComponent.moveToCenter();
     } else {
@@ -163,11 +180,16 @@ export class JobOverviewComponent implements OnInit, OnDestroy {
             map(result => {
               return {
                 ...node,
-                backPressuredPercentage: Math.min(Math.round(result.backPressuredTimeMsPerSecond.max / 10), 100),
-                busyPercentage: Math.min(Math.round(result.busyTimeMsPerSecond.max / 10), 100),
-                dataSkewPercentage: result.numRecordsInPerSecond.skew
+                backPressuredPercentage: result.backPressuredTimeMsPerSecond
+                  ? Math.min(Math.round(result.backPressuredTimeMsPerSecond.max / 10), 100)
+                  : NaN,
+                busyPercentage: result.busyTimeMsPerSecond
+                  ? Math.min(Math.round(result.busyTimeMsPerSecond.max / 10), 100)
+                  : NaN,
+                dataSkewPercentage: result.numRecordsInPerSecond?.skew ?? NaN
               };
-            })
+            }),
+            catchError(() => of(node))
           );
       })
     ).pipe(catchError(() => of(nodes)));
@@ -179,9 +201,45 @@ export class JobOverviewComponent implements OnInit, OnDestroy {
         return this.metricService.loadWatermarks(this.jobId, node.id).pipe(
           map(result => {
             return { ...node, lowWatermark: result.lowWatermark };
-          })
+          }),
+          catchError(() => of(node))
         );
       })
     ).pipe(catchError(() => of(nodes)));
+  }
+
+  refreshGraph(showPendingOperators: boolean): void {
+    if (showPendingOperators) {
+      this.dagreComponent
+        .flush([...this.nodes, ...this.pendingNodes], [...this.links, ...this.pendingLinks], true)
+        .then();
+    } else {
+      this.dagreComponent.flush(this.nodes, this.links, true).then();
+    }
+  }
+
+  private updatePendingInfo(): void {
+    this.pendingNodes = this.streamNodes.filter(node => !node?.job_vertex_id);
+    this.pendingLinks = this.getPendingLinks(this.pendingNodes);
+  }
+
+  private getPendingLinks(pendingNodes: NodesItemCorrect[]): NodesItemLink[] {
+    const pendingLinks: NodesItemLink[] = [];
+    const pendingNodesSet = new Set(pendingNodes.map(node => node.id));
+    const nodeIdMapper = new Map(this.streamNodes.map(node => [node.id, node?.job_vertex_id]));
+    this.streamLinks
+      .filter(link => pendingNodesSet.has(link.source) || pendingNodesSet.has(link.target))
+      .forEach(link => {
+        const source = nodeIdMapper.get(link.source) ?? link.source;
+        const target = nodeIdMapper.get(link.target) ?? link.target;
+        pendingLinks.push({
+          ...link,
+          id: `${source}-${target}`,
+          source,
+          target,
+          pending: true
+        });
+      });
+    return pendingLinks;
   }
 }

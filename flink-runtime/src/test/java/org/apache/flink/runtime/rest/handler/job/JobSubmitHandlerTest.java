@@ -21,6 +21,7 @@ package org.apache.flink.runtime.rest.handler.job;
 import org.apache.flink.api.common.cache.DistributedCache;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.runtime.application.SingleJobApplication;
 import org.apache.flink.runtime.blob.BlobServer;
 import org.apache.flink.runtime.blob.VoidBlobStore;
 import org.apache.flink.runtime.dispatcher.DispatcherGateway;
@@ -34,10 +35,12 @@ import org.apache.flink.runtime.rest.messages.EmptyMessageParameters;
 import org.apache.flink.runtime.rest.messages.job.JobSubmitRequestBody;
 import org.apache.flink.runtime.rpc.RpcUtils;
 import org.apache.flink.runtime.webmonitor.TestingDispatcherGateway;
+import org.apache.flink.streaming.api.graph.ExecutionPlan;
 import org.apache.flink.testutils.junit.extensions.parameterized.ParameterizedTestExtension;
 import org.apache.flink.testutils.junit.extensions.parameterized.Parameters;
 import org.apache.flink.testutils.junit.utils.TempDirUtils;
 import org.apache.flink.util.ExceptionUtils;
+import org.apache.flink.util.FlinkRuntimeException;
 import org.apache.flink.util.concurrent.Executors;
 import org.apache.flink.util.concurrent.FutureUtils;
 
@@ -150,7 +153,8 @@ public class JobSubmitHandlerTest {
 
         TestingDispatcherGateway.Builder builder = TestingDispatcherGateway.newBuilder();
         builder.setBlobServerPort(blobServer.getPort())
-                .setSubmitFunction(jobGraph -> CompletableFuture.completedFuture(Acknowledge.get()))
+                .setSubmitApplicationFunction(
+                        application -> CompletableFuture.completedFuture(Acknowledge.get()))
                 .setHostname("localhost");
         DispatcherGateway mockGateway = builder.build();
 
@@ -227,14 +231,21 @@ public class JobSubmitHandlerTest {
     void testFileHandling() throws Exception {
         final String dcEntryName = "entry";
 
-        CompletableFuture<JobGraph> submittedJobGraphFuture = new CompletableFuture<>();
+        CompletableFuture<ExecutionPlan> submittedExecutionPlanFuture = new CompletableFuture<>();
         DispatcherGateway dispatcherGateway =
                 TestingDispatcherGateway.newBuilder()
                         .setBlobServerPort(blobServer.getPort())
-                        .setSubmitFunction(
-                                submittedJobGraph -> {
-                                    submittedJobGraphFuture.complete(submittedJobGraph);
-                                    return CompletableFuture.completedFuture(Acknowledge.get());
+                        .setSubmitApplicationFunction(
+                                application -> {
+                                    if (application instanceof SingleJobApplication) {
+                                        submittedExecutionPlanFuture.complete(
+                                                ((SingleJobApplication) application)
+                                                        .getExecutionPlan());
+                                        return CompletableFuture.completedFuture(Acknowledge.get());
+                                    }
+                                    return FutureUtils.completedExceptionally(
+                                            new FlinkRuntimeException(
+                                                    "Unsupported application type"));
                                 })
                         .build();
 
@@ -278,11 +289,13 @@ public class JobSubmitHandlerTest {
                         dispatcherGateway)
                 .get();
 
-        assertThat(submittedJobGraphFuture).as("No JobGraph was submitted.").isCompleted();
-        final JobGraph submittedJobGraph = submittedJobGraphFuture.get();
-        assertThat(submittedJobGraph.getUserJarBlobKeys()).hasSize(1);
-        assertThat(submittedJobGraph.getUserArtifacts()).hasSize(1);
-        assertThat(submittedJobGraph.getUserArtifacts().get(dcEntryName).blobKey).isNotNull();
+        assertThat(submittedExecutionPlanFuture)
+                .as("No ExecutionPlan was submitted.")
+                .isCompleted();
+        final ExecutionPlan submittedExecutionPlan = submittedExecutionPlanFuture.get();
+        assertThat(submittedExecutionPlan.getUserJarBlobKeys()).hasSize(1);
+        assertThat(submittedExecutionPlan.getUserArtifacts()).hasSize(1);
+        assertThat(submittedExecutionPlan.getUserArtifacts().get(dcEntryName).blobKey).isNotNull();
     }
 
     @TestTemplate
@@ -290,8 +303,8 @@ public class JobSubmitHandlerTest {
         final String errorMessage = "test";
         DispatcherGateway mockGateway =
                 TestingDispatcherGateway.newBuilder()
-                        .setSubmitFunction(
-                                jobgraph ->
+                        .setSubmitApplicationFunction(
+                                application ->
                                         FutureUtils.completedExceptionally(
                                                 new Exception(errorMessage)))
                         .build();

@@ -21,6 +21,7 @@ package org.apache.flink.streaming.runtime.io;
 import org.apache.flink.runtime.checkpoint.channel.ChannelStateWriter;
 import org.apache.flink.runtime.checkpoint.channel.InputChannelInfo;
 import org.apache.flink.runtime.event.TaskEvent;
+import org.apache.flink.runtime.io.network.partition.ResultPartitionType;
 import org.apache.flink.runtime.io.network.partition.consumer.BufferOrEvent;
 import org.apache.flink.runtime.io.network.partition.consumer.IndexedInputGate;
 import org.apache.flink.runtime.io.network.partition.consumer.InputChannel;
@@ -53,6 +54,11 @@ public class MockIndexedInputGate extends IndexedInputGate {
 
     @Override
     public CompletableFuture<Void> getStateConsumedFuture() {
+        return CompletableFuture.completedFuture(null);
+    }
+
+    @Override
+    public CompletableFuture<Void> getBufferFilteringCompleteFuture() {
         return CompletableFuture.completedFuture(null);
     }
 
@@ -114,6 +120,9 @@ public class MockIndexedInputGate extends IndexedInputGate {
     public void sendTaskEvent(TaskEvent event) {}
 
     @Override
+    public void resumeGateConsumption() throws IOException {}
+
+    @Override
     public void close() {}
 
     @Override
@@ -127,5 +136,18 @@ public class MockIndexedInputGate extends IndexedInputGate {
     }
 
     @Override
+    public ResultPartitionType getConsumedPartitionType() {
+        return ResultPartitionType.PIPELINED;
+    }
+
+    @Override
     public void triggerDebloating() {}
+
+    @Override
+    public void setCheckpointingDuringRecoveryEnabled(boolean enabled) {}
+
+    @Override
+    public boolean isCheckpointingDuringRecoveryEnabled() {
+        return false;
+    }
 }

@@ -36,7 +36,8 @@ import org.apache.flink.table.types.logical.RowType;
 
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Descriptors;
-import com.google.protobuf.Descriptors.FileDescriptor.Syntax;
+import com.google.protobuf.DiscardUnknownFieldsParser;
+import com.google.protobuf.Parser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -53,8 +54,8 @@ import java.util.UUID;
  */
 public class ProtoToRowConverter {
     private static final Logger LOG = LoggerFactory.getLogger(ProtoToRowConverter.class);
-    private final Method parseFromMethod;
     private final Method decodeMethod;
+    private final Parser<?> protoParser;
     private boolean isCodeSplit = false;
 
     public ProtoToRowConverter(RowType rowType, PbFormatConfig formatConfig)
@@ -69,7 +70,7 @@ public class ProtoToRowConverter {
                             Thread.currentThread().getContextClassLoader());
             String fullMessageClassName = PbFormatUtils.getFullJavaName(descriptor);
             boolean readDefaultValuesForPrimitiveTypes = formatConfig.isReadDefaultValues();
-            if (descriptor.getFile().getSyntax() == Syntax.PROTO3) {
+            if ("proto3".equals(descriptor.getFile().toProto().getSyntax())) {
                 // pb3 always read default values for primitive types
                 readDefaultValuesForPrimitiveTypes = true;
             }
@@ -124,14 +125,16 @@ public class ProtoToRowConverter {
                             codegenAppender.code());
             decodeMethod =
                     generatedClass.getMethod(PbConstant.GENERATED_DECODE_METHOD, messageClass);
-            parseFromMethod = messageClass.getMethod(PbConstant.PB_METHOD_PARSE_FROM, byte[].class);
+            Method parserMethod = messageClass.getMethod(PbConstant.PB_METHOD_PARSER);
+            Parser originalProtoParser = (Parser) parserMethod.invoke(null);
+            protoParser = DiscardUnknownFieldsParser.wrap(originalProtoParser);
         } catch (Exception ex) {
             throw new PbCodegenException(ex);
         }
     }
 
     public RowData convertProtoBinaryToRow(byte[] data) throws Exception {
-        Object messageObj = parseFromMethod.invoke(null, data);
+        Object messageObj = protoParser.parseFrom(data);
         return (RowData) decodeMethod.invoke(null, messageObj);
     }
 

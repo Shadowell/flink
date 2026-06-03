@@ -30,7 +30,7 @@ on:
         type: string
       jdk_version:
         description: "The Java version to use."
-        default: 8
+        default: 17
         type: number
     secrets:
       s3_bucket:
@@ -70,9 +70,9 @@ env:
 jobs:
   compile:
     name: "Compile"
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     container:
-      image: mapohl/flink-ci:FLINK-34194
+      image: chesnay/flink-ci:java_8_11_17_21_maven_386_jammy
       # --init makes the process in the container being started as an init process which will clean up any daemon processes during shutdown
       # --privileged allows writing coredumps in docker (FLINK-16973)
       options: --init --privileged
@@ -83,7 +83,7 @@ jobs:
       stringified-workflow-name: ${{ steps.workflow-prep-step.outputs.stringified_value }}
     steps:
       - name: "Flink Checkout"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
@@ -106,7 +106,7 @@ jobs:
         timeout-minutes: ${{ fromJSON(env.GHA_JOB_TIMEOUT) }}
         with:
           working_directory: ${{ env.CONTAINER_LOCAL_WORKING_DIR }}
-          maven-parameters: "test-compile -Dflink.markBundledAsOptional=false -Dfast"
+          maven-parameters: "-T 1C test-compile -Dflink.markBundledAsOptional=false -Dfast"
           env: "${{ inputs.environment }}"
 
       - name: "Collect build artifacts"
@@ -115,7 +115,7 @@ jobs:
           ./tools/azure-pipelines/create_build_artifact.sh
 
       - name: "Upload artifacts to make them available in downstream jobs"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: build-artifacts-${{ steps.workflow-prep-step.outputs.stringified_value }}-${{ github.run_number }}
           path: ${{ env.FLINK_ARTIFACT_DIR }}/${{ env.FLINK_ARTIFACT_FILENAME }}
@@ -126,18 +126,23 @@ jobs:
   packaging:
     name: "Test packaging/licensing"
     needs: compile
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     container:
-      image: mapohl/flink-ci:FLINK-34194
+      image: chesnay/flink-ci:java_8_11_17_21_maven_386_jammy
       # --init makes the process in the container being started as an init process which will clean up any daemon processes during shutdown
       # --privileged allows writing coredumps in docker (FLINK-16973)
       options: --init --privileged
 
     steps:
       - name: "Flink Checkout"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
+          sparse-checkout: |
+            .github
+            .mvn
+            .scalafmt.conf
+            tools
 
       - name: "Initialize job"
         uses: "./.github/actions/job_init"
@@ -148,7 +153,7 @@ jobs:
           target_directory: ${{ env.CONTAINER_LOCAL_WORKING_DIR }}
 
       - name: "Download build artifacts from compile job"
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: build-artifacts-${{ needs.compile.outputs.stringified-workflow-name }}-${{ github.run_number }}
           path: ${{ env.FLINK_ARTIFACT_DIR }}
@@ -166,9 +171,9 @@ jobs:
   test:
     name: "Test (module: ${{ matrix.module }})"
     needs: compile
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     container:
-      image: mapohl/flink-ci:FLINK-34194
+      image: chesnay/flink-ci:java_8_11_17_21_maven_386_jammy
       # --init makes the process in the container being started as an init process which will clean up any daemon processes during shutdown
       # --privileged allows writing coredumps in docker (FLINK-16973)
       options: --init --privileged
@@ -197,9 +202,14 @@ jobs:
 
     steps:
       - name: "Flink Checkout"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
+          sparse-checkout: |
+            .github
+            .mvn
+            .scalafmt.conf
+            tools
 
       - name: "Initialize job"
         uses: "./.github/actions/job_init"
@@ -209,12 +219,22 @@ jobs:
           source_directory: ${{ env.MOUNTED_WORKING_DIR }}
           target_directory: ${{ env.CONTAINER_LOCAL_WORKING_DIR }}
 
+      - name: "Setup python"
+        if: matrix.module == 'python'
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: "Install Python header files"
+        if: matrix.module == 'python'
+        run: sudo apt-get update && sudo apt-get -y install python3-dev
+
       - name: "Set coredump pattern"
         working-directory: ${{ env.CONTAINER_LOCAL_WORKING_DIR }}
         run: sudo sysctl -w kernel.core_pattern=core.%p
 
       - name: "Download build artifacts from compile job"
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: build-artifacts-${{ needs.compile.outputs.stringified-workflow-name }}-${{ github.run_number }}
           path: ${{ env.FLINK_ARTIFACT_DIR }}
@@ -226,7 +246,7 @@ jobs:
 
       - name: "Try loading Docker images from Cache"
         id: docker-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ env.DOCKER_IMAGES_CACHE_FOLDER }}
           key: ${{ matrix.module }}-docker-${{ runner.os }}-${{ hashFiles('**/cache_docker_images.sh', '**/flink-test-utils-parent/**/DockerImageVersions.java') }}
@@ -237,6 +257,24 @@ jobs:
         working-directory: ${{ env.CONTAINER_LOCAL_WORKING_DIR }}
         run: ./tools/azure-pipelines/cache_docker_images.sh load
 
+      - name: "Create non-root user for test execution"
+        run: |
+          useradd -m -u 1001 flink
+          echo "flink ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+          for sock in /var/run/docker.sock /run/docker.sock; do
+            if [ -e "$sock" ]; then
+              chmod 666 "$sock"
+              echo "Docker socket found at $sock"
+            fi
+          done
+          mkdir -p \
+            ${{ env.CONTAINER_LOCAL_WORKING_DIR }} \
+            ${{ env.MAVEN_REPO_FOLDER }} \
+            ${{ env.DOCKER_IMAGES_CACHE_FOLDER }}
+          chown -R flink:flink ${{ env.CONTAINER_LOCAL_WORKING_DIR }}
+          chown -R flink:flink ${{ env.MAVEN_REPO_FOLDER }}
+          chown -R flink:flink ${{ env.DOCKER_IMAGES_CACHE_FOLDER }}
+
       - name: "Test - ${{ matrix.module }}"
         id: test-run
         working-directory: ${{ env.CONTAINER_LOCAL_WORKING_DIR }}
@@ -244,10 +282,11 @@ jobs:
           IT_CASE_S3_BUCKET: ${{ secrets.s3_bucket }}
           IT_CASE_S3_ACCESS_KEY: ${{ secrets.s3_access_key }}
           IT_CASE_S3_SECRET_KEY: ${{ secrets.s3_secret_key }}
+          DOCKER_HOST: unix:///var/run/docker.sock
         timeout-minutes: ${{ fromJSON(env.GHA_JOB_TIMEOUT) }}
         run: |
-          ${{ inputs.environment }} PROFILE="$PROFILE -Pgithub-actions" ./tools/azure-pipelines/uploading_watchdog.sh \
-              ./tools/ci/test_controller.sh ${{ matrix.module }}
+          runuser -u flink -- bash -c '${{ inputs.environment }} PROFILE="$PROFILE -Pgithub-actions" ./tools/azure-pipelines/uploading_watchdog.sh \
+              ./tools/ci/test_controller.sh ${{ matrix.module }}'
 
       - name: "Post-build Disk Info"
         if: ${{ always() }}
@@ -265,8 +304,8 @@ jobs:
         run: find ${{ steps.test-run.outputs.debug-files-output-dir }} -type f -exec rename 's/[:<>|*?]/-/' {} \;
 
       - name: "Upload build artifacts"
-        uses: actions/upload-artifact@v4
-        if: ${{ failure() && steps.test-run.outputs.debug-files-output-dir }} != ''
+        uses: actions/upload-artifact@v7
+        if: ${{ failure() && steps.test-run.outputs.debug-files-output-dir != '' }}
         with:
           name: logs-test-${{ needs.compile.outputs.stringified-workflow-name }}-${{ github.run_number }}-${{ matrix.stringified-module-name }}-${{ steps.test-run.outputs.debug-files-name }}
           path: ${{ steps.test-run.outputs.debug-files-output-dir }}
@@ -280,7 +319,7 @@ jobs:
     name: "E2E (group ${{ matrix.group }})"
     needs: compile
     # the end to end tests are not executed in Flink's CI Docker container due to problems when running Docker-in-Docker
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 310
     env:
       # timeout in minutes - this environment variable is required by uploading_watchdog.sh
@@ -301,13 +340,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [1, 2]
+        group: [1, 2, 3, 4]
 
     steps:
       - name: "Flink Checkout"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
+          sparse-checkout: |
+            .github
+            .mvn
+            tools
 
       - name: "Initialize job"
         uses: "./.github/actions/job_init"
@@ -315,8 +358,15 @@ jobs:
           jdk_version: ${{ inputs.jdk_version }}
           maven_repo_folder: ${{ env.MAVEN_REPO_FOLDER }}
 
+      - name: "Setup python"
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
       - name: "Install missing packages"
-        run: sudo apt-get install -y net-tools docker-compose zip
+        run: sudo apt-get install -y net-tools zip &&
+             curl -sSL -o kubectl "https://dl.k8s.io/release/$(curl -sSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" &&
+             sudo install -m 0755 kubectl /usr/local/bin/kubectl
 
       # netty-tcnative requires OpenSSL v1.0.0
       - name: "Install OpenSSL"
@@ -326,7 +376,7 @@ jobs:
           sudo apt install ./libssl1.0.0_*.deb
 
       - name: "Download build artifacts from compile job"
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: build-artifacts-${{ needs.compile.outputs.stringified-workflow-name }}-${{ github.run_number }}
           path: ${{ env.FLINK_ARTIFACT_DIR }}
@@ -343,13 +393,13 @@ jobs:
           mkdir -p ${{ env.DOCKER_IMAGES_CACHE_FOLDER }}
 
       - name: "Load E2E files from Cache"
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ env.E2E_CACHE_FOLDER }}
           key: e2e-cache-${{ matrix.group }}-${{ hashFiles('**/flink-end-to-end-tests/**/*.java', '!**/avro/**') }}
 
       - name: "Load E2E artifacts from Cache"
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ env.E2E_TARBALL_CACHE }}
           key: e2e-artifact-cache-${{ matrix.group }}-${{ hashFiles('**/flink-end-to-end-tests/**/*.sh') }}
@@ -357,7 +407,7 @@ jobs:
 
       - name: "Try loading Docker images from Cache"
         id: docker-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ env.DOCKER_IMAGES_CACHE_FOLDER }}
           key: e2e-${{ matrix.group }}-docker-${{ runner.os }}-${{ hashFiles('**/cache_docker_images.sh', '**/flink-test-utils-parent/**/DockerImageVersions.java') }}
@@ -369,7 +419,7 @@ jobs:
       - name: "Build Flink"
         uses: "./.github/actions/run_mvn"
         with:
-          maven-parameters: "install -DskipTests -Dfast $PROFILE -Pskip-webui-build"
+          maven-parameters: "install -DskipTests -Dfast $PROFILE -Pskip-webui-build -T1C"
           env: "${{ inputs.environment }}"
 
       - name: "Run E2E Tests"
@@ -384,7 +434,7 @@ jobs:
             flink-end-to-end-tests/run-nightly-tests.sh ${{ matrix.group }}
 
       - name: "Upload Logs"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: ${{ failure() && steps.test-run.outputs.debug-files-output-dir != '' }}
         with:
           name: logs-e2e-${{ needs.compile.outputs.stringified-workflow-name }}-${{ github.run_number }}-${{ matrix.group }}-${{ steps.test-run.outputs.debug-files-name }}

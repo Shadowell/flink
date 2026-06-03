@@ -18,9 +18,9 @@
 
 package org.apache.flink.runtime.taskexecutor;
 
+import org.apache.flink.api.common.ApplicationID;
 import org.apache.flink.api.common.JobID;
-import org.apache.flink.api.common.time.Time;
-import org.apache.flink.api.java.tuple.Tuple6;
+import org.apache.flink.api.java.tuple.Tuple7;
 import org.apache.flink.runtime.blob.TransientBlobKey;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
@@ -77,7 +77,14 @@ public class TestingTaskExecutorGateway implements TaskExecutorGateway {
             submitTaskConsumer;
 
     private final Function<
-                    Tuple6<SlotID, JobID, AllocationID, ResourceProfile, String, ResourceManagerId>,
+                    Tuple7<
+                            SlotID,
+                            JobID,
+                            ApplicationID,
+                            AllocationID,
+                            ResourceProfile,
+                            String,
+                            ResourceManagerId>,
                     CompletableFuture<Acknowledge>>
             requestSlotFunction;
 
@@ -135,9 +142,10 @@ public class TestingTaskExecutorGateway implements TaskExecutorGateway {
             BiFunction<TaskDeploymentDescriptor, JobMasterId, CompletableFuture<Acknowledge>>
                     submitTaskConsumer,
             Function<
-                            Tuple6<
+                            Tuple7<
                                     SlotID,
                                     JobID,
+                                    ApplicationID,
                                     AllocationID,
                                     ResourceProfile,
                                     String,
@@ -204,15 +212,17 @@ public class TestingTaskExecutorGateway implements TaskExecutorGateway {
     public CompletableFuture<Acknowledge> requestSlot(
             SlotID slotId,
             JobID jobId,
+            ApplicationID applicationId,
             AllocationID allocationId,
             ResourceProfile resourceProfile,
             String targetAddress,
             ResourceManagerId resourceManagerId,
-            Time timeout) {
+            Duration timeout) {
         return requestSlotFunction.apply(
-                Tuple6.of(
+                Tuple7.of(
                         slotId,
                         jobId,
+                        applicationId,
                         allocationId,
                         resourceProfile,
                         targetAddress,
@@ -227,7 +237,7 @@ public class TestingTaskExecutorGateway implements TaskExecutorGateway {
 
     @Override
     public CompletableFuture<Acknowledge> submitTask(
-            TaskDeploymentDescriptor tdd, JobMasterId jobMasterId, Time timeout) {
+            TaskDeploymentDescriptor tdd, JobMasterId jobMasterId, Duration timeout) {
         return submitTaskConsumer.apply(tdd, jobMasterId);
     }
 
@@ -235,7 +245,7 @@ public class TestingTaskExecutorGateway implements TaskExecutorGateway {
     public CompletableFuture<Acknowledge> updatePartitions(
             ExecutionAttemptID executionAttemptID,
             Iterable<PartitionInfo> partitionInfos,
-            Time timeout) {
+            Duration timeout) {
         return CompletableFuture.completedFuture(Acknowledge.get());
     }
 
@@ -253,7 +263,7 @@ public class TestingTaskExecutorGateway implements TaskExecutorGateway {
 
     @Override
     public CompletableFuture<Acknowledge> releaseClusterPartitions(
-            Collection<IntermediateDataSetID> dataSetsToRelease, Time timeout) {
+            Collection<IntermediateDataSetID> dataSetsToRelease, Duration timeout) {
         releaseClusterPartitionsConsumer.accept(dataSetsToRelease);
         return CompletableFuture.completedFuture(Acknowledge.get());
     }
@@ -289,7 +299,7 @@ public class TestingTaskExecutorGateway implements TaskExecutorGateway {
 
     @Override
     public CompletableFuture<Acknowledge> cancelTask(
-            ExecutionAttemptID executionAttemptID, Time timeout) {
+            ExecutionAttemptID executionAttemptID, Duration timeout) {
         return cancelTaskFunction.apply(executionAttemptID);
     }
 
@@ -316,18 +326,18 @@ public class TestingTaskExecutorGateway implements TaskExecutorGateway {
 
     @Override
     public CompletableFuture<Acknowledge> freeSlot(
-            AllocationID allocationId, Throwable cause, Time timeout) {
+            AllocationID allocationId, Throwable cause, Duration timeout) {
         return freeSlotFunction.apply(allocationId, cause);
     }
 
     @Override
-    public void freeInactiveSlots(JobID jobId, Time timeout) {
+    public void freeInactiveSlots(JobID jobId, Duration timeout) {
         freeInactiveSlotsConsumer.accept(jobId);
     }
 
     @Override
     public CompletableFuture<TransientBlobKey> requestFileUploadByType(
-            FileType fileType, Time timeout) {
+            FileType fileType, Duration timeout) {
         return FutureUtils.completedExceptionally(new UnsupportedOperationException());
     }
 
@@ -345,7 +355,7 @@ public class TestingTaskExecutorGateway implements TaskExecutorGateway {
 
     @Override
     public CompletableFuture<SerializableOptional<String>> requestMetricQueryServiceAddress(
-            Time timeout) {
+            Duration timeout) {
         return CompletableFuture.completedFuture(SerializableOptional.empty());
     }
 
@@ -361,7 +371,7 @@ public class TestingTaskExecutorGateway implements TaskExecutorGateway {
     }
 
     @Override
-    public CompletableFuture<ThreadDumpInfo> requestThreadDump(Time timeout) {
+    public CompletableFuture<ThreadDumpInfo> requestThreadDump(Duration timeout) {
         return requestThreadDumpSupplier.get();
     }
 
@@ -391,7 +401,7 @@ public class TestingTaskExecutorGateway implements TaskExecutorGateway {
     public CompletableFuture<TaskThreadInfoResponse> requestThreadInfoSamples(
             Collection<ExecutionAttemptID> taskExecutionAttemptIds,
             ThreadInfoSamplesRequest requestParams,
-            Time timeout) {
+            Duration timeout) {
         return requestThreadInfoSamplesSupplier.get();
     }
 
@@ -401,7 +411,7 @@ public class TestingTaskExecutorGateway implements TaskExecutorGateway {
     }
 
     @Override
-    public CompletableFuture<Collection<LogInfo>> requestLogList(Time timeout) {
+    public CompletableFuture<Collection<LogInfo>> requestLogList(Duration timeout) {
         return FutureUtils.completedExceptionally(new UnsupportedOperationException());
     }
 }

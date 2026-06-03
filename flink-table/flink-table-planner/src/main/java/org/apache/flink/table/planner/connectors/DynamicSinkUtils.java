@@ -24,34 +24,40 @@ import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.operators.collect.CollectSinkOperatorFactory;
 import org.apache.flink.table.api.DataTypes;
+import org.apache.flink.table.api.InsertConflictStrategy;
 import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.TableException;
 import org.apache.flink.table.api.TableResult;
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.api.config.TableConfigOptions;
+import org.apache.flink.table.catalog.Catalog;
 import org.apache.flink.table.catalog.Column;
 import org.apache.flink.table.catalog.Column.MetadataColumn;
 import org.apache.flink.table.catalog.ContextResolvedTable;
 import org.apache.flink.table.catalog.DataTypeFactory;
 import org.apache.flink.table.catalog.ExternalCatalogTable;
+import org.apache.flink.table.catalog.ObjectIdentifier;
 import org.apache.flink.table.catalog.ResolvedCatalogTable;
 import org.apache.flink.table.catalog.ResolvedSchema;
 import org.apache.flink.table.catalog.TableDistribution;
 import org.apache.flink.table.catalog.UnresolvedIdentifier;
 import org.apache.flink.table.connector.RowLevelModificationScanContext;
 import org.apache.flink.table.connector.sink.DynamicTableSink;
+import org.apache.flink.table.connector.sink.DynamicTableSink.DataStructureConverter;
 import org.apache.flink.table.connector.sink.abilities.SupportsBucketing;
 import org.apache.flink.table.connector.sink.abilities.SupportsOverwrite;
 import org.apache.flink.table.connector.sink.abilities.SupportsPartitioning;
 import org.apache.flink.table.connector.sink.abilities.SupportsRowLevelDelete;
 import org.apache.flink.table.connector.sink.abilities.SupportsRowLevelUpdate;
+import org.apache.flink.table.connector.sink.abilities.SupportsTargetColumnWriting;
 import org.apache.flink.table.connector.sink.abilities.SupportsWritingMetadata;
 import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.connector.source.abilities.SupportsReadingMetadata;
 import org.apache.flink.table.operations.CollectModifyOperation;
 import org.apache.flink.table.operations.ExternalModifyOperation;
 import org.apache.flink.table.operations.SinkModifyOperation;
+import org.apache.flink.table.operations.ddl.CreateTableOperation;
 import org.apache.flink.table.planner.calcite.FlinkRelBuilder;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
 import org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable;
@@ -60,6 +66,7 @@ import org.apache.flink.table.planner.plan.abilities.sink.OverwriteSpec;
 import org.apache.flink.table.planner.plan.abilities.sink.RowLevelDeleteSpec;
 import org.apache.flink.table.planner.plan.abilities.sink.RowLevelUpdateSpec;
 import org.apache.flink.table.planner.plan.abilities.sink.SinkAbilitySpec;
+import org.apache.flink.table.planner.plan.abilities.sink.TargetColumnWritingSpec;
 import org.apache.flink.table.planner.plan.abilities.sink.WritingMetadataSpec;
 import org.apache.flink.table.planner.plan.nodes.calcite.LogicalSink;
 import org.apache.flink.table.planner.plan.schema.TableSourceTable;
@@ -89,6 +96,8 @@ import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexUtil;
 
+import javax.annotation.Nullable;
+
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -102,6 +111,7 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
+import static org.apache.flink.table.planner.hint.FlinkHints.mergeTableOptions;
 import static org.apache.flink.table.planner.utils.ShortcutUtils.unwrapContext;
 import static org.apache.flink.table.planner.utils.ShortcutUtils.unwrapTypeFactory;
 import static org.apache.flink.table.types.logical.utils.LogicalTypeCasts.supportsAvoidingCast;
@@ -133,7 +143,7 @@ public final class DynamicSinkUtils {
         final ContextResolvedTable contextResolvedTable =
                 ContextResolvedTable.anonymous("collect", catalogTable);
 
-        final DataType consumedDataType = fixCollectDataType(dataTypeFactory, schema);
+        final DataType consumedDataType = deriveCollectDataType(dataTypeFactory, schema);
 
         final String zone = configuration.get(TableConfigOptions.LOCAL_TIME_ZONE);
         final ZoneId zoneId =
@@ -163,7 +173,8 @@ public final class DynamicSinkUtils {
                 Collections.emptyMap(), // staticPartitions
                 null, // targetColumns
                 false,
-                tableSink);
+                tableSink,
+                null); // conflictStrategy
     }
 
     /**
@@ -186,7 +197,8 @@ public final class DynamicSinkUtils {
                 Collections.emptyMap(),
                 null, // targetColumns
                 false,
-                tableSink);
+                tableSink,
+                externalModifyOperation.getConflictStrategy().orElse(null));
     }
 
     /**
@@ -206,7 +218,44 @@ public final class DynamicSinkUtils {
                 sinkModifyOperation.getStaticPartitions(),
                 sinkModifyOperation.getTargetColumns(),
                 sinkModifyOperation.isOverwrite(),
-                sink);
+                sink,
+                sinkModifyOperation.getConflictStrategy().orElse(null));
+    }
+
+    /**
+     * Converts a given {@link DynamicTableSink} to a {@link RelNode}. It adds helper projections if
+     * necessary.
+     */
+    public static RelNode convertCreateTableAsToRel(
+            FlinkRelBuilder relBuilder,
+            RelNode input,
+            Catalog catalog,
+            CreateTableOperation createTableOperation,
+            Map<String, String> staticPartitions,
+            boolean isOverwrite,
+            DynamicTableSink sink) {
+        final ResolvedCatalogTable catalogTable = createTableOperation.getCatalogTable();
+
+        final ObjectIdentifier identifier = createTableOperation.getTableIdentifier();
+
+        final ContextResolvedTable contextResolvedTable;
+        if (createTableOperation.isTemporary()) {
+            contextResolvedTable = ContextResolvedTable.temporary(identifier, catalogTable);
+        } else {
+            contextResolvedTable =
+                    ContextResolvedTable.permanent(identifier, catalog, catalogTable);
+        }
+
+        return convertSinkToRel(
+                relBuilder,
+                input,
+                Collections.emptyMap(),
+                contextResolvedTable,
+                staticPartitions,
+                null,
+                isOverwrite,
+                sink,
+                null); // conflictStrategy
     }
 
     private static RelNode convertSinkToRel(
@@ -217,7 +266,16 @@ public final class DynamicSinkUtils {
             Map<String, String> staticPartitions,
             int[][] targetColumns,
             boolean isOverwrite,
-            DynamicTableSink sink) {
+            DynamicTableSink sink,
+            @Nullable InsertConflictStrategy conflictStrategy) {
+        if (!dynamicOptions.isEmpty()) {
+            contextResolvedTable =
+                    contextResolvedTable.copy(
+                            mergeTableOptions(
+                                    dynamicOptions,
+                                    contextResolvedTable.getResolvedTable().getOptions()));
+        }
+
         final DataTypeFactory dataTypeFactory =
                 unwrapContext(relBuilder).getCatalogManager().getDataTypeFactory();
         final FlinkTypeFactory typeFactory = unwrapTypeFactory(relBuilder);
@@ -241,7 +299,8 @@ public final class DynamicSinkUtils {
                 isOverwrite,
                 sink,
                 contextResolvedTable.getResolvedTable(),
-                sinkAbilitySpecs);
+                sinkAbilitySpecs,
+                targetColumns);
 
         // rewrite rel node for delete
         if (isDelete) {
@@ -291,6 +350,8 @@ public final class DynamicSinkUtils {
         }
         final RelNode finalQuery = relBuilder.build();
 
+        // Pass conflictStrategy as-is (may be null if not specified by user)
+        // The null value is used downstream to detect if ON CONFLICT was explicitly specified
         return LogicalSink.create(
                 finalQuery,
                 hints,
@@ -298,7 +359,8 @@ public final class DynamicSinkUtils {
                 sink,
                 staticPartitions,
                 targetColumns,
-                sinkAbilitySpecs.toArray(new SinkAbilitySpec[0]));
+                sinkAbilitySpecs.toArray(new SinkAbilitySpec[0]),
+                conflictStrategy);
     }
 
     /** Checks if the given query can be written into the given sink's table schema. */
@@ -358,7 +420,7 @@ public final class DynamicSinkUtils {
                 throw createSchemaMismatchException(
                         String.format(
                                 "Incompatible types for sink column '%s' at position %s.",
-                                sinkFields.get(i).getName(), i),
+                                sinkFields.get(i).getName(), i + 1),
                         tableDebugName,
                         queryFields,
                         sinkFields);
@@ -847,17 +909,23 @@ public final class DynamicSinkUtils {
 
     // --------------------------------------------------------------------------------------------
 
-    /** Temporary solution until we drop legacy types. */
-    private static DataType fixCollectDataType(
+    /**
+     * Prepares a {@link DataType} for {@link DataStructureConverter} from {@link ResolvedSchema}.
+     */
+    private static DataType deriveCollectDataType(
             DataTypeFactory dataTypeFactory, ResolvedSchema schema) {
+        // TODO erase the conversion class earlier when dropping legacy code, esp. FLINK-22321
         final DataType fixedDataType =
                 DataTypeUtils.transform(
                         dataTypeFactory,
                         schema.toSourceRowDataType(),
                         TypeTransformations.legacyRawToTypeInfoRaw(),
                         TypeTransformations.legacyToNonLegacy());
-        // TODO erase the conversion class earlier when dropping legacy code, esp. FLINK-22321
-        return TypeConversions.fromLogicalToDataType(fixedDataType.getLogicalType());
+        final DataType defaultDataType =
+                TypeConversions.fromLogicalToDataType(fixedDataType.getLogicalType());
+
+        // Structured types might not use default conversion classes.
+        return DataTypeUtils.alignStructuredTypes(dataTypeFactory, defaultDataType);
     }
 
     /**
@@ -940,7 +1008,8 @@ public final class DynamicSinkUtils {
                                                             adjustByVirtualColumns(columns, pos);
                                                     return rexBuilder.makeAbstractCast(
                                                             expectedRelDataType,
-                                                            relBuilder.field(posAdjusted));
+                                                            relBuilder.field(posAdjusted),
+                                                            false);
                                                 }))
                         .collect(Collectors.toList());
 
@@ -957,7 +1026,8 @@ public final class DynamicSinkUtils {
             boolean isOverwrite,
             DynamicTableSink sink,
             ResolvedCatalogTable table,
-            List<SinkAbilitySpec> sinkAbilitySpecs) {
+            List<SinkAbilitySpec> sinkAbilitySpecs,
+            int[][] targetColumns) {
         table.getDistribution()
                 .ifPresent(
                         distribution ->
@@ -969,6 +1039,8 @@ public final class DynamicSinkUtils {
         validateAndApplyOverwrite(tableDebugName, isOverwrite, sink, sinkAbilitySpecs);
 
         validateAndApplyMetadata(tableDebugName, sink, table.getResolvedSchema(), sinkAbilitySpecs);
+
+        validateAndApplyTargetColumns(sink, targetColumns, sinkAbilitySpecs);
     }
 
     /**
@@ -1247,12 +1319,26 @@ public final class DynamicSinkUtils {
                         createConsumedType(schema, sink)));
     }
 
+    private static void validateAndApplyTargetColumns(
+            DynamicTableSink sink, int[][] targetColumns, List<SinkAbilitySpec> sinkAbilitySpecs) {
+        if (targetColumns == null || targetColumns.length == 0) {
+            return;
+        }
+
+        if (!(sink instanceof SupportsTargetColumnWriting)) {
+            // Ignore target columns if the sink doesn't support it.
+            return;
+        }
+
+        sinkAbilitySpecs.add(new TargetColumnWritingSpec(targetColumns));
+    }
+
     /**
      * Returns the {@link DataType} that a sink should consume as the output from the runtime.
      *
      * <p>The format looks as follows: {@code PHYSICAL COLUMNS + PERSISTED METADATA COLUMNS}
      */
-    private static RowType createConsumedType(ResolvedSchema schema, DynamicTableSink sink) {
+    public static RowType createConsumedType(ResolvedSchema schema, DynamicTableSink sink) {
         final Map<String, DataType> metadataMap = extractMetadataMap(sink);
 
         final Stream<RowField> physicalFields =
